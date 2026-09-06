@@ -1,0 +1,42 @@
+import { expect, test } from '@playwright/test'
+import { ACCOUNTS, login, zh } from './fixtures'
+
+/**
+ * 用例①：店主登录 → 切店（若多店）→ 商品 CRUD 全通。
+ *
+ * seed 出来的 A 店店主名下只有一家店（`apps/api/src/seed.ts`），登录不会走
+ * `needChooseShop` 分支——`<LoginPage>` 内置的选店逻辑在多店场景下才会出现
+ * `<ShopChooserPage>`，这里没有「切店」这一步可测，故跳过（见 `ShopSwitcher.tsx`
+ * 的注释：只有一家店时它自己也不画切换器）。
+ */
+test('店主登录后商品增删改查全通', async ({ page }) => {
+  await login(page, ACCOUNTS.ownerA.phone, ACCOUNTS.ownerA.password)
+
+  await page.goto('/goods')
+  await expect(page.getByRole('button', { name: zh('新增商品') })).toBeVisible()
+
+  // 抽屉表单的「名称」与顶部搜索表单的「名称」重名，用 .ant-drawer 容器把定位限定在抽屉内。
+  const drawer = page.locator('.ant-drawer')
+  const name = `E2E商品${Date.now()}`
+
+  // 新建
+  await page.getByRole('button', { name: zh('新增商品') }).click()
+  await drawer.getByLabel('名称').fill(name)
+  await drawer.getByLabel('价格（分）').fill('999')
+  await drawer.getByRole('button', { name: zh('保存') }).click()
+  await expect(page.getByRole('row', { name: new RegExp(name) })).toBeVisible()
+
+  // 编辑
+  const row = page.getByRole('row', { name: new RegExp(name) })
+  await row.getByRole('button', { name: zh('编辑') }).click()
+  const newName = `${name}-已改`
+  await drawer.getByLabel('名称').fill(newName)
+  await drawer.getByRole('button', { name: zh('保存') }).click()
+  await expect(page.getByRole('row', { name: new RegExp(newName) })).toBeVisible()
+
+  // 删除
+  const updatedRow = page.getByRole('row', { name: new RegExp(newName) })
+  await updatedRow.getByRole('button', { name: zh('删除') }).click()
+  await page.getByRole('button', { name: zh('确定') }).click()
+  await expect(page.getByRole('row', { name: new RegExp(newName) })).toHaveCount(0)
+})

@@ -1,0 +1,109 @@
+/**
+ * `{{slug}}.rules.ts` 的单测。
+ *
+ * 这份 spec 存在的意义不是「覆盖率」，是**边界值**：0 元、负数、名字全是空格、
+ * 超长、非法状态——这些是运营真的会输进来的东西，而它们全都不需要数据库就能测。
+ * 规则一旦被搬回 service，这里的每一条都会变成「起 Nest + 连库 + 造数据」才能跑，
+ * 于是它们会先被 skip，再被删掉。
+ *
+ * @packageDocumentation
+ */
+
+import { describe, expect, it } from 'vitest'
+
+import {
+  normalize{{Pascal}}Name,
+  validate{{Pascal}}Input,
+  validate{{Pascal}}Patch,
+  warnActiveWithoutPrice,
+  {{CONST}}_NAME_MAX,
+  {{CONST}}_PRICE_CENTS_MAX,
+} from './{{slug}}.rules'
+
+/** 取出违规字段名，断言里只关心「哪个字段不合法」。 */
+const fieldsOf = (vs: ReadonlyArray<{ field: string }>): string[] => vs.map((v) => v.field)
+
+describe('normalize{{Pascal}}Name', () => {
+  it('去首尾空白并把连续空白压成一个', () => {
+    expect(normalize{{Pascal}}Name('  甲   乙  ')).toBe('甲 乙')
+  })
+
+  it('非字符串一律归一成空串（而不是抛）', () => {
+    // 归一函数不负责报错，报错是 validate 的事。两件事混在一起的话，
+    // 「名字是数字 123」会在归一阶段就炸，而错误信息里没有字段名。
+    expect(normalize{{Pascal}}Name(123)).toBe('')
+    expect(normalize{{Pascal}}Name(undefined)).toBe('')
+  })
+})
+
+describe('validate{{Pascal}}Input（新建）', () => {
+  const ok = { name: '甲', priceCents: 100, status: 'ACTIVE' as const }
+
+  it('合法输入没有违规', () => {
+    expect(validate{{Pascal}}Input(ok)).toEqual([])
+  })
+
+  it('名字全是空白 = 空', () => {
+    expect(fieldsOf(validate{{Pascal}}Input({ ...ok, name: '    ' }))).toEqual(['name'])
+  })
+
+  it('名字超长', () => {
+    expect(fieldsOf(validate{{Pascal}}Input({ ...ok, name: '甲'.repeat({{CONST}}_NAME_MAX + 1) }))).toEqual([
+      'name',
+    ])
+  })
+
+  it('名字刚好到上限是合法的（边界包含）', () => {
+    expect(validate{{Pascal}}Input({ ...ok, name: '甲'.repeat({{CONST}}_NAME_MAX) })).toEqual([])
+  })
+
+  it('金额为 0 合法（免费项目是真实场景）', () => {
+    expect(validate{{Pascal}}Input({ ...ok, priceCents: 0 })).toEqual([])
+  })
+
+  it('金额为负 / 小数 / 超上限都不合法', () => {
+    expect(fieldsOf(validate{{Pascal}}Input({ ...ok, priceCents: -1 }))).toEqual(['priceCents'])
+    expect(fieldsOf(validate{{Pascal}}Input({ ...ok, priceCents: 1.5 }))).toEqual(['priceCents'])
+    expect(
+      fieldsOf(validate{{Pascal}}Input({ ...ok, priceCents: {{CONST}}_PRICE_CENTS_MAX + 1 })),
+    ).toEqual(['priceCents'])
+  })
+
+  it('状态不在枚举里不合法', () => {
+    expect(fieldsOf(validate{{Pascal}}Input({ ...ok, status: 'WHATEVER' }))).toEqual(['status'])
+  })
+
+  it('必填字段缺失时逐个报出来，不是只报第一个', () => {
+    // 只报第一个的话，前端要提交五次才能把表单填对。
+    expect(fieldsOf(validate{{Pascal}}Input({}))).toEqual(['name', 'priceCents', 'status'])
+  })
+})
+
+describe('validate{{Pascal}}Patch（修改）', () => {
+  it('空 patch 合法：什么都不改是允许的', () => {
+    expect(validate{{Pascal}}Patch({})).toEqual([])
+  })
+
+  it('只校验给了的字段', () => {
+    expect(validate{{Pascal}}Patch({ priceCents: 1 })).toEqual([])
+    expect(fieldsOf(validate{{Pascal}}Patch({ priceCents: -1 }))).toEqual(['priceCents'])
+  })
+
+  it('显式传空名字仍然不合法（与「没传」区分得开）', () => {
+    expect(fieldsOf(validate{{Pascal}}Patch({ name: '   ' }))).toEqual(['name'])
+  })
+})
+
+describe('warnActiveWithoutPrice', () => {
+  it('已启用且金额为 0 时给提示，但不拦', () => {
+    expect(warnActiveWithoutPrice({ status: 'ACTIVE', priceCents: 0 })).not.toBeNull()
+  })
+
+  it('草稿状态不提示', () => {
+    expect(warnActiveWithoutPrice({ status: 'DRAFT', priceCents: 0 })).toBeNull()
+  })
+
+  it('已启用且有金额不提示', () => {
+    expect(warnActiveWithoutPrice({ status: 'ACTIVE', priceCents: 1 })).toBeNull()
+  })
+})

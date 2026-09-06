@@ -1,0 +1,34 @@
+# @taizan/app-client
+
+C 端会员 App（Expo + expo-router），对应蓝图 §5.4 / 任务 T3-7。装配 `@taizan/app-ui`，页面本身不直接碰 `fetch`。
+
+## 版本选择
+
+与来源仓库 knowledge（`apps/app-student`）保持一致，选用 **Expo SDK 57**：`expo ~57.0.19`、`react 19.2.3`、`react-native 0.86.3`、`expo-router ~57.0.19`（Expo 从 SDK 57 起把配套包版本号与 SDK 号统一，`expo-router`/`expo-constants`/`expo-updates` 等包版本号直接对齐 `57.x`）。没有另选「最新 SDK」——57 就是写这份代码时的最新稳定版。
+
+## 本地开发
+
+```bash
+pnpm install                      # 在仓库根目录执行一次即可
+pnpm -F @taizan/app-client start  # 启动 Metro，二维码用 Expo Go 扫
+```
+
+真机联调：手机装 **Expo Go**，与开发机在同一局域网，扫上面命令打印的二维码。若手机连不上（NAT/VPN/多网卡环境），用 `pnpm -F @taizan/app-client start -- --tunnel`。
+
+## baseURL / 租户 slug 配置
+
+`src/api.ts` 按下面优先级取值，**不写死任何域名做兜底**（knowledge 的 `apps/app-student` 把 `https://apiknow.taizan.vip/api` 焊进代码当 fallback，换环境要改代码重发版，是本项目要避免的反面教材）：
+
+1. 环境变量 `EXPO_PUBLIC_API_BASE` / `EXPO_PUBLIC_TENANT_SLUG`（Expo 会在打包时把 `EXPO_PUBLIC_*` 内联进产物，适合按 EAS Build profile 覆盖）；
+2. 其次是 `app.json` 里 `expo.extra.apiBase` / `expo.extra.tenantSlug`（当前示例值指向本机 `http://localhost:3000/api`，`tenantSlug: "demo"`，联调前请改成真实值）。
+
+两者都没配置时，`/api/client/*` 会因为拿不到租户直接报「店铺不存在」——所以启动页会先判断 `tenantSlug` 是否为空，为空就跳到 `tenant-missing` 页面提示去配置，而不是静默连到某家店。
+
+## iOS 虚拟商品支付合规提示
+
+App Store 审核规则要求「数字/虚拟商品或服务」必须走 App 内购（或专门的虚拟支付通道），不能引导用户走微信支付等站外收款方式。本骨架版本尚未接入支付网关，`app/goods/[id].tsx` 里对此做了明确处理：**iOS 平台直接隐藏购买按钮**（`Platform.OS === 'ios'` 时不渲染），而不是弹一个「即将上线」糊弄过去——那样会造出一个「点了没反应」的假按钮，且审核时同样会被判定违规。真正接入虚拟支付时请参考 `wechat-virtual-pay` 相关文档，并在该分支里替换为真实的 `requestVirtualPayment` 调用。
+
+## 已知未覆盖点
+
+- `GET /api/client/goods` 目前只有列表接口，没有单条详情接口（`apps/api` 的文件头注释写明这条路由存在的唯一理由是证明 C 端也被租户隔离住了）。详情页因此吃列表页传来的字段，不是独立请求。
+- 会员登录走的是联调用的 `login-dev`（仅凭手机号签发 token），真实短信/微信登录见后续任务。

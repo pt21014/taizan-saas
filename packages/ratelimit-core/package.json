@@ -1,0 +1,38 @@
+{
+  "name": "@taizan/ratelimit-core",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "description": "三维度限流决策（客户端 IP / 入口 IP / 账号）+ resolveIps 从 X-Forwarded-For 末尾倒数取可信客户端 IP + Redis 不可用时退回进程内计数（弱化但不放行）。零框架依赖，store 靠注入。",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@taizan/eslint-config": "workspace:*",
+    "@taizan/tsconfig": "workspace:*",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

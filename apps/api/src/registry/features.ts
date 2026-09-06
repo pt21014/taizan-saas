@@ -1,0 +1,39 @@
+/**
+ * 五张注册表之三：**套餐功能项**（蓝图 §4.5、§7 扩展点⑤）。
+ *
+ * 功能项 = 平台在套餐里能勾掉的一个能力。`Plan.features` 是三态：
+ * `null` 全部可用 / `[]` 一个都不给 / 非空数组只给列出的这些。
+ *
+ * 两条硬约束（由 `billing-routes.spec.ts`，spec 8，T1-5 守）：
+ * 1. `pathPrefixes` 必须与真实 `@Controller` 前缀对得上——写错等于闸门静默失效，
+ *    接口照常通，而平台以为自己锁住了；
+ * 2. **不许盖住 {@link ALWAYS_WRITABLE_PREFIXES}**（`/api/admin/auth`、`/api/admin/billing`、
+ *    `/api/admin/bootstrap`）。盖住了就是「到期 → 后台只读 → 续不了费 → 永远到期」的死循环，
+ *    而平台恰恰是想收钱的那一方。
+ *
+ * @packageDocumentation
+ */
+
+import {
+  ALWAYS_WRITABLE_PREFIXES,
+  assertFeatureNotShadowingRenewal,
+  type FeatureDef,
+} from '@taizan/billing-rules'
+
+/** 全应用功能项表。 */
+export const FEATURES: readonly FeatureDef[] = [
+  {
+    key: 'goods',
+    name: '商品模块',
+    // 只拦写不拦读：套餐没含商品模块时，已有商品仍然看得见（不然商家会以为数据丢了），
+    // 只是新增/改/删被拦。这是「降级」而不是「删功能」。
+    writeOnly: true,
+    pathPrefixes: ['/api/admin/goods'],
+  },
+]
+
+/** 续费白名单前缀（框架常量，re-export 便于本应用侧查阅）。 */
+export { ALWAYS_WRITABLE_PREFIXES }
+
+// 加载期就把「功能项盖住了续费路径」这件事炸出来，而不是等到某个商家到期那天。
+assertFeatureNotShadowingRenewal(FEATURES)

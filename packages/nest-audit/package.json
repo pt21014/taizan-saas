@@ -1,0 +1,58 @@
+{
+  "name": "@taizan/nest-audit",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "description": "审计（蓝图 §4.8）：@Audit() 装饰器 + 拦截器自动记录、AuditService.record/recordPlatform 手动补充（事务/cron/队列）、请求体脱敏（复用 @taizan/nest-core 的 redact）、租户域 AuditLog / 平台域 PlatformAuditLog 双表、写失败不吞并计数到 /health 的 auditFailures。",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@taizan/contracts": "workspace:*",
+    "@taizan/nest-core": "workspace:*",
+    "@taizan/nest-prisma": "workspace:*"
+  },
+  "peerDependencies": {
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@nestjs/common": "^11.0.1",
+    "@nestjs/core": "^11.0.1",
+    "@nestjs/platform-express": "^11.0.1",
+    "@nestjs/testing": "^11.0.1",
+    "@taizan/eslint-config": "workspace:*",
+    "@taizan/tsconfig": "workspace:*",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "@types/supertest": "^6.0.2",
+    "eslint": "^9.17.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "supertest": "^7.0.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

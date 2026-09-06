@@ -1,0 +1,46 @@
+{
+  "name": "@taizan/provision",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "description": "租户开通的唯一一条路：平台后台开通 / 官网自助注册 / 批量导入都调 provisionTenant()。泛型 tx 鸭子类型，不 import @prisma/client，零框架依赖；配套 spec 14 的扫描器盯着别处再拼一遍建租户事务。",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./arch": {
+      "types": "./dist/arch/index.d.ts",
+      "import": "./dist/arch/index.js",
+      "require": "./dist/arch/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run && node scripts/check-dist-identity.mjs",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@taizan/billing-rules": "workspace:*"
+  },
+  "devDependencies": {
+    "@taizan/eslint-config": "workspace:*",
+    "@taizan/tsconfig": "workspace:*",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

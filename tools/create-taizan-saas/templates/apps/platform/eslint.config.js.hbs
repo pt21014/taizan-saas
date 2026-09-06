@@ -1,0 +1,9 @@
+// 照抄 packages/admin-ui/eslint.config.js：规则统一维护在 {{scope}}/eslint-config 里。
+import base from '{{scope}}/eslint-config'
+
+export default [
+  ...base,
+  {
+    ignores: ['playwright-report/**', 'test-results/**'],
+  },
+]

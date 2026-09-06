@@ -1,0 +1,489 @@
+/**
+ * **蓝图 §8 的总目录**：16 条架构约束，一条不落地摆在一个文件里。
+ *
+ * 这个文件本身不是第 17 条约束，它是**清单**——回答的是「16 条现在到底有几条真的在跑」
+ * 这个问题。散在 14 个 spec 文件里的时候，这个问题只能靠人去数，而人数错的方向永远是
+ * 「以为都在跑」。
+ *
+ * ## 三种落地形态
+ *
+ * | 形态 | 本文件做什么 | 哪几条 |
+ * |---|---|---|
+ * | **委派** | 断言那份 spec 文件存在、有断言、且自称是这一条 | 1 3 4 5 6 7 8 12 13 14 15 16 |
+ * | **就地实现** | 蓝图点名了但没有独立文件的，判定直接写在这里 | 9 10 11 |
+ * | **框架包内** | 判定对象是框架包自己的纯函数，跑在 `packages/*` 的单测里 | 2 |
+ *
+ * ## 委派为什么只断言「文件在、有断言」而不重跑一遍
+ *
+ * 重跑等于把同一份判定写两遍，两遍会走偏（这正是 spec 6 / spec 14 守的那类故障）。
+ * `pnpm test:arch` 跑的是**整个 `test/arch/` 目录**，那 14 份 spec 本来就会跑；
+ * 本文件补的是它们各自补不了的那一件事——**「有人把某一份删了 / 掏空了，套件依然全绿」**。
+ * 删掉 `guard-default-deny.spec.ts` 之后没有任何东西会红，除了这里。
+ *
+ * ## 编号是输出格式的一部分
+ *
+ * `describe` 一律写成 `spec NN · 标题`，两位数补零——vitest 的输出按字典序排，
+ * `spec 10` 排在 `spec 2` 前面这种事会让人以为漏跑了。
+ *
+ * @packageDocumentation
+ */
+
+import {
+  formatEncryptedColumnsReport,
+  planRotation,
+  verifyEncryptedColumns,
+  type EncryptedColumn,
+} from '@taizan/crypto'
+import {
+  ENCRYPTED_COLUMNS,
+  formatSchemaLintReport,
+  lintSchemaConventions,
+  parsePrismaSchema,
+  runSchemaLintSentinel,
+  type PrismaSchemaAst,
+} from '@taizan/prisma-base'
+import {
+  SUPPORTED_OPERATIONS,
+  TenantScopeError,
+  isTenantScopeError,
+  planTenantScope,
+  type PlanTenantScopeParams,
+  type ScopePlan,
+} from '@taizan/tenant-scope'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { describe, expect, it } from 'vitest'
+
+import { APP_ROOT, readSchemaFiles } from './_helpers'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 目录本身
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 一条架构约束在本仓库里的落地方式。 */
+interface SpecEntry {
+  /** 蓝图 §8 的编号，1–16。 */
+  n: number
+  /** 中文标题，与蓝图表格的「断言内容」一栏对应。 */
+  title: string
+  /**
+   * 落地形态：
+   * - `delegated`：判定在 `test/arch/<file>` 里；
+   * - `inline`：判定就在本文件里；
+   * - `package`：判定在框架包的单测里（`file` 指向包内路径，仓库外可能不存在）。
+   */
+  kind: 'delegated' | 'inline' | 'package'
+  /** 委派/包内形态的文件路径（相对仓库根）。 */
+  file?: string
+}
+
+/**
+ * 蓝图 §8 的 16 条，顺序即编号。
+ *
+ * 改这张表的门槛是刻意高的：加一条要么给它一个文件，要么在本文件里写判定，
+ * 没有第三种选项——「先登记，回头补」的那一栏在别的项目里从来没被补上过。
+ */
+const SPECS: readonly SpecEntry[] = [
+  { n: 1, title: 'TENANT_MODELS ↔ schema 双向比对', kind: 'delegated', file: 'tenant-models' },
+  {
+    n: 2,
+    title: '租户隔离决策函数的行为用例（≥25 条）',
+    kind: 'package',
+    file: 'packages/tenant-scope/src/plan.spec.ts',
+  },
+  { n: 3, title: 'prisma.raw 逃生口的允许清单', kind: 'delegated', file: 'raw-usage' },
+  {
+    n: 4,
+    title: '业务模块禁止手写 tenantId 过滤条件',
+    kind: 'delegated',
+    file: 'no-manual-tenant-filter',
+  },
+  { n: 5, title: '默认拒绝 + 公开路由必须限流', kind: 'delegated', file: 'guard-default-deny' },
+  {
+    n: 6,
+    title: '权限点注册表 ↔ @RequirePermission 双向对账',
+    kind: 'delegated',
+    file: 'permission-registry',
+  },
+  { n: 7, title: '菜单 componentKey ↔ 前端映射表对账', kind: 'delegated', file: 'menu-route-map' },
+  { n: 8, title: '续费白名单 ↔ 控制器前缀 ↔ 功能项', kind: 'delegated', file: 'billing-routes' },
+  { n: 9, title: '金额列：禁 Decimal，price/amount/fee/balance 必须 *Cents Int', kind: 'inline' },
+  {
+    n: 10,
+    title:
+      '主键 / 枚举 / 索引：@id 是 String、状态列是 enum、租户表有 @@index([tenantId, id])、软删表唯一索引含 deletedAt',
+    kind: 'inline',
+  },
+  { n: 11, title: '加密列三处对账：注册表 ↔ schema 的 *Enc 列 ↔ 轮换脚本覆盖', kind: 'inline' },
+  {
+    n: 12,
+    title: '集群安全：禁裸 setInterval / 裸 @Cron',
+    kind: 'delegated',
+    file: 'cluster-safe',
+  },
+  { n: 13, title: '禁止直接读 x-forwarded-for / req.ip', kind: 'delegated', file: 'ip-source' },
+  {
+    n: 14,
+    title: '建租户只有 @taizan/provision 一条路',
+    kind: 'delegated',
+    file: 'provision-single-path',
+  },
+  {
+    n: 15,
+    title: 'prisma/schema/00-base 的 sha256 与 base.lock.json 一致',
+    kind: 'delegated',
+    file: 'base-schema-integrity',
+  },
+  {
+    n: 16,
+    title: 'TenantMiddleware 的 forRoutes/exclude ↔ 控制器前缀',
+    kind: 'delegated',
+    file: 'tenant-middleware',
+  },
+]
+
+/**
+ * 不在蓝图 §8 编号内、但同样跑在 `test/arch/` 里的额外约束。
+ *
+ * 登记在这里只为一件事：让下面「目录覆盖了目录里的每一份 spec」那条断言不会因为
+ * 新增了一份编号外的 spec 而误红。它们各自的价值在各自的文件头里写着。
+ */
+const EXTRA_SPECS: readonly { file: string; why: string }[] = [
+  { file: 'guard-order', why: '守卫链顺序（蓝图 §4.3）：顺序错了的表现是放行，不是报错。' },
+  { file: 'plan-order-fulfill', why: 'T1-5：把钱变成权益的代码只能有一份。' },
+  {
+    file: 'response-shape',
+    why:
+      '蓝图 §9「knowledge CLAUDE.md 8 条不变量」第 8 条点名的「统一响应包」spec：' +
+      '控制器不许 res.json(/res.send( 绕过信封、BizException 首参不许是裸数字字面量。' +
+      '不在 §8 的 16 条编号内，登记在这里而不是 SPECS。',
+  },
+]
+
+const ARCH_DIR = resolve(APP_ROOT, 'test', 'arch')
+const REPO_ROOT = resolve(APP_ROOT, '..', '..')
+
+/** 目录里实际存在的 spec 文件名（去掉 `.spec.ts`），不含本文件。 */
+const presentSpecFiles = readdirSync(ARCH_DIR)
+  .filter((f) => f.endsWith('.spec.ts') && f !== 'index.spec.ts')
+  .map((f) => f.replace(/\.spec\.ts$/, ''))
+  .sort()
+
+const delegated = SPECS.filter((s) => s.kind === 'delegated')
+
+describe('蓝图 §8 目录：16 条一条不少', () => {
+  it('编号 1–16 连续、不重、不缺', () => {
+    expect(SPECS.map((s) => s.n)).toEqual(Array.from({ length: 16 }, (_, i) => i + 1))
+  })
+
+  it('每一条都有落地形态，没有「待补」', () => {
+    // 这条是本文件存在的理由。一旦有人把某一条降级成 it.todo，先在这里红。
+    const unlanded = SPECS.filter((s) => s.kind === 'delegated' && s.file === undefined)
+    expect(unlanded.map((s) => s.n)).toEqual([])
+  })
+
+  it('目录覆盖了 test/arch 下的每一份 spec（新增 spec 必须登记）', () => {
+    const known = new Set([...delegated.map((s) => s.file), ...EXTRA_SPECS.map((e) => e.file)])
+    const unregistered = presentSpecFiles.filter((f) => !known.has(f))
+    expect(
+      unregistered,
+      '这些 spec 文件没在 index.spec.ts 的目录里登记：要么它对应蓝图某一条（填进 SPECS），' +
+        '要么它是编号外的额外约束（填进 EXTRA_SPECS 并写明理由）。',
+    ).toEqual([])
+  })
+
+  it('登记的额外约束都写了理由', () => {
+    for (const extra of EXTRA_SPECS) {
+      expect(extra.why.length, `${extra.file} 的理由为空`).toBeGreaterThan(10)
+    }
+  })
+})
+
+describe.each(delegated.map((s) => [String(s.n).padStart(2, '0'), s] as const))(
+  'spec %s · 委派',
+  (_num, spec) => {
+    const file = join(ARCH_DIR, `${spec.file}.spec.ts`)
+
+    it(`${spec.title} —— test/arch/${spec.file}.spec.ts 存在`, () => {
+      expect(
+        existsSync(file),
+        `蓝图 §8 第 ${spec.n} 条的 spec 文件不见了：${spec.file}.spec.ts`,
+      ).toBe(true)
+    })
+
+    it('那份 spec 里真的有断言（被掏空的 spec 和通过的 spec 一样绿）', () => {
+      const source = readFileSync(file, 'utf8')
+      const its = source.match(/\bit(?:\.each\([^)]*\))?\s*\(/g) ?? []
+      expect(its.length, `${spec.file}.spec.ts 里一条 it 都没有`).toBeGreaterThan(0)
+      const todos = source.match(/\bit\.todo\s*\(/g) ?? []
+      expect(
+        todos.length,
+        `${spec.file}.spec.ts 里有 ${todos.length} 条 it.todo。` +
+          '架构约束不允许「先占位、回头补」——占位的那条从来没被补上过。',
+      ).toBe(0)
+    })
+
+    it('那份 spec 自称是这一条（文件头写明蓝图编号）', () => {
+      // 防的是「文件还在、内容被换成别的东西」：文件名和内容对不上的时候，
+      // 上面两条依然全绿，而蓝图的这一条其实已经没人守了。
+      const head = readFileSync(file, 'utf8').slice(0, 2000)
+      expect(
+        new RegExp(`spec\\s*${spec.n}\\b`).test(head),
+        `${spec.file}.spec.ts 的文件头没写「spec ${spec.n}」。` +
+          '编号是这份 spec 与蓝图之间唯一的链接，去掉之后没人知道它守的是哪一条。',
+      ).toBe(true)
+    })
+  },
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// spec 2 · 隔离决策函数（判定在 @taizan/tenant-scope，这里只做冒烟 + 存在性）
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('spec 02 · 租户隔离决策函数的行为用例', () => {
+  const REGISTERED = new Set(['Scoped'])
+  const T = 'tenant-A'
+  const OTHER = 'tenant-B'
+  const plan = (
+    operation: string,
+    args?: unknown,
+    overrides: Partial<PlanTenantScopeParams> = {},
+  ): ScopePlan =>
+    planTenantScope({
+      model: 'Scoped',
+      operation,
+      args,
+      tenantId: T,
+      registered: REGISTERED,
+      ...overrides,
+    })
+  const argsOf = (p: ScopePlan): Record<string, unknown> => {
+    if (p.action === 'passthrough') throw new Error('passthrough 没有 args')
+    return p.args
+  }
+
+  it('完整用例集在 packages/tenant-scope/src/plan.spec.ts，且 ≥25 条', () => {
+    // 生成器产出的项目里没有 packages/ 目录（框架是从 npm 装的），那时这条自动跳过——
+    // 判定函数本身的单测跟着包走，不该要求下游仓库里有它的源码。
+    const file = join(REPO_ROOT, 'packages', 'tenant-scope', 'src', 'plan.spec.ts')
+    if (!existsSync(file)) {
+      expect(SUPPORTED_OPERATIONS.length).toBeGreaterThan(0)
+      return
+    }
+    const source = readFileSync(file, 'utf8')
+    const its = (source.match(/\bit(?:\.each)?\s*\(/g) ?? []).length
+    expect(its, '蓝图 §8 第 2 条要求 ≥25 个行为用例').toBeGreaterThanOrEqual(25)
+  })
+
+  it('冒烟 ①：where 类操作用 AND 包裹，调用方覆盖不掉', () => {
+    expect(argsOf(plan('findMany', { where: { tenantId: OTHER } })).where).toEqual({
+      AND: [{ tenantId: T }, { tenantId: OTHER }],
+    })
+  })
+
+  it('冒烟 ②：create 注入 tenantId，伪造别人的直接抛错', () => {
+    expect(argsOf(plan('create', { data: { title: 'x' } })).data).toEqual({
+      title: 'x',
+      tenantId: T,
+    })
+    expect(() => plan('create', { data: { tenantId: OTHER } })).toThrow(TenantScopeError)
+  })
+
+  it('冒烟 ③：findUnique 走执行后归属校验', () => {
+    expect(plan('findUnique', { where: { id: 'x' } }).action).toBe('checkResultOwner')
+  })
+
+  it('冒烟 ④：upsert 的 create 分支单独注入', () => {
+    const p = plan('upsert', { where: { id: 'x' }, create: { title: 'x' }, update: {} })
+    expect((argsOf(p).create as Record<string, unknown>).tenantId).toBe(T)
+  })
+
+  it('冒烟 ⑤：无租户上下文一律抛 NO_CONTEXT，不是查全表', () => {
+    for (const operation of SUPPORTED_OPERATIONS) {
+      let caught: unknown
+      try {
+        plan(operation, {}, { tenantId: '' })
+      } catch (error) {
+        caught = error
+      }
+      expect(isTenantScopeError(caught, 'NO_CONTEXT'), `${operation} 在无上下文时没抛错`).toBe(true)
+    }
+  })
+
+  it('冒烟 ⑥：未识别的操作抛错，而不是放行', () => {
+    expect(() => plan('someFutureOp', {})).toThrow(TenantScopeError)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// spec 9 / 10 · schema 约定（判定用 @taizan/prisma-base 的 lintSchemaConventions）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `AuditLog.targetType` 这类「值域是业务实体名」的自由文本列。
+ *
+ * 与 `packages/prisma-base/src/schema.spec.ts` 里那份保持一致——这两处扫的是**同一批**
+ * 框架片段（一份在包里，一份是 `taizan:schema-sync` 拷进本仓库的副本），豁免不一致的话
+ * 本地会红而包里绿，人会以为是同步坏了。
+ */
+const ENUM_EXEMPTIONS = [
+  {
+    model: 'AuditLog',
+    field: 'targetType',
+    reason: '存的是业务实体名（{{DomainPascal}} / Member …），做成 enum 等于每加一张业务表都要改框架 schema。',
+  },
+  { model: 'PlatformAuditLog', field: 'targetType', reason: '同 AuditLog.targetType。' },
+]
+
+const schemaFiles = readSchemaFiles()
+const schemaAst: PrismaSchemaAst = { models: [], enums: [] }
+for (const f of schemaFiles) {
+  const parsed = parsePrismaSchema(f.source, f.name)
+  schemaAst.models.push(...parsed.models)
+  schemaAst.enums.push(...parsed.enums)
+}
+const lintFindings = lintSchemaConventions(schemaAst, {
+  enumExemptions: ENUM_EXEMPTIONS,
+  // §3.1：不建 relation（业务表将来要能平移成独立服务，外键会把它钉死在同一个库里）。
+  allowRelations: false,
+})
+const findingsOf = (...rules: string[]): typeof lintFindings =>
+  lintFindings.filter((f) => rules.includes(f.rule))
+
+describe('spec 09 · 金额列', () => {
+  it('哨兵：schema lint 的解析器还活着', () => {
+    // 「扫不到东西」和「没有问题」在断言上长得一模一样。哨兵是一份答案写死的 schema，
+    // 正则一改坏它先炸——同 spec 1 用的那一招。
+    expect(runSchemaLintSentinel()).toBe(true)
+  })
+
+  it('真的扫到了 schema（空目录会让下面每一条都通过）', () => {
+    // 生成器改写：理由同 tenant-models.spec.ts 里那条——业务项目的片段数会长。
+    expect(schemaFiles.map((f) => f.name).length).toBeGreaterThanOrEqual(9)
+    expect(schemaAst.models.length).toBeGreaterThan(15)
+  })
+
+  it('禁用 Decimal', () => {
+    expect(
+      findingsOf('no-decimal').map((f) => `${f.model}: ${f.message}`),
+      formatSchemaLintReport(lintFindings),
+    ).toEqual([])
+  })
+
+  it('price / amount / fee / balance 类数值列必须是 *Cents 且为 Int', () => {
+    expect(
+      findingsOf('money-cents').map((f) => `${f.model}: ${f.message}`),
+      formatSchemaLintReport(lintFindings),
+    ).toEqual([])
+  })
+})
+
+describe('spec 10 · 主键 / 枚举 / 索引', () => {
+  it('每张表恰好一个 @id，且是 String（ULID 应用层生成）', () => {
+    expect(
+      findingsOf('id-string').map((f) => `${f.model}: ${f.message}`),
+      formatSchemaLintReport(lintFindings),
+    ).toEqual([])
+  })
+
+  it('status / type / kind 类列必须是 enum', () => {
+    expect(
+      findingsOf('enum-status').map((f) => `${f.model}: ${f.message}`),
+      formatSchemaLintReport(lintFindings),
+    ).toEqual([])
+  })
+
+  it('租户表必须有 @@index([tenantId, id])', () => {
+    expect(
+      findingsOf('tenant-index').map((f) => `${f.model}: ${f.message}`),
+      formatSchemaLintReport(lintFindings),
+    ).toEqual([])
+  })
+
+  it('软删表的唯一索引必须含 deletedAt', () => {
+    expect(
+      findingsOf('soft-delete-unique').map((f) => `${f.model}: ${f.message}`),
+      formatSchemaLintReport(lintFindings),
+    ).toEqual([])
+  })
+
+  it('§3.1 附带项：createdAt / updatedAt 必备、不用 @map、不建 relation', () => {
+    expect(
+      findingsOf('timestamps', 'no-map', 'no-relation').map((f) => `${f.model}: ${f.message}`),
+      formatSchemaLintReport(lintFindings),
+    ).toEqual([])
+  })
+
+  it('TenantStatus 枚举不得含 EXPIRED（蓝图 §3.2/§4.5：到期永远现算，不落状态位）', () => {
+    // 哨兵：先确认这个 enum 真的被扫到，否则「没找到」和「没有 EXPIRED」在断言上长得一样。
+    const tenantStatus = schemaAst.enums.find((e) => e.name === 'TenantStatus')
+    expect(tenantStatus, 'TenantStatus enum 在 apps/api/prisma/schema 里不存在').toBeDefined()
+    expect((tenantStatus as (typeof schemaAst.enums)[number]).values.length).toBeGreaterThan(0)
+    expect(
+      (tenantStatus as (typeof schemaAst.enums)[number]).values,
+      '到期状态一律现算（evaluateTenantGate），不允许把 EXPIRED 落成状态位；' +
+        '同一条断言在 packages/prisma-base/src/schema.spec.ts 里也有一份，两边都要过。',
+    ).not.toContain('EXPIRED')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// spec 11 · 加密列三处对账（判定用 @taizan/crypto 的 verifyEncryptedColumns）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 本应用自己的加密列。
+ *
+ * 现在是空的：`example-{{domainSlug}}` 不存密文。业务加了 `*Enc` 列却忘了登记时，
+ * 下面的 `missingInRegistry` 会红——**这正是这条 spec 的全部意义**，
+ * 因为漏登记的那一列在换密钥的当天才会暴露（读出来是一串解不开的密文）。
+ */
+const APP_ENCRYPTED_COLUMNS: readonly EncryptedColumn[] = []
+
+const cryptoRegistry = [...ENCRYPTED_COLUMNS, ...APP_ENCRYPTED_COLUMNS]
+const rotationCoverage = planRotation(cryptoRegistry, 'k1', 'k2', { dryRun: true }).items.map(
+  (i) => i.ref,
+)
+const cryptoReport = verifyEncryptedColumns({
+  registry: cryptoRegistry,
+  schemaText: schemaFiles.map((f) => f.source),
+  rotationCoverage,
+})
+
+describe('spec 11 · 加密列注册表 ↔ schema ↔ 轮换脚本', () => {
+  it('真的解析到了 model（解析器失效时下面三组差异都会是空的）', () => {
+    expect(cryptoReport.models.length).toBeGreaterThan(15)
+    expect(cryptoReport.schemaColumns.length).toBeGreaterThan(0)
+  })
+
+  it('注册表 ↔ schema 双向对齐', () => {
+    expect(
+      {
+        missingInSchema: cryptoReport.missingInSchema,
+        missingInRegistry: cryptoReport.missingInRegistry,
+      },
+      formatEncryptedColumnsReport(cryptoReport).join('\n'),
+    ).toEqual({ missingInSchema: [], missingInRegistry: [] })
+  })
+
+  it('每个 *Enc 列都有配对的 keyId 列', () => {
+    expect(
+      cryptoReport.missingKeyIdColumn,
+      '没有 keyId 列，轮换到一半的行分不清新旧密钥——xiaodian 缺的就是这个。',
+    ).toEqual([])
+  })
+
+  it('轮换脚本覆盖了注册表里的每一列，且没有覆盖表外的列', () => {
+    expect(
+      {
+        missingInRotation: cryptoReport.missingInRotation,
+        unknownInRotation: cryptoReport.unknownInRotation,
+      },
+      formatEncryptedColumnsReport(cryptoReport).join('\n'),
+    ).toEqual({ missingInRotation: [], unknownInRotation: [] })
+  })
+
+  it('总判定', () => {
+    expect(cryptoReport.ok, formatEncryptedColumnsReport(cryptoReport).join('\n')).toBe(true)
+  })
+})

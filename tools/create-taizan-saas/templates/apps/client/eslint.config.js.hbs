@@ -1,0 +1,15 @@
+// 照抄 packages/_smoke 的形状，只追加一条：Taro 在编译期注入一批全局标识符
+// （`definePageConfig`/`defineAppConfig`/`wx`/`App`/`Page`/`Component`/...），
+// 它们由 `@tarojs/taro` 的 ambient 类型声明覆盖、TS 编译器本身已经在管这层检查，
+// `no-undef` 在纯 TS 项目里对这类全局注定会跟类型声明打架，官方 TS 项目的通行做法
+// 是直接关掉它（照抄 typescript-eslint 官方文档的建议）。
+import base from '{{scope}}/eslint-config'
+
+export default [
+  ...base,
+  {
+    rules: {
+      'no-undef': 'off',
+    },
+  },
+]

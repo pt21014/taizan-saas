@@ -1,0 +1,9 @@
+{
+  "extends": "@taizan/tsconfig/node.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "."
+  },
+  "include": ["src", "scripts", "test", "e2e", "*.ts"],
+  "exclude": ["templates", "dist", ".tmp"]
+}

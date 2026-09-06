@@ -1,0 +1,15 @@
+import { createSessionStore, secureStore } from '@taizan/app-ui'
+import type { BootstrapResponse } from '@taizan/contracts'
+
+/**
+ * 商家端会话（蓝图 §5.2/§5.4）：`/auth/bootstrap` 是唯一真源——登录/切店后只存一次
+ * 完整的 `BootstrapResponse`，不在这之外自己再拼一份「当前身份/当前店」。
+ */
+export interface StaffSessionData {
+  bootstrap: BootstrapResponse
+}
+
+export const sessionStore = createSessionStore<StaffSessionData>(
+  'taizan_staff_session',
+  secureStore,
+)

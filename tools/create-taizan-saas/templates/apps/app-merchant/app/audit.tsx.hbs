@@ -1,0 +1,21 @@
+import { EmptyState, colors } from '@taizan/app-ui'
+import { View } from 'react-native'
+
+/**
+ * 审计日志——**骨架页**。
+ *
+ * `apps/api` 目前只有 `GET /api/platform/tenants/:id/audit-logs`（`@Auth('platform')`，
+ * 平台侧才能看），还没有商家自己可查自家 `AuditLog` 的接口；`@taizan/nest-audit` 已经把
+ * 写入这一半做了（`@Audit()` 装饰器落库），缺的是给 staff token 开一个只读查询入口。
+ * 等那个接口补上后，这一屏改成真的分页列表即可，页面骨架（标题栏、空态位）先占住。
+ */
+export default function AuditScreen() {
+  return (
+    <View style=\{{ flex: 1, backgroundColor: colors.bgBase, justifyContent: 'center' }}>
+      <EmptyState
+        title="商家端审计日志接口尚未开放"
+        hint="当前只有平台侧只读接口（/api/platform/tenants/:id/audit-logs），等后端补上 staff 可查的入口后接上。"
+      />
+    </View>
+  )
+}

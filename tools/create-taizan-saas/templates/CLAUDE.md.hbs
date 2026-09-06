@@ -1,0 +1,436 @@
+{{!--
+  生成项目的 CLAUDE.md 模板（taizan-saas T4-4 产出，T4-1 会搬进
+  tools/create-taizan-saas/templates/）。
+
+  用到的模板变量（与蓝图 §6 一致）：
+    {{projectName}} {{scope}} {{productName}} {{domainSlug}} {{domainName}} {{DomainPascal}}
+    {{dbProvider}} {{apiPort}} {{adminPort}} {{platformPort}} {{sitePort}} {{clientPort}}
+    {{payChannels}} {{smsProvider}} {{taizanVersion}}
+  外加三个由「问题 3：选择要生成的端」派生的布尔量，生成器需要一并提供：
+    {{hasSite}} {{hasClient}} {{hasApps}}
+
+  改这份模板时的唯一纪律：每条红线都必须写「违反时哪个 spec 会红」，
+  且那个文件名必须在生成出来的项目里真实存在。指向不存在的文件比不指向更糟——
+  读者会以为有机器在守，于是不再自己检查。
+--}}
+# {{productName}}
+
+{{productName}}（`{{projectName}}`）是一个多租户 SaaS：商家开店做{{domainName}}，平台收套餐费。
+基于 **taizan-saas** 框架（`@taizan/*` v{{taizanVersion}}）生成，框架文档在
+[taizan-saas/docs](https://github.com/taizan/taizan-saas/tree/main/docs)。
+
+**这份文件是给 AI 协作者和新同事看的红线清单。** 下面「硬性约定」一节的每一条都标了
+「违反时哪个 spec 会红」——那些 spec 拦的是**不会报错但会出事**的问题，
+不要用 `.skip` 或改断言绕过它们。
+
+---
+
+## 结构
+
+- `apps/api` — NestJS 11 后端（模块化单体），Prisma + {{dbProvider}}，四个命名空间：
+  `/api/platform`（平台超管）、`/api/admin`（商家后台）、`/api/client`（C 端）、`/api/public`（免登录）。dev 端口 {{apiPort}}
+- `apps/admin` — 商家后台，Vite + React + AntD5，dev 端口 {{adminPort}}，代理 `/api` → {{apiPort}}
+- `apps/platform` — 平台超管后台，**独立应用独立域名**，dev 端口 {{platformPort}}
+{{#if hasSite}}- `apps/site` — 官网 + 自助注册，零 UI 库（营销页长成后台的样子就不像官网了），dev 端口 {{sitePort}}
+{{/if}}{{#if hasClient}}- `apps/client` — C 端，Taro 一份代码编译 H5 + 微信小程序，H5 dev 端口 {{clientPort}}
+{{/if}}{{#if hasApps}}- `apps/app-client` / `apps/app-merchant` — Expo 原生 App（C 端 / 商家助手）
+{{/if}}- `packages/` — 本项目自己的共享代码。**框架的 `@taizan/*` 在 node_modules 里，不要去改**
+
+后端目录：
+
+```
+apps/api/src/
+├─ bootstrap/     main / app.module / global-providers（守卫顺序全仓唯一一处）
+├─ config/        env.ts —— env 契约的单一真源，.env.example 由它生成
+├─ common/        Validate() 校验管道、autoTenantData
+├─ tenancy/       隔离名单、租户解析策略、raw 白名单与理由
+├─ registry/      五张注册表：权限点 / 菜单 / 套餐功能项 / 审计动作 / 队列任务
+├─ modules/
+│  ├─ platform/   /api/platform
+│  ├─ admin/      /api/admin
+│  ├─ client/     /api/client
+│  ├─ public/     /api/public（自助注册、支付回调，不进租户中间件）
+│  └─ {{domainSlug}}/  业务模块
+└─ seed.ts
+apps/api/prisma/schema/
+├─ 00-base/       ← 框架托管，勿手改
+└─ 10-business/   ← 本项目自己的 schema 片段
+```
+
+---
+
+## 常用命令
+
+```bash
+pnpm dev:infra                              # 起 {{dbProvider}} + Redis（docker compose）
+pnpm -F @{{scope}}/api prisma:migrate       # 建表（内部：schema-sync && migrate dev）
+pnpm -F @{{scope}}/api seed                 # 造数据：平台管理员 + 套餐 + 演示租户
+pnpm -F @{{scope}}/api dev                  # 后端，http://localhost:{{apiPort}}，Swagger 在 /docs
+pnpm -F @{{scope}}/admin dev                # 商家后台 http://localhost:{{adminPort}}
+pnpm -F @{{scope}}/platform dev             # 平台后台 http://localhost:{{platformPort}}
+
+pnpm -F @{{scope}}/api test                 # 单测 + 架构约束 spec（不连库）★ 改隔离/计费/支付后必跑
+pnpm -F @{{scope}}/api test:e2e             # 隔离 e2e + RBAC/计费 e2e（连真库）
+pnpm -F @{{scope}}/api taizan:verify-schema # 隔离名单 ↔ schema 双向比对
+pnpm -F @{{scope}}/api taizan:env-example   # 从 zod schema 重新生成 .env.example（不要手改它）
+pnpm taizan:rotate-key --dry-run            # 密钥轮换演练
+pnpm gen:module <name>                      # codegen：一次生成业务模块的七处 + 三个 spec
+```
+
+线上只读自检（服务器上执行，`deploy/checks/`）：
+`health-check.sh`、`tenant-isolation-check.sh`（两个真实租户交叉验证隔离）、
+`billing-check.sh`（打开套餐限制前列出「谁会被锁、谁会打烊」）、
+`cron-single-check.sh`、`ratelimit-spoof-check.sh`。
+
+---
+
+## 三方集成与配置
+
+- **支付通道**：{{payChannels}}。回调统一走 `POST /api/public/pay/:channel/notify`
+  （验签 → 幂等 → 归一化 → 按 `outTradeNo` 前缀路由到领域处理器）。
+  平台套餐订单用 `PLAN-` 前缀，本项目自己的业务前缀在 `src/modules/{{domainSlug}}/` 里注册。
+- **短信**：{{smsProvider}}。开发环境靠 `SMS_RETURN_DEV_CODE=1` 直接回验证码；
+  **生产开着这个开关会被 `assertNoDevCodeInProd` 拒启**，这是故意的。
+- **配置**：`.env` 由 `.env.example` 抄一份改。`.env.example` **不要手改**——
+  它由 `src/config/env.ts` 的 zod schema 生成（`pnpm -F @{{scope}}/api taizan:env-example`）。
+  env 校验在启动期跑，缺字段会中文逐条列出然后拒启，不会等到第一次用到那个字段才炸。
+  三把 JWT 密钥必须互不相同；`CRYPTO_KEY_CURRENT` 必须指向 `CRYPTO_KEYS` 里真实存在的 keyId。
+- **多环境**：`.env.{dev,test,staging,prod}`，三方 appid / 商户号**按环境分离**——
+  共用一套的下场是测试环境的一笔退款打到了生产商户号上。
+
+业务域主模型是 `{{DomainPascal}}`（`prisma/schema/10-business/`），
+对应模块 `apps/api/src/modules/{{domainSlug}}/`。
+
+---
+
+## 硬性约定（违反会出安全事故）
+
+> 每条末尾的「⛔ spec」是违反时会变红的测试文件。
+> 写「框架包」的那些在 `node_modules/@taizan/*` 里，跑 `pnpm -F @{{scope}}/api test` 时不会跑到——
+> 但它们保证了框架侧的行为，你的代码只要按下面的写法用就不会踩到。
+
+### 1. 多租户隔离
+
+业务代码一律用 `prisma.tenant.xxx`（tenantId 自动注入），**禁止手写 tenantId 过滤条件**。
+
+```ts
+// ✅
+await this.prisma.tenant.{{domainSlug}}.findMany({ where: { status: 'ON_SHELF' } })
+// ✅ create 用 autoTenantData：id（ULID）与 tenantId 由扩展注入，手写 tenantId 编译不过
+await this.prisma.tenant.{{domainSlug}}.create({ data: autoTenantData({ name }) })
+// ❌ 漏写不会报错，那一个查询会安静地返回全平台的数据
+await this.prisma.tenant.{{domainSlug}}.findMany({ where: { tenantId, status } })
+```
+
+`prisma.raw` 只允许三处：登录跨租户找账号、支付回调按参数定位租户、平台后台。
+每处必须在 `src/tenancy/raw-reasons.ts` 登记**且**在用点写 `// raw-reason: <理由>`，缺一个就红。
+
+新增带 `tenantId` 的表必须同步进 `src/tenancy/tenant-models.ts` 的 `registry.register([...])`。
+**漏登记 = 那张表完全没有隔离，而且不报错**（这是 xiaodian 2026-08 的真实事故形态：
+开发环境只有一个租户，全平台就等于这个租户，所以本地永远发现不了）。
+有 `deletedAt` 的表还要进 `SOFT_DELETE_MODELS`——漏了 `delete()` 会**真的物理删掉行**。
+
+隔离决策函数对**未识别的操作是失败关闭**（直接抛错）。Prisma 升级后若出现新操作，
+必须在框架侧显式声明如何隔离，而不是放行。
+
+⛔ spec：`apps/api/test/arch/tenant-models.spec.ts`、`apps/api/test/arch/no-manual-tenant-filter.spec.ts`、
+`apps/api/test/arch/raw-usage.spec.ts`；框架包 `packages/tenant-scope/src/plan.spec.ts`、
+`packages/nest-prisma/src/extensions/tenant.spec.ts`
+
+### 2. 金额一律为分
+
+`Int`，字段名以 `Cents` 结尾，**禁用 `Decimal`**，前端展示时才除以 100。
+`price: 100` 到底是 1 元还是 100 元，靠猜就总有人猜错——所以单位写在字段名里。
+
+⛔ spec：框架包 `packages/prisma-base/src/schema.spec.ts`（金额口径）、
+`packages/prisma-base/src/schema-lint.spec.ts`
+
+### 3. 权益判定收口一个服务
+
+「这个租户能不能用这个功能 / 还有没有配额 / 到期了没」只走 `PlatformGateway`
+（`@taizan/nest-billing`），业务代码不要自己读 `Tenant.planExpireAt` 再判一遍。
+业务自己的规则收口在 `*.rules.ts` 纯函数里（`{{domainSlug}}.rules.ts`），
+不要埋在 service 里——埋进去就只能靠起 Nest + 连库才测得到，实际上等于没测。
+
+**`findUnique` 带 `select` 时必须包含 `tenantId`**（框架已自动补上）：归属校验读的就是它，
+漏了会把自己的数据判成别人的、**静默返回 null**——查询不报错，结果永远为空。
+
+⛔ spec：框架包 `packages/tenant-scope/src/plan.spec.ts`、`packages/nest-billing/src/platform-gateway.spec.ts`
+
+### 4. 敏感配置必须加密落库
+
+三方密钥、私钥、MFA secret 一律经 `CredentialVault` 加密写进 `*Enc` 列，
+**每个 `*Enc` 列必须有配对的 keyId 列**（没有版本号，轮换到一半分不清新旧），
+接口只回 `maskedHint`。明文**永远不落库**，也不进日志（redact 名单覆盖
+`password/secret/token/authorization/*Enc/idCard/phone`）。
+
+新增加密列要同时做三件事：schema 加两列、登记进加密列注册表、跑一次
+`pnpm taizan:rotate-key --dry-run` 确认覆盖到了。漏一件的后果是**换完密钥那一列读不出来**，
+而且是在旧密钥已删之后才发现。
+
+⛔ spec：框架包 `packages/prisma-base/src/schema.spec.ts`（加密列对账）、
+`packages/crypto/src/columns.spec.ts`、`packages/crypto/src/rotate.spec.ts`
+
+### 5. 三套 JWT + token 绑店
+
+`platform` / `staff` / `member` 三套密钥**独立**，token 里带 `kind`，kind 不符直接拒。
+
+**staff token 一次只绑一家店**。一个手机号可以开多家店，但换店是向服务端换一张新 token
+（`POST /api/admin/auth/switch` + 前端整页重载），不是让一张 token 通吃名下所有店——
+整套隔离都建立在「token 里的 tenantId 就是当前店」之上，改成按请求参数判断的话，
+隔离就从一条不变量退化成每个接口自己的事。
+
+**但 token 里那几个字段不能直接当真**：每个请求都用库里的成员关系现查一次（30 秒缓存），
+**判角色用库里那份、覆盖掉 token 里那份**。只信 token 的话，「移出店铺」「停用他在这家店的账号」
+「转让店主」这三件事在签发后一周内都不生效，而且都不报错——被撤权的人看不出异常，
+按下按钮的人以为撤干净了。最要紧的是第三条：收款配置的钥匙在转让后还能被前任用一周。
+
+`/api/admin/*` 只认 token 里的租户；`X-Tenant-Slug` **只在 `/api/client/*` 且未登录时**才起作用。
+
+⛔ spec：`apps/api/test/arch/tenant-middleware.spec.ts`；框架包
+`packages/nest-auth/src/token/token.service.spec.ts`、`packages/nest-auth/src/membership/membership.provider.spec.ts`
+
+### 6. 取客户端 IP 只能用 `resolveIps`
+
+**绝不能读 `x-forwarded-for` 的第一段，也不能用 `req.ip`。**
+链路是 客户端 → CDN → nginx → Node，nginx 用 `$proxy_add_x_forwarded_for` **追加**，
+所以 XFF **开头几段是客户端自己写的、可任意伪造**（实测：伪造后限流 key 直接变成伪造值，
+限流形同虚设）。可信的只有末尾由基础设施追加的段，段数由 `TRUSTED_PROXY_HOPS` 控制。
+
+限流按「客户端 IP + 入口 IP + 账号」三维度计数，且**入口/账号维度必须设得宽松**——
+否则它会变成攻击者锁死整片地区用户或指定账号的工具。
+
+⛔ spec：`apps/api/test/arch/ip-source.spec.ts`；框架包 `packages/ratelimit-core/src/resolve-ips.spec.ts`
+
+### 7. 微信网页授权 state 必须服务端签发
+
+随机 32 字节、5 分钟 TTL、**一次性核销**（`CacheService.takeOnce`，GETDEL 原子操作，
+不许 `get` 完再 `del`）、**绑定租户**。少了这层校验，攻击者用自己账号的 code 拼个链接
+就能让用户**静默登录成他的账号**。
+
+`redirect_uri` 只取调用方给的 path + query，**host 一律用当前请求的 Host 重建**，
+避免开放重定向。
+
+⛔ spec：`apps/api/test/arch/cluster-safe.spec.ts`（一次性凭据必须走 `takeOnce`）；
+框架包 `packages/wechat-open/src/oauth-state.spec.ts`
+
+### 8. 统一响应包 + 7 位错误码
+
+响应一律 `{ code, message, data }`，`code=0` 成功。
+**业务错误 = HTTP 200 + 业务码**（抛 `BizException`），传输层错误（401/403/404/429/500）
+走 `HttpException` 并同样包成信封。逃生口是 `@RawResponse()`（支付回调、文件下载），
+**不是硬编码路径前缀**——knowledge 试过按前缀判断，支付回调换了个前缀之后返回值被包成信封，
+微信收到非 `SUCCESS` 于是重推了 8 小时。
+
+错误码 7 位 `DD HHH NN` = 域段 2 位 + HTTP 语义 3 位 + 序号 2 位。
+前端判定只有一行：`Math.floor((code % 100000) / 100)`，`401` 清态跳登录、`403` **只提示不登出**。
+本项目自己的码用 `defineErrorCodes()` 注册，**域段必须落在 `20–89`**（框架占 `10–19` 与 `90`）。
+完整码表见框架的 `docs/ERROR-CODES.md`。
+
+⛔ spec：框架包 `packages/contracts/src/error-codes.spec.ts`、`packages/contracts/src/response.spec.ts`、
+`packages/nest-core/src/http/all-exceptions.filter.spec.ts`；`apps/api/test/arch/response-shape.spec.ts`
+（全仓控制器不许 `res.json(`/`res.send(` 绕过信封、`BizException` 首参不许是裸数字字面量）
+
+### 9. 建租户只有一条路
+
+平台后台开通与自助注册**调同一个** `@taizan/provision` 的编排函数，
+控制器里不许再拼一遍那个事务。两条路一定会漂——xiaodian 的表现是：
+自助注册建出来的租户**没有 owner 角色**，商家登录进去一个菜单都看不到。
+
+⛔ spec：`apps/api/test/arch/provision-single-path.spec.ts`；框架包
+`packages/provision/src/arch/single-path.scan.spec.ts`
+
+### 10. 续费路径永远可写
+
+`/api/admin/auth`、`/api/admin/billing`、`/api/admin/bootstrap` 三条前缀在**任何**闸门下都可写。
+套餐功能项的 `pathPrefixes` **不许盖住**它们。
+盖住了就会出现「到期 → 后台只读 → 续不了费 → 永远到期」的闭环死锁，
+而且它不会在开发环境出现（本地租户永远没到期），只会出现在真实商家身上——
+那时他连提工单的入口都在只读后台里。
+
+⛔ spec：`apps/api/test/arch/billing-routes.spec.ts`（白名单 ↔ 真实 `@Controller` 前缀 ↔ 功能项前缀三方对账）
+
+### 11. 到期永远现算
+
+`TenantStatus` **刻意没有 `EXPIRED`**，不要加。到期与否每次请求由
+`evaluateTenantGate(now, planExpireAt, graceDays, …)` 现算。
+落状态就要有人去改状态，于是需要一个 cron；cron 挂了或漏跑，一批租户就卡在错误状态里。
+现算没有这个失败模式。到期时刻统一落 `23:59:59.999`，时区 `Asia/Shanghai` 且**不读进程时区**。
+
+⛔ spec：框架包 `packages/billing-rules/src/gate.spec.ts`、`packages/billing-rules/src/period.spec.ts`；
+`TenantStatus` 不许含 `EXPIRED` 由 `packages/prisma-base/src/schema.spec.ts` 与
+`apps/api/test/arch/index.spec.ts`（spec 10）各带一条断言守着
+
+### 12. 三道闸门并列，不合并
+
+| 码 | 谁拦 | 商家该干什么 |
+| --- | --- | --- |
+| `1340300` | `PermissionsGuard` | 找店主要权限 |
+| `1440301` | `BillingGateGuard`（后台到期只读） | 去续费 |
+| `1440302` | 租户闸门中间件（C 端打烊） | —— |
+| `1540301` | `QuotaService` | 升套餐 / 先清理 |
+| `1540302` | `BillingGateGuard`（功能未包含） | 升套餐 |
+
+合成一个笼统的「无权限」，商家不知道该续费、升档、还是删两个员工，只会来问客服。
+判断该不该分码的标准只有一条：**用户的下一步动作是否相同**。
+
+⛔ spec：框架包 `packages/billing-rules/src/gate.spec.ts`、`packages/billing-rules/src/quota.spec.ts`、
+`packages/billing-rules/src/feature.spec.ts`
+
+### 13. 配额与功能都是三态
+
+`null` ≠ `0` ≠ `[]`：
+
+- 配额 `limit === null` = **不限量**，`0` = **一个都不给**；
+- 功能 `features === null` = **全部可用**，`[]` = **一个都不给**。
+
+把 `null` 和 `0` 混成一个「假值」，结果是给最贵套餐的商家配了 0 个员工名额，
+或者反过来给试用租户开了无限量。DTO 上要小心 `@Type` 把 `null` 转掉——
+「清空 = 不限量」必须能显式表达。
+
+配额消耗的顺序不能反：**先占配额，再写业务数据**；失败要 `release` 补偿；删除时也要 `release`
+（否则「删 10 个再建 10 个」会超限，而商家看到的数量根本没变）。
+
+⛔ spec：框架包 `packages/billing-rules/src/quota.spec.ts`、`packages/billing-rules/src/feature.spec.ts`
+
+### 14. cron 必须 `@LeaderCron`
+
+禁止裸 `@Cron`、禁止 `setInterval`。生产是多实例（PM2 cluster / 多容器），
+裸 cron 的表现是**同一件事被做 N 遍**——knowledge 的线上活故障就是到期提醒
+给同一个商家发了 4 条短信。`setInterval` 更糟：它连 `CronRun` 表里都不留痕，
+只能靠商家投诉发现。
+
+进程内 `Map` / `Set` 缓存必须标 `// process-local: <理由>`——它的失效是**只清本实例**的，
+这可以是有意识的选择，但必须是有意识的。
+
+⛔ spec：`apps/api/test/arch/cluster-safe.spec.ts`
+
+### 15. `@Public()` 必须同时带 `@RateLimited()`
+
+一个什么装饰器都不写的新路由，行为是 `1140100`（未登录）——**默认拒绝**。
+要公开必须显式 `@Public()`，而 `@Public()` 的路由**必须**声明限流档位。
+
+免登录接口是唯一能被无成本刷的入口。发短信验证码那种接口漏了限流，
+一夜的短信账单就能超过整月营收。
+
+注意「默认拒绝」是**认证**层面的：`@RequirePermission` 没写就不做权限判定
+（否则每条「改自己密码」式的接口都要造一个假权限点）。权限点完整性靠双向对账，不靠强制。
+
+⛔ spec：`apps/api/test/arch/guard-default-deny.spec.ts`、`apps/api/test/arch/permission-registry.spec.ts`
+
+### 16. `prisma/schema/00-base/**` 勿手改
+
+那是框架托管目录（`@taizan/prisma-base` 同步过来的），每个文件头都写着「勿改」。
+改了的下场：下次 `taizan:schema-sync` 要么覆盖掉你的改动，要么冲突，而 CI 一直红。
+
+你自己的表放 `10-business/`。真的需要改框架表，**提到框架仓库去改**，走一次 major 发版。
+需要给框架表挂业务字段时，建一张 `TenantProfile { tenantId, ... }` 这样的旁表——
+这也是更好的建模：框架表变了不影响你。
+
+⛔ spec：`apps/api/test/arch/base-schema-integrity.spec.ts`（sha256 比对 `base.lock.json`）
+
+### 附：守卫链顺序全仓只在一处定义
+
+`apps/api/src/bootstrap/global-providers.ts`：
+
+```
+守卫    RateLimitGuard → GlobalAuthGuard → PermissionsGuard → BillingGateGuard
+拦截器  TransformInterceptor → DataScopeInterceptor → AuditInterceptor
+```
+
+**顺序错了的表现是「放行」，不是报错**：`BillingGateGuard` 排到认证前面会读不到
+`principal.kind`，于是直接 `return true`，整条计费闸门静默失效，一条 e2e 都不会红。
+不要在别的模块里挂 `APP_GUARD` / `APP_INTERCEPTOR`。
+
+⛔ spec：`apps/api/test/arch/guard-order.spec.ts`
+
+---
+
+## 新增业务模块：七件事速查
+
+| # | 扩展点 | 动哪里 | 漏了会怎样 |
+| --- | --- | --- | --- |
+| ① | 加表 | `apps/api/prisma/schema/10-business/10-<name>.prisma` | 见约定 16 |
+| ② | 注册隔离 | `apps/api/src/tenancy/tenant-models.ts`（`register` + `SOFT_DELETE_MODELS` 两份） | **静默跨租户泄漏** |
+| ③ | 注册权限点 | 模块内 `*.permissions.ts` → `src/registry/permissions.ts` | 路由永远 `1340300`，运行时不报错 |
+| ④ | 注册菜单 | 模块内 `*.menus.ts` → `src/registry/menus.ts` + 前端 `component-map.ts` | 商家找不到入口，或点进去白屏 |
+| ⑤ | 注册功能项 | `src/registry/features.ts`（`pathPrefixes` 别盖住续费白名单） | 套餐没含这个模块的商家照样能用 |
+| ⑥ | 注册审计动作 | `src/registry/audit-actions.ts` + 控制器 `@Audit()` | 出事之后查不到是谁点的 |
+| ⑦ | 注册队列任务 | 模块内 `*.handler.ts`（`@JobHandler` + 进 `providers`）→ `src/registry/jobs.ts` | 消息入队但**没人消费** |
+
+加表的五条：`tenantId String` NOT NULL、`@@index([tenantId, id])`、`deletedAt`、
+唯一索引带 `deletedAt`、金额 `*Cents Int` + 状态 enum + 主键 `String`。**一条 relation 都不建。**
+
+前端两步：`apps/admin/src/routes/component-map.ts` 登记 `componentKey`；
+页面用 `useCrudTable` / `useCrudForm`（41 行范式，见 `@taizan/admin-ui` 的 README）。
+页面里**不该有 `useState` / `useEffect`**——有的话说明在重新实现 hooks 已经做过的事。
+
+一次生成全部七处：`pnpm gen:module <name>`。手写的问题不是麻烦，是**第五处开始就会漏**。
+
+---
+
+## 禁止事项
+
+- ❌ 手写 `where: { tenantId }` —— 用 `prisma.tenant.*`
+- ❌ 在业务代码里用 `prisma.raw` 而不登记理由
+- ❌ 新表不进 `TENANT_MODELS` / `SOFT_DELETE_MODELS`
+- ❌ 金额用 `Decimal` 或 `Float`，或字段名不带 `Cents`
+- ❌ 状态用裸 `Int` / `String`（一律 enum）
+- ❌ 主键用自增 `Int`（一律 `String` + 应用层 ULID）
+- ❌ 建外键 / relation（尤其是指向 `Tenant` 的）
+- ❌ 改 `apps/api/prisma/schema/00-base/**` 里的任何一个字节
+- ❌ 手改 `.env.example`（它由 `src/config/env.ts` 的 zod schema 生成）
+- ❌ 读 `x-forwarded-for[0]` 或 `req.ip`
+- ❌ 裸 `@Cron` / `setInterval`
+- ❌ `@Public()` 不带 `@RateLimited()`
+- ❌ 在 `bootstrap/global-providers.ts` 之外挂 `APP_GUARD` / `APP_INTERCEPTOR`
+- ❌ 密钥明文落库、明文进日志、明文回接口
+- ❌ 把「无权限 / 到期 / 配额 / 功能未含」合并成一个错误码
+- ❌ 给 `TenantStatus` 加 `EXPIRED`
+- ❌ 用可空 `tenantId` 表达「平台共享 + 租户私有」（拆两张表）
+- ❌ 事务里入队（要在写库成功之后、事务之外）
+- ❌ 用 `.skip` / 改断言绕过 `apps/api/test/arch/**` 里任何一条红
+- ❌ 物理删业务数据（软删 + `retentionDays`，物理删只允许过期后由脚本执行）
+- ❌ 改 `node_modules/@taizan/*` 里的代码（要改去框架仓库提 PR）
+
+---
+
+## 给 AI 协作者的提示
+
+**改动下面这些东西之后，必跑对应命令，并把输出贴进 PR 描述：**
+
+| 你改了什么 | 必跑 |
+| --- | --- |
+| 隔离相关（`src/tenancy/**`、任何 `prisma.tenant` / `prisma.raw` 调用点、schema 加表） | `pnpm -F @{{scope}}/api test`<br/>`pnpm -F @{{scope}}/api taizan:verify-schema`<br/>`pnpm -F @{{scope}}/api test:e2e` |
+| 计费 / 配额 / 套餐（`src/registry/features.ts`、任何 `*.rules.ts`、闸门相关） | `pnpm -F @{{scope}}/api test`<br/>`pnpm -F @{{scope}}/api test:e2e`<br/>部署后 `bash deploy/checks/billing-check.sh` |
+| 支付（回调、签名、退款、对账） | `pnpm -F @{{scope}}/api test`<br/>`pnpm -F @{{scope}}/api test:e2e`<br/>用 `FakeProvider` 走一遍回调重放（同一 `transactionId` 推两次，只应兑现一次） |
+| 认证 / 权限 / 菜单 | `pnpm -F @{{scope}}/api test`<br/>`pnpm -F @{{scope}}/admin test`（component-map 对账） |
+| schema（任何片段） | `pnpm -F @{{scope}}/api prisma:migrate` → `git diff prisma/migrations` 看 SQL → `pnpm -F @{{scope}}/api test` |
+| env / 配置 | `pnpm -F @{{scope}}/api taizan:env-example` → `git diff .env.example` |
+| 密钥 / 加密列 | `pnpm taizan:rotate-key --dry-run` → 确认新列被覆盖到 |
+| cron / 队列 / 缓存 | `pnpm -F @{{scope}}/api test`（`cluster-safe.spec.ts`）→ 部署后 `bash deploy/checks/cron-single-check.sh` |
+
+**行为准则：**
+
+1. **不确定就先读 spec**。`apps/api/test/arch/**` 里的每个 spec 头部都写了它守什么、为什么。
+   它们比这份文档更新得更及时。
+2. **spec 红了先假设是自己错了**。这些断言的存在都有一次线上事故做背书。
+   真觉得断言不对，在 PR 里说清楚为什么，不要直接改断言。
+3. **`.skip` 一条 arch spec = 关掉一道安全闸门**，等同于代码里删掉一次校验。
+4. **加红线也是工作的一部分**：发现一个「不会报错但会出事」的模式，
+   最好的产出不是修那一处，是加一条 spec 把整类问题拦住。
+5. **改框架行为要去框架仓库**。在 `node_modules/@taizan/*` 里改的东西下次 `pnpm install` 就没了，
+   而且没人知道你改过。
+6. **写「为什么」不写「是什么」**。代码已经说清楚是什么了；注释要回答的是
+   「为什么是这样而不是那个更自然的写法」。这份文件里每条红线都有一句踩坑史，照这个标准写。
+
+---
+
+## 框架文档
+
+- `docs/SECURITY-INVARIANTS.md` — 上面每条红线的完整版（承接关系 + spec + 踩坑史）
+- `docs/EXTENSION-POINTS.md` — 七件事的逐文件手册
+- `docs/PLATFORM-SCHEMA.md` — 框架 27 张表的契约、哪些字段不许改
+- `docs/ERROR-CODES.md` — 全部错误码
+- `docs/UPGRADE.md` — 升级 `@taizan/*` 版本的标准步骤
+- `docs/RELEASE.md` — 框架的发布与 semver 纪律

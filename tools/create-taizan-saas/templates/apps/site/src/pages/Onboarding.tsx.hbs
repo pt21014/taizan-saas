@@ -1,0 +1,75 @@
+import { Link } from 'react-router-dom'
+import { usePageTitle } from '../hooks/usePageTitle'
+import { PageHead } from '../components/PageHead'
+import { useSiteConfig } from '../context/SiteConfigContext'
+import { NAV } from '../config/NAV'
+
+const STEPS: Array<[string, string]> = [
+  ['填表开店', '店铺名、店铺路径、手机号、密码。这一步完成，店就已经存在了。'],
+  ['进后台传第一件商品', '图文、音频、视频从浏览器直传，章节、试看、有效期在这一步设。'],
+  ['装修店铺首页', '拖组件排版，或者套一个平台模板。'],
+  ['接微信、收第一笔钱', '公众号授权给平台代管（或用自己的），后台填自己的微信商户号即可收款。'],
+  ['试用到期前决定', '合适就买套餐，数据原样接着用；不合适就放着，不会自动扣费。'],
+]
+
+export default function Onboarding() {
+  const meta = NAV[5]
+  usePageTitle(meta?.title ?? '开通流程', meta?.description)
+  const { cfg } = useSiteConfig()
+  const days = cfg?.trialDays ?? 14
+
+  return (
+    <>
+      <PageHead
+        eyebrow="开通流程"
+        title={`五步说清楚，${days} 天试用怎么用`}
+        desc="不用等审核、不用先付款、不用提前准备公众号。"
+      />
+
+      <section className="section">
+        <div className="container">
+          <div style=\{{ display: 'grid', gap: 20, maxWidth: 640, margin: '0 auto' }}>
+            {STEPS.map(([title, desc], i) => (
+              <div key={title} style=\{{ display: 'flex', gap: 16 }}>
+                <span
+                  style=\{{
+                    width: 30,
+                    height: 30,
+                    borderRadius: '50%',
+                    background: '#eef2ff',
+                    color: 'var(--{{projectName}}-color-primary)',
+                    display: 'grid',
+                    placeItems: 'center',
+                    fontWeight: 700,
+                    fontSize: 14,
+                    flex: 'none',
+                  }}
+                >
+                  {i + 1}
+                </span>
+                <div>
+                  <b>{title}</b>
+                  <p style=\{{ color: '#6b7078', fontSize: 14, marginTop: 4 }}>{desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div
+            className="notice notice--info"
+            style=\{{ marginTop: 32, maxWidth: 640, marginLeft: 'auto', marginRight: 'auto' }}
+          >
+            需要企业资质吗？开通试用不需要。等到要收款时，微信那边会要营业执照与结算账户——
+            那是微信的要求，平台只是把你填的商户号接进来。
+          </div>
+
+          <div style=\{{ textAlign: 'center', marginTop: 32 }}>
+            <Link className="btn btn--primary btn--lg" to="/signup">
+              开始注册
+            </Link>
+          </div>
+        </div>
+      </section>
+    </>
+  )
+}

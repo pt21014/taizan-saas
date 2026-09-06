@@ -1,0 +1,3 @@
+# build-release.sh 的中间产物与打包输出，不进仓库。
+.build/
+.releases/

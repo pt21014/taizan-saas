@@ -1,0 +1,82 @@
+name: Release
+
+# T4-6 版本与发布治理：push 到 main 后，用 changesets/action 走「Version PR → 合并 → 发布」两段式流程。
+# 第一次 push 命中待发布的 changeset 时，这个 workflow 会开一个 "Version Packages" PR（改版本号 + 写
+# CHANGELOG，不发布）；把那个 PR 合并回 main 后，本 workflow 再次触发，这次没有待处理的 changeset 了，
+# changesets/action 会转而执行 publish 命令，把改过版本号的包发到 npm。
+#
+# 注意：CI 环境（apps/api 的 .npmrc 或个人 ~/.npmrc）如果配置了国内镜像加速 install，那只应该用于装依赖，
+# 绝不能用来发布——下面用 actions/setup-node 的 registry-url 显式钉死官方 registry，并且发布相关的两步
+# （install 用于构建产物、publish 本身）都显式把 npm_config_registry 覆盖成官方地址，避免"CI 提速用的
+# 镜像"意外变成"发布用的 registry"。
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+env:
+  # 发布必须走 npm 官方 registry，不用仓库里可能为了国内加速配置的镜像源
+  NPM_REGISTRY: https://registry.npmjs.org
+
+jobs:
+  release:
+    name: Version or Publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # changesets 需要完整历史来算「相对哪个 base 有哪些待发布变更」
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        # 不显式传 version：pnpm/action-setup 会从根 package.json 的 "packageManager" 字段
+        # （当前是 pnpm@11.1.2）读取版本号，version 只有这一个真源，不在 workflow 里重复写死。
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: ${{ env.NPM_REGISTRY }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          npm_config_registry: ${{ env.NPM_REGISTRY }}
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+      - name: Check peer deps
+        run: pnpm check:peer-deps
+
+      - name: Create Version PR or Publish to npm
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          # version 命令：把待发布的 changeset 汇总进各 package.json + CHANGELOG.md（linked 的 9 个
+          # @taizan/nest-* 会被 changesets 自动同步成同一个版本号）
+          version: pnpm version-packages
+          # publish 命令：只在「本次没有待处理 changeset、且已经存在未发布的版本」时才会真正执行
+          publish: pnpm release
+          commit: 'chore: version packages'
+          title: 'chore: version packages'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          npm_config_registry: ${{ env.NPM_REGISTRY }}

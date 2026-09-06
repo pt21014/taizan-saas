@@ -1,0 +1,63 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 本地开发用的 MySQL + Redis。**只给开发用**，密码是弱口令、端口对本机开放。
+#
+# 端口刻意不用 3306 / 6379：这台机器上的老项目（xiaodian）compose 已经占了那两个，
+# 两套栈同时起会互相抢端口，而抢端口的表现是「连上了但库不对」——比连不上难查得多。
+# 所以框架栈固定用 **3307 / 6380**，`apps/api/.env` 里也是这两个。
+#
+#   pnpm dev:infra        起（-d 后台）
+#   pnpm dev:infra:down   停并删卷（数据不保留，本地重来一次很便宜）
+# ─────────────────────────────────────────────────────────────────────────────
+name: taizan-dev
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: taizan-mysql-dev
+    restart: unless-stopped
+    ports:
+      # 宿主 3307 → 容器 3306。改宿主侧端口时记得同步 apps/api/.env 的 DATABASE_URL。
+      - '3307:3306'
+    environment:
+      MYSQL_ROOT_PASSWORD: taizan_dev_root
+      MYSQL_DATABASE: taizan_dev
+      MYSQL_USER: taizan
+      MYSQL_PASSWORD: taizan_dev
+      TZ: Asia/Shanghai
+    command:
+      # utf8mb4 是硬约定：utf8（三字节）存不下 emoji，而商家的商品名里一定有 emoji。
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # 时间列一律按 UTC 存，展示时区由应用层决定；容器时区只影响日志。
+      # （MySQL 8 已经移除了 --innodb-large-prefix，写上去会直接 Aborting，别加回来。）
+      - --default-time-zone=+00:00
+    healthcheck:
+      # 用 mysqladmin ping 而不是 `nc -z 3306`：端口在初始化阶段就已经开了，
+      # 但那时候库还没建好，migrate 会撞上「Unknown database」。
+      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '-u', 'root', '-ptaizan_dev_root']
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 初始化脚本只在**数据卷为空**时执行一次；改了这里要 `pnpm dev:infra:down` 重来。
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+
+  redis:
+    image: redis:7-alpine
+    container_name: taizan-redis-dev
+    restart: unless-stopped
+    ports:
+      # 宿主 6380 → 容器 6379。理由同 MySQL。
+      - '6380:6379'
+    command: ['redis-server', '--appendonly', 'no', '--save', '']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+volumes:
+  mysql-data:

@@ -1,0 +1,50 @@
+{
+  "name": "@taizan/client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "C 端小程序 + H5（Taro 4 + React）：商品列表/详情、下单、会员登录、打烊页与店铺不可用页。装配 @taizan/client-core，业务页面本身不直接碰 Taro.request。",
+  "scripts": {
+    "dev:h5": "taro build --type h5 --watch",
+    "dev:weapp": "taro build --type weapp --watch",
+    "build": "npm run build:h5 && npm run build:weapp",
+    "build:h5": "taro build --type h5",
+    "build:weapp": "taro build --type weapp",
+    "lint": "eslint . --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@babel/runtime": "^7.26.0",
+    "@taizan/client-core": "workspace:*",
+    "@taizan/contracts": "workspace:*",
+    "@tarojs/components": "4.0.9",
+    "@tarojs/helper": "4.0.9",
+    "@tarojs/plugin-framework-react": "4.0.9",
+    "@tarojs/plugin-platform-h5": "4.0.9",
+    "@tarojs/plugin-platform-weapp": "4.0.9",
+    "@tarojs/react": "4.0.9",
+    "@tarojs/runtime": "4.0.9",
+    "@tarojs/shared": "4.0.9",
+    "@tarojs/taro": "4.0.9",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.26.0",
+    "@babel/plugin-proposal-class-properties": "^7.18.6",
+    "@babel/plugin-proposal-object-rest-spread": "^7.20.7",
+    "@babel/preset-react": "^7.26.3",
+    "@taizan/eslint-config": "workspace:*",
+    "@taizan/tsconfig": "workspace:*",
+    "@tarojs/cli": "4.0.9",
+    "@tarojs/webpack5-runner": "4.0.9",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@types/webpack-env": "^1.18.5",
+    "babel-preset-taro": "4.0.9",
+    "eslint": "^9.17.0",
+    "postcss": "^8.4.49",
+    "react-refresh": "^0.14.2",
+    "typescript": "^5.7.2",
+    "webpack": "5.91.0"
+  }
+}

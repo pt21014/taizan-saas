@@ -1,0 +1,40 @@
+import { createApiClient, toast } from '@taizan/app-ui'
+import Constants from 'expo-constants'
+import { router } from 'expo-router'
+
+import { sessionStore } from './session'
+
+interface ClientExtra {
+  apiBase?: string
+  tenantSlug?: string
+}
+
+const extra = (Constants.expoConfig?.extra ?? {}) as ClientExtra
+
+/**
+ * baseURL 与租户 slug 都从 `app.json` 的 `extra`（或同名 `EXPO_PUBLIC_*` env，优先级更高，
+ * 方便 EAS Build 按环境覆盖）读——**不写死具体域名当兜底**。
+ * knowledge 的反面教材是把 `https://apiknow.taizan.vip/api` 焊进代码当 fallback，
+ * 换一套环境就得改代码重发版；这里留空时交给 `tenant-missing`/启动态自己提示配置缺失。
+ */
+export const API_BASE = process.env.EXPO_PUBLIC_API_BASE?.trim() || extra.apiBase || ''
+export const DEFAULT_TENANT_SLUG =
+  process.env.EXPO_PUBLIC_TENANT_SLUG?.trim() || extra.tenantSlug || ''
+
+/**
+ * `@taizan/app-ui` 的 `createApiClient` 只做「错误分流」，导航能力要靠调用方接上：
+ * 401 清会话跳登录、`1440302` 跳打烊页，都在这里落地成具体的 `expo-router` 动作。
+ */
+export const api = createApiClient(API_BASE, {
+  getToken: () => sessionStore.getState().token,
+  getTenantSlug: () => DEFAULT_TENANT_SLUG || null,
+  onUnauthorized: () => {
+    void sessionStore.clear()
+    router.replace('/')
+  },
+  onShopClosed: (reason) => {
+    router.replace({ pathname: '/closed', params: { reason } })
+  },
+  onForbidden: (message) => toast.show(message),
+  onBizError: (message) => toast.show(message, 'error'),
+})

@@ -1,0 +1,332 @@
+import { expect, test, type Locator, type Page } from '@playwright/test'
+
+/**
+ * 平台超管后台端到端流程（需要真实后端，见 `playwright.config.ts` 头部注释）。
+ *
+ * 六条按任务顺序串成**一条**流程（共用一次平台登录 + 一次 owner 登录，一个套餐、
+ * 一个租户），而不是拆成六个独立 `test()`：登录接口有 `@RateLimited('login')`
+ * （同一 IP 5 分钟 10 次，按失败数计但客户端维度按请求数计），拆开会成倍消耗额度，
+ * 本机同时跑着其它联调进程时很容易互相顶到限流——联调时真实撞到过，不是猜的。
+ */
+
+const PLATFORM_USERNAME = 'admin'
+const PLATFORM_PASSWORD = 'admin123'
+const API_BASE = 'http://localhost:3000'
+
+function unique(prefix: string): string {
+  // 全局唯一：slug/code 不可重复，重复跑这个文件不该因为「上一次的数据还在」而失败。
+  return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1000)}`
+}
+
+/** antd DatePicker(showTime) 直接键入比开日历面板点「此刻」更稳（不依赖 zh_CN 面板文案）。 */
+function nowForDatePicker(): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const d = new Date()
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+/**
+ * antd 的 `<Button>`（`Radio.Button` 同理）对纯两个汉字的 children 会自动插入一个
+ * 半角空格做视觉对齐（「登录」渲染成「登 录」），这是 antd 自己的行为，不是本应用哪里
+ * 拼错了字。这里统一转成「字符间允许任意空白」的正则，不必每一个两字按钮名字都单独
+ * 记一次这个坑（第一次跑 e2e 就在「登录」按钮上撞见了，422 秒超时，教训写在这）。
+ */
+function cjk(name: string): RegExp {
+  const escaped = [...name].map((ch) => ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  return new RegExp(`^${escaped.join('\\s*')}$`)
+}
+
+type Scope = Pick<Page, 'getByRole'> | Pick<Locator, 'getByRole'>
+
+function btn(scope: Scope, name: string) {
+  return scope.getByRole('button', { name: cjk(name) })
+}
+
+/**
+ * antd `Radio.Button` 的原生 `<input type="radio">` 是视觉隐藏的换皮控件——不是简单的
+ * `opacity:0`，而是被挪到了视口外（`{ force: true }` 依然会报 "outside of the
+ * viewport"，说明常规「跳过可见性检查再点」这条路对它也不管用）。点包着它的文案也
+ * 试过，会点到别的地方把整个 Drawer 带关掉。最后落地的做法是绕开 Playwright 的
+ * actionability/视口检查，直接对这个 input 派发一个原生 `click` 事件——事件仍然会
+ * 冒泡到 React 的合成事件系统，antd 的 `onChange` 照样触发，只是不经过「鼠标真的移过去
+ * 点一下」这一层，这是 Playwright 官方文档给这类换皮控件推荐的兜底写法。
+ */
+async function clickRadio(scope: Scope, name: string): Promise<void> {
+  await scope.getByRole('radio', { name: cjk(name) }).dispatchEvent('click')
+}
+
+/**
+ * 按 slug 搜租户列表，返回搜出来的那一行。**不用** `page.locator('tr', { hasText:
+ * slug })`：`PlatformTenantList.tsx` 的 slug 列是 `textColumn`（宽度 140、antd
+ * `Typography.Text` 的 JS 省略号），slug 这种长字符串在列里会被真的截断成
+ * "e2e-shop-178…07" 这种样子、全文只留在 hover 的 tooltip 里——`hasText`/`getByText`
+ * 按完整 slug 子串去找，找到的是被截断后已经不含这个子串的文本，永远匹配不上
+ * （联调时以为是别的什么地方错了，查了很久才发现是这一层）。按 slug 搜索之后
+ * 服务端已经把结果收窄到唯一一行，直接拿 tbody 第一行更可靠。
+ */
+async function searchTenantRow(page: Page, slug: string): Promise<Locator> {
+  await page.getByLabel('店名 / slug', { exact: true }).fill(slug)
+  await btn(page, '查询').click()
+  // 排除 antd Table 自己塞进 tbody 第一行、专门用来量列宽的隐藏行
+  // （class="ant-table-measure-row" aria-hidden="true"）——真正的数据行都带
+  // `.ant-table-row`，两者选择器不一样，`.first()` 之前踩过量宽行这个坑。
+  const row = page.locator('.ant-table-tbody tr.ant-table-row').first()
+  await expect(row).toBeVisible()
+  return row
+}
+
+test.describe.configure({ mode: 'serial' })
+
+test('平台超管后台：登录→建套餐→建租户→续期→冻结/恢复→发公告→审计→注销', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000)
+
+  const planCode = unique('e2e-plan')
+  const planName = `E2E套餐-${planCode}`
+  const tenantSlug = unique('e2e-shop')
+  const ownerPhone = `139${String(Date.now()).slice(-8)}`
+  const ownerPassword = 'E2ePass123456'
+  let tenantId = ''
+
+  // ① 登录 → 看板有数字 ------------------------------------------------
+  await test.step('① 登录后看板出现数字', async () => {
+    // 本机常有其它联调进程同时打这个共享后端，login 档位的限流窗口偶尔会被别人
+    // 的流量顶满（e2e 联调时真实撞到过：单次登录请求恰好落在别人打满配额的那一刻）。
+    // 这里给登录本身留 2 次重试，每次间隔 15 秒，比把整条 e2e 判成「不稳定」更准确地
+    // 反映问题所在（共享环境的限流窗口，不是本应用的缺陷）。
+    await page.goto('/login')
+    let loggedIn = false
+    for (let attempt = 1; attempt <= 3 && !loggedIn; attempt += 1) {
+      await page.getByLabel('用户名').fill(PLATFORM_USERNAME)
+      await page.getByLabel('口令').fill(PLATFORM_PASSWORD)
+      await btn(page, '登录').click()
+      try {
+        await page.waitForURL('**/dashboard', { timeout: 15_000 })
+        loggedIn = true
+      } catch {
+        if (attempt === 3)
+          throw new Error('登录 3 次都没跳到 /dashboard，很可能是共享后端的登录限流窗口被占满')
+        await page.waitForTimeout(15_000)
+      }
+    }
+    const firstStat = page.locator('.ant-statistic-content-value').first()
+    await expect(firstStat).toBeVisible()
+    await expect(firstStat).not.toHaveText('')
+  })
+
+  // ② 建套餐（三态配额）→ 建租户 → 续期 → 订单列表出现 FULFILLED ----------
+  await test.step('② 建套餐（三态配额）', async () => {
+    await page.goto('/plans')
+    await btn(page, '新建套餐').click()
+    await page.getByLabel('code').fill(planCode)
+    await page.getByLabel('名称').fill(planName)
+    await page.getByLabel('首开价（分）').fill('100')
+    await page.getByLabel('续费价（分）').fill('100')
+    await page.getByLabel('计费周期（月）').fill('1')
+    // mode="tags" 的 Select：直接键入 + 回车，不点开下拉选项——antd 下拉面板挂在
+    // Drawer 里，点选项偶发「元素不可见」（联调时真实撞到过，重试 300+ 次仍不可见，
+    // 说明不是慢，是这条交互路径本身不稳），键入法不依赖弹层的可见性判定。
+    await page.getByLabel('允许接入的端').click()
+    await page.keyboard.type('admin')
+    await page.keyboard.press('Enter')
+    // 不按 Escape：选完 tag 后如果下拉已经自动收起，Escape 会被 Drawer 接住直接把整个
+    // 抽屉关掉（联调时真实撞过——后面所有字段瞬间无处可寻，报错却在几步之后才出现，
+    // 排查了很久）。改成点一下抽屉标题栏（中性区域）让下拉失焦收起，不碰键盘。
+    await page.locator('.ant-drawer-header').click()
+
+    // 三态配额：员工数限额 5、会员数不限（null）、自定义额度禁止（0），其余留默认。
+    // clickRadio 用 { force: true }：antd 换皮后原生 radio input 视觉隐藏，见函数注释。
+    const staffRow = page.getByTestId('quota-row-STAFF')
+    await clickRadio(staffRow, '限额')
+    // antd InputNumber 内部渲染的是 <input class="ant-input-number-input">，不是
+    // <input type="number">（它自己接管数字格式化/校验，不用原生 number 输入框）——
+    // 前几轮 e2e 一直卡在这一行「等不到元素」，根子在选择器本身选错了标签，
+    // 不是（之前怀疑的）radio 没点中。
+    await staffRow.locator('.ant-input-number-input').fill('5')
+    await clickRadio(page.getByTestId('quota-row-MEMBER'), '不限')
+    await clickRadio(page.getByTestId('quota-row-CUSTOM'), '禁止')
+
+    await btn(page, '保存').click()
+    // 用 planName 断言，不用 planCode：planCode 是 planName 的子串，两列都会含它，
+    // getByText 精确匹配不上但子串匹配会撞上两个单元格（strict mode 报错）。
+    await expect(page.getByText(planName)).toBeVisible()
+  })
+
+  await test.step('② 开通租户', async () => {
+    await page.goto('/tenants')
+    await btn(page, '开通新店').click()
+    // exact: true 是必须的——列表页顶部搜索框的 label 是「店名 / slug」，非精确匹配时
+    // getByLabel('slug')/('店名') 会把它当子串命中，跟抽屉里的字段撞在一起（strict mode）。
+    await page.getByLabel('slug', { exact: true }).fill(tenantSlug)
+    await page.getByLabel('店名', { exact: true }).fill('E2E 测试店')
+    await page.getByLabel('店主手机号').fill(ownerPhone)
+    await page.getByLabel('店主初始口令').fill(ownerPassword)
+    // 同上，改用键入 + 回车（PlatformTenantList.tsx 的套餐 Select 开了 showSearch）。
+    await page.getByLabel('套餐').click()
+    await page.keyboard.type(planName)
+    await page.keyboard.press('Enter')
+    await btn(page, '保存').click()
+    // 开通成功会弹一个 Modal.success，带回登录手机号/初始口令。真正可见的标题在
+    // .ant-modal-confirm-title 里；同名文案还会出现在一个隐藏的 .ant-modal-title
+    // 节点上（antd confirm 类弹窗的基座 Modal 结构自带、但不展示的那一份），直接定位
+    // 前者，不用会连带命中隐藏节点的通用 getByText。
+    await expect(page.locator('.ant-modal-confirm-title', { hasText: 'E2E 测试店' })).toBeVisible()
+    // antd 中文 locale 下，只有一个按钮的静态弹窗（Modal.success/info/…）用的是
+    // `justOkText`（「知道了」），不是英文默认的 "OK"，也不是 Modal.confirm 那个「确定」。
+    await btn(page, '知道了').click()
+    // 本机这个共享后端里已经堆了不少历史 e2e 跑出来的租户，新建的这条不一定落在
+    // 第一页——按 slug 搜一下再断言（searchTenantRow 的说明见函数注释：不能拿完整
+    // slug 去 getByText，那一列会被 antd 的省略号截断）。
+    const row = await searchTenantRow(page, tenantSlug)
+    await expect(row).toContainText('E2E 测试店')
+  })
+
+  await test.step('② 查 tenantId（供后续步骤用接口核对）', async () => {
+    // 直接从页面 localStorage 读已登录的平台 token（session.ts 的 STORAGE_PREFIX），
+    // 不用再打一次 /auth/login——全流程只在①用平台账号登录、③用 owner 账号登录各一次。
+    const platformToken = await page.evaluate(() => localStorage.getItem('taizan_platform_token'))
+    expect(platformToken).toBeTruthy()
+    const res = await request.get(`${API_BASE}/api/platform/tenants?keyword=${tenantSlug}`, {
+      headers: { Authorization: `Bearer ${platformToken}` },
+    })
+    const body = (await res.json()) as { data: { items: { id: string; slug: string }[] } }
+    const found = body.data.items.find((t) => t.slug === tenantSlug)
+    expect(found).toBeTruthy()
+    tenantId = found!.id
+  })
+
+  await test.step('② 续期', async () => {
+    await page.goto('/tenants')
+    const row = await searchTenantRow(page, tenantSlug)
+    await btn(row, '续期').click()
+    await page.getByLabel('计费周期数').fill('1')
+    await btn(page, '确定').click()
+    await expect(page.getByText('已续期')).toBeVisible()
+  })
+
+  await test.step('② 订单列表出现 FULFILLED（已履约）记录', async () => {
+    await page.goto('/orders')
+    await page.getByLabel('租户 ID').fill(tenantId)
+    await btn(page, '查询').click()
+    await expect(page.getByText('已履约')).toBeVisible()
+  })
+
+  // ③ 冻结租户 → 验证商家侧写操作被拦 → 恢复 ----------------------------
+  //
+  // 注 1：任务原话是「冻结后商家侧立刻 401」，但读了 packages/nest-billing/src/
+  // billing-gate.guard.ts 的实现确认：商家后台的计费闸门只拦**写**方法（GET 一律放行——
+  // 到期/冻结是「只读」不是「断网」），冻结（SUSPENDED）命中的是 `1440301`
+  // （PLAN_READONLY，httpSemantic 403），不是 401。
+  // 注 2：这个 403/401 都是**信封语义**（`httpSemantic(code)` 供客户端分流用），不是
+  // 真实的 HTTP 状态码——`apps/api` 全局异常过滤器不管信封 code 是什么，实际 HTTP
+  // 响应一律是 200（联调时先按 `expect(status()).toBe(403)` 写，实测每次都是 200，
+  // 才确认这一点；`grep httpSemantic apps/api/src` 也确实找不到任何用它设置 res.status
+  // 的地方）。所以这里判的是响应体里的信封 `code`，不判 HTTP 状态码。
+  // README「已知未覆盖点」里也记了任务描述（401）与实现（信封 403、HTTP 200）的出入。
+  let ownerToken = ''
+  await test.step('③ 商家 owner 登录，拿到 token', async () => {
+    // 同①的登录重试：这个接口跟平台登录共用 login 限流档位（同一 IP 5 分钟 10 次）。
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const res = await request.post(`${API_BASE}/api/admin/auth/login`, {
+        data: { phone: ownerPhone, password: ownerPassword },
+      })
+      const body = (await res.json()) as { data: { access: string } | null; code: number }
+      if (body.data?.access) {
+        ownerToken = body.data.access
+        break
+      }
+      if (attempt === 3)
+        throw new Error(`owner 登录 3 次都没拿到 token，最后一次 code=${body.code}`)
+      await page.waitForTimeout(15_000)
+    }
+    expect(ownerToken).toBeTruthy()
+  })
+
+  await test.step('③ 冻结租户', async () => {
+    await page.goto('/tenants')
+    const row = await searchTenantRow(page, tenantSlug)
+    await btn(row, '冻结').click()
+    await btn(page, '确定').click()
+    // .first()：message.success 的 toast 和表格状态列的 Tag 都会显示同一句文案。
+    await expect(page.getByText('已冻结').first()).toBeVisible()
+  })
+
+  await test.step('③ 冻结后：商家侧写请求 403（PLAN_READONLY），读请求仍放行', async () => {
+    const writeRes = await request.post(`${API_BASE}/api/admin/goods`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+      data: { name: 'x', priceCents: 100 },
+    })
+    // 见上面的注 2：判信封 code，不判 HTTP 状态码（这个应用的错误响应一律是 HTTP 200）。
+    const writeBody = (await writeRes.json()) as { code: number; message: string }
+    expect(writeBody.code).toBe(1440301)
+    expect(writeBody.message).toContain('冻结')
+
+    const readRes = await request.get(`${API_BASE}/api/admin/goods`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    })
+    const readBody = (await readRes.json()) as { code: number }
+    expect(readBody.code).toBe(0)
+  })
+
+  await test.step('③ 恢复租户', async () => {
+    // 页面还停在③冻结那一步筛好的搜索结果上（同一个 tenantSlug 过滤），直接拿现成的行。
+    const row = page.locator('.ant-table-tbody tr.ant-table-row').first()
+    await btn(row, '恢复').click()
+    await btn(page, '确定').click()
+    // .first()：同上，toast 与状态 Tag 文案相同。
+    await expect(page.getByText('已恢复').first()).toBeVisible()
+  })
+
+  // ④ 发布公告 -----------------------------------------------------------
+  const announcementTitle = unique('E2E公告')
+  await test.step('④ 发布公告', async () => {
+    await page.goto('/announcements')
+    await btn(page, '新建公告').click()
+    await page.getByLabel('标题').fill(announcementTitle)
+    await page.getByLabel('正文（HTML）').fill('<p>e2e</p>')
+    await page.getByLabel('展示起始时间').fill(nowForDatePicker())
+    await page.keyboard.press('Enter')
+    // 同上：不按 Escape，点抽屉标题栏让日历面板收起，避免误关整个 Drawer。
+    await page.locator('.ant-drawer-header').click()
+    await btn(page, '保存').click()
+    await expect(page.getByText(announcementTitle)).toBeVisible()
+
+    const row = page.locator('tr', { hasText: announcementTitle })
+    await btn(row, '发布').click()
+    await btn(page, '确定').click()
+    // 用 row 本身断言，不用整页 getByText('已发布')：本机堆了不少历史 e2e 发布过的
+    // 公告，页面里同时有十几个「已发布」Tag，strict mode 直接报错。
+    await expect(row).toContainText('已发布')
+  })
+
+  // ⑤ 审计列表能看到以上操作 ----------------------------------------------
+  await test.step('⑤ 平台审计日志能看到上面这些操作', async () => {
+    await page.goto('/audit-logs')
+    await page.getByLabel('目标租户 ID').fill(tenantId)
+    await btn(page, '查询').click()
+    await expect(page.getByText(/tenant\.(suspend|resume|renew)/).first()).toBeVisible()
+  })
+
+  // ⑥ 注销租户需要输入 slug 确认 ------------------------------------------
+  await test.step('⑥ 注销前：不输入/输错 slug，确定按钮保持禁用', async () => {
+    await page.goto('/tenants')
+    const row = await searchTenantRow(page, tenantSlug)
+    await btn(row, '注销').click()
+    const confirmButton = btn(page, '确定')
+    await expect(confirmButton).toBeDisabled()
+    await page.getByPlaceholder(tenantSlug).fill('输入错误的slug')
+    await expect(confirmButton).toBeDisabled()
+  })
+
+  await test.step('⑥ 输入正确 slug 后才能注销', async () => {
+    const confirmButton = btn(page, '确定')
+    await page.getByPlaceholder(tenantSlug).fill(tenantSlug)
+    await expect(confirmButton).toBeEnabled()
+    await confirmButton.click()
+    // .first()：这次同时看到两个「已注销」——message.success 的 toast 和表格状态列的
+    // Tag（此时表格上仍只有这一行，是搜索过滤剩下的结果），两个都能证明注销成功。
+    await expect(page.getByText('已注销').first()).toBeVisible()
+  })
+})

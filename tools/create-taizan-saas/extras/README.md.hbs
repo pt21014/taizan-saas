@@ -1,0 +1,89 @@
+# {{productName}}
+
+由 [`create-taizan-saas`](https://www.npmjs.com/package/create-taizan-saas) 生成的多租户 SaaS 项目。
+框架能力来自 `@taizan/*` npm 包（当前 `{{taizanVersion}}`），本仓库只写业务。
+
+> 先读 **`CLAUDE.md`**：那里是这个项目的红线清单（多租户隔离、金额单位、守卫、cron、
+> 限流取 IP……），每一条都注明「违反时哪个 spec 会红」。
+
+---
+
+## 1. 目录
+
+```
+{{projectName}}/
+├─ apps/
+│  ├─ api/          NestJS 后端，唯一进程。三命名空间：/api/platform、/api/admin、/api/client
+{{#if hasAdmin}}│  ├─ admin/        商家后台（React 19 + Vite + antd，dev :{{adminPort}}）
+{{/if}}{{#if hasPlatform}}│  ├─ platform/     平台超管后台（dev :{{platformPort}}）
+{{/if}}{{#if hasSite}}│  ├─ site/         官网 + 自助注册（dev :{{sitePort}}）
+{{/if}}{{#if hasClient}}│  ├─ client/       C 端小程序 / H5（Taro）
+{{/if}}{{#if hasAppClient}}│  ├─ app-client/   C 端 App（Expo）
+{{/if}}{{#if hasAppMerchant}}│  ├─ app-merchant/ 商家 App（Expo）
+{{/if}}├─ tools/          共享 tsconfig / eslint / prettier 配置 + 业务模块脚手架 codegen
+├─ deploy/         Docker / PM2 / nginx / 线上只读自检脚本
+└─ CLAUDE.md       红线清单（给人也给 AI 看）
+```
+
+## 2. 起本地环境
+
+```bash
+pnpm install
+pnpm dev:infra                 # 起 MySQL(3307) / Redis(6380) 容器
+cp apps/api/.env.example apps/api/.env   # 然后把 DATABASE_URL / 三套 JWT 密钥 / CRYPTO_KEYS 填上
+pnpm taizan:schema-sync        # 从 @taizan/prisma-base 同步框架 schema 片段到 00-base/
+pnpm prisma:generate
+pnpm -F {{scope}}/api exec prisma migrate dev --name init
+pnpm seed                      # 平台超管、两家演示租户、两档套餐
+pnpm dev                       # turbo 并行起全部端
+```
+
+访问：
+
+| 端 | 地址 |
+|---|---|
+| api | http://localhost:{{apiPort}}（Swagger `/docs`） |
+{{#if hasAdmin}}| 商家后台 | http://localhost:{{adminPort}} |
+{{/if}}{{#if hasPlatform}}| 平台后台 | http://localhost:{{platformPort}} |
+{{/if}}{{#if hasSite}}| 官网 | http://localhost:{{sitePort}} |
+{{/if}}
+
+## 3. 每天会用到的命令
+
+```bash
+pnpm lint && pnpm typecheck && pnpm test    # 提交前三件套
+pnpm test:arch                              # 只跑架构约束 spec（蓝图 §8 的 16 条）
+pnpm test:e2e                               # 需要 dev:infra 起着
+pnpm gen:module <slug> --name=中文名         # 一次生成一个业务模块的全部七处
+```
+
+## 4. 加一个业务模块
+
+`pnpm gen:module order --name=订单` 一次产出蓝图 §7 的七件事：
+
+1. `apps/api/prisma/schema/10-business/<nn>-order.prisma`（`tenantId` + `@@index([tenantId, id])` + `deletedAt`）
+2. `apps/api/src/tenancy/tenant-models.ts` 追加注册
+3. `apps/api/src/modules/order/`（module / controller / service / rules / permissions / menus / dto）
+4. `apps/api/src/registry/{permissions,menus,features,audit-actions,jobs}.ts` 追加
+5. `order-sync.handler.ts` 队列处理器
+6. 三个 spec（`order.rules.spec.ts` + e2e 骨架 + arch 复跑）
+7. `apps/admin/src/{api/order.ts,pages/order/index.tsx,routes/component-map.ts}`
+
+生成完**立刻**跑一遍 `pnpm test:arch`——七处里漏了任何一处，那 16 条断言里必有一条红。
+
+## 5. 升级框架
+
+改 `apps/*/package.json` 里 `@taizan/*` 的版本号，`pnpm install`，然后：
+
+```bash
+pnpm taizan:schema-check   # 框架 schema 片段有没有变
+pnpm test:arch             # 不变量有没有被新版本改掉
+```
+
+`@taizan/*` 的 semver 纪律：**签名逻辑任何行为变化都是 major**。升 major 前先读那个包的 CHANGELOG。
+
+## 6. 部署
+
+见 `deploy/README.md`。四个静态站点 + 一个 api 进程，nginx 配置在 `deploy/nginx/`，
+PM2 在 `deploy/pm2/ecosystem.config.cjs`（cron 走 `@LeaderCron`，4 实例下同一 tick 只跑一次）。
+上线后跑一遍 `deploy/checks/` 里的五个只读自检。

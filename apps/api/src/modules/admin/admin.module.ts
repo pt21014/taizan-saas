@@ -1,0 +1,49 @@
+/**
+ * `/api/admin` 命名空间的聚合模块（商家后台）。
+ *
+ * 这条命名空间**进**租户中间件，但属于 `TENANT_TOKEN_ONLY_PREFIXES`：
+ * 当前店铺只能由 staff token 决定，`X-Tenant-Slug` 与子域名在这里一概不作数；
+ * 解析不到时中间件留空放行，由 `GlobalAuthGuard` 给出 1140100。
+ *
+ * 示例业务模块 `example-goods` 也挂在这条命名空间下（`/api/admin/goods`），
+ * 但它单独成模块、在 `app.module.ts` 里平级引入——业务模块不该塞进框架面的聚合模块里，
+ * 那样生成器就没法「删掉示例模块」了。
+ *
+ * ## T1-9 起这里有八个子模块
+ *
+ * 前三个是「进后台之前」的（登录 / 账单 / bootstrap），后五个是**框架自带的商家侧
+ * 管理面**——员工、角色、审计、公告、个人设置。它们与 `apps/admin` 里那五个
+ * 早就画好的页面一一对应（`StaffList` / `RoleList` / `AuditList` /
+ * `AnnouncementList` / `ProfileSettings`），菜单在 `registry/menus.ts` 里登记。
+ *
+ * 它们**是框架的一部分**，所以进这个聚合模块；判据是「删掉示例业务模块之后，
+ * 一个新项目仍然需要它」。员工管理与角色配置显然属于这一类。
+ *
+ * @packageDocumentation
+ */
+
+import { Module } from '@nestjs/common'
+
+import { AdminAnnouncementModule } from './announcement/admin-announcement.module'
+import { AdminAuditModule } from './audit/admin-audit.module'
+import { AdminAuthModule } from './auth/admin-auth.module'
+import { AdminBillingModule } from './billing/admin-billing.module'
+import { AdminBootstrapModule } from './bootstrap/bootstrap.module'
+import { AdminProfileModule } from './profile/admin-profile.module'
+import { AdminRoleModule } from './role/admin-role.module'
+import { AdminStaffModule } from './staff/admin-staff.module'
+
+@Module({
+  imports: [
+    AdminAuthModule,
+    AdminBillingModule,
+    AdminBootstrapModule,
+    // ── T1-9 框架自带的商家侧管理面 ────────────────────────────────────
+    AdminStaffModule,
+    AdminRoleModule,
+    AdminAuditModule,
+    AdminAnnouncementModule,
+    AdminProfileModule,
+  ],
+})
+export class AdminModule {}

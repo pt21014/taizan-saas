@@ -1,0 +1,34 @@
+.login {
+  padding: 48px 32px;
+
+  &__title {
+    font-size: 36px;
+    color: #333;
+    margin-bottom: 32px;
+  }
+
+  &__field {
+    margin-bottom: 24px;
+  }
+
+  &__input {
+    height: 88px;
+    padding: 0 24px;
+    background: #fff;
+    border-radius: 12px;
+    font-size: 30px;
+  }
+
+  &__error {
+    color: #ff4d4f;
+    font-size: 26px;
+    margin-bottom: 16px;
+  }
+
+  &__divider {
+    text-align: center;
+    color: #999;
+    margin: 32px 0;
+    font-size: 24px;
+  }
+}

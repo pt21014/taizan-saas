@@ -1,0 +1,39 @@
+{
+  "name": "{{projectName}}",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "{{productName}}：基于 taizan-saas 框架（@taizan/* npm 包）的多租户 SaaS 项目",
+  "packageManager": "pnpm@11.1.2",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "dev": "turbo run dev",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "dev:infra": "docker compose -f deploy/docker/docker-compose.dev.yml up -d",
+    "dev:infra:down": "docker compose -f deploy/docker/docker-compose.dev.yml down -v",
+    "test:arch": "pnpm -F {{scope}}/api exec vitest run test/arch --reporter=verbose",
+    "test:e2e": "pnpm -F {{scope}}/api test:e2e",
+    "prisma:generate": "pnpm -F {{scope}}/api prisma:generate",
+    "prisma:migrate": "pnpm -F {{scope}}/api prisma:migrate",
+    "seed": "pnpm -F {{scope}}/api seed",
+    "taizan:schema-sync": "pnpm -F {{scope}}/api taizan:schema-sync",
+    "taizan:schema-check": "pnpm -F {{scope}}/api taizan:schema-check",
+    "gen:module": "pnpm -F {{scope}}/codegen gen",
+    "build:module-check": "pnpm -F {{scope}}/api exec vitest run test/arch"
+  },
+  "devDependencies": {
+    "{{scope}}/prettier-config": "workspace:*",
+    "prettier": "^3.4.2",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  },
+  "prettier": "{{scope}}/prettier-config"
+}

@@ -1,0 +1,68 @@
+import { Link } from 'react-router-dom'
+import { usePageTitle } from '../hooks/usePageTitle'
+import { useSiteConfig } from '../context/SiteConfigContext'
+import { Cta } from '../components/Cta'
+import { NAV } from '../config/NAV'
+
+const HIGHLIGHTS = [
+  ['自助开店', '店铺名、路径、手机号、密码，四项填完试用立刻生效，不用等审核。'],
+  ['微信双端', '公众号与小程序都能开店，同一套后台一起管。'],
+  ['价格现取', '套餐价目从平台后台现查，官网不写死一份对不上的旧价格。'],
+  ['到期不丢数据', '套餐到期后台转只读，数据一直留着，续费立刻恢复。'],
+]
+
+export default function Home() {
+  usePageTitle(NAV[0]?.title ?? '首页', NAV[0]?.description)
+  const { cfg } = useSiteConfig()
+
+  return (
+    <>
+      <section className="section" style=\{{ paddingBottom: 0 }}>
+        <div className="container">
+          <div className="section__head" style=\{{ maxWidth: 720 }}>
+            <span style=\{{ color: 'var(--{{projectName}}-color-primary)', fontWeight: 700, fontSize: 13 }}>
+              知识付费与私域电商 SaaS
+            </span>
+            <h1 style=\{{ fontSize: 44, margin: '12px 0' }}>开店只填四项，试用当场生效</h1>
+            <p>
+              卖课、直播、教务、分销一套搞定，微信公众号与小程序双端开店。
+              {cfg ? `注册即送 ${cfg.trialDays} 天试用` : '注册即送试用，天数以站点配置为准'}，
+              不用先付款、不用提前准备公众号。
+            </p>
+            <div
+              style=\{{
+                display: 'flex',
+                gap: 12,
+                justifyContent: 'center',
+                flexWrap: 'wrap',
+                marginTop: 20,
+              }}
+            >
+              <Link className="btn btn--primary btn--lg" to="/signup">
+                免费注册
+              </Link>
+              <Link className="btn btn--ghost btn--lg" to="/pricing">
+                看套餐价格
+              </Link>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="section">
+        <div className="container">
+          <div className="grid grid--2">
+            {HIGHLIGHTS.map(([title, desc]) => (
+              <div className="card" key={title}>
+                <h3>{title}</h3>
+                <p style=\{{ color: '#6b7078', marginTop: 8 }}>{desc}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <Cta trialDays={cfg?.trialDays ?? null} />
+    </>
+  )
+}

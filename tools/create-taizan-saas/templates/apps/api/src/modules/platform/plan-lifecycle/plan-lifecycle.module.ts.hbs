@@ -1,0 +1,27 @@
+import { Module } from '@nestjs/common'
+
+import { PlanOrderModule } from '../plan-order/plan-order.module'
+import { ExpireNotifyCron } from './expire-notify.cron'
+import { TrialConvertCron } from './trial-convert.cron'
+
+/**
+ * 到期提醒 + 试用转化（T2-7，蓝图 §4.6）。
+ *
+ * `retention.cli.ts` **不在这里**——它是一条独立运行的脚本（`pnpm -F {{scope}}/api
+ * retention --dry-run`），自己 `new PrismaClient()`，不装配 Nest 应用，不需要
+ * 也不该挂进模块树（起一整个 HTTP 应用只为了跑一次名单扫描是浪费）。
+ *
+ * `PlanOrderModule`：`TrialConvertCron` 的自动转化分支复用 `PlanOrderService`
+ * 的统一 fulfill 路径（不自己碰 `Tenant.planExpireAt`，理由见该 cron 文件头）。
+ *
+ * 两个 cron 类只要出现在 `providers` 里就够了——`@taizan/nest-infra` 的
+ * `CronRegistry` 用 `DiscoveryService` 扫全容器找 `@LeaderCron`，不需要在
+ * `InfraModule.forRoot()` 里再登记一遍（与 `PlanOrderModule` 的
+ * `cancelExpired()`、`PlanOrderPaymentHandler` 同一套装配方式）。
+ */
+@Module({
+  imports: [PlanOrderModule],
+  providers: [ExpireNotifyCron, TrialConvertCron],
+  exports: [ExpireNotifyCron, TrialConvertCron],
+})
+export class PlanLifecycleModule {}

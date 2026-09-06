@@ -1,0 +1,89 @@
+/**
+ * 蓝图 §7 扩展点⑦ **注册队列任务**：模块内定义处理器，`src/registry/jobs.ts` 汇总。
+ *
+ * ## 这个 handler 故意什么业务都不做
+ *
+ * 它只记一份「最近一次执行」的快照。脚手架要保证的是**接线**这件事：
+ *
+ * 1. `@JobHandler({ name })` 被 `ProcessorFactory` 扫到并起了 worker；
+ * 2. 入队方的 `traceId` 变成了执行时的 `parentTraceId`（链路串得回去）；
+ * 3. 信封里的 `originTenantId` 变成了执行时的租户上下文——**这一条最要紧**：
+ *    漏了它，处理器里用 `prisma.tenant` 会直接抛「无租户上下文」（这算好的），
+ *    万一处理器改用了 `prisma.raw`，那就是跨租户写数据。
+ *
+ * 真实业务在这三件事之上才开始写自己的逻辑。
+ *
+ * ## 失败语义
+ *
+ * `JobProcessor` 的契约是「**抛异常 = 这次尝试失败**」。不要在 `process()` 里
+ * `try/catch` 然后吞掉——吞掉等于告诉队列「成功了」，重试与死信全部失效，
+ * 而失败的任务会安静地消失。
+ *
+ * @packageDocumentation
+ */
+
+import { Inject, Injectable } from '@nestjs/common'
+import { JobHandler, type JobEnvelope, type JobProcessor } from '@taizan/nest-infra'
+import { AppLogger, currentContext } from '@taizan/nest-core'
+
+/** `{{slug}}.sync` 的任务名。入队方与注册表都引用这个常量，不各写一遍字符串。 */
+export const {{CONST}}_SYNC_JOB_NAME = '{{slug}}.sync'
+
+/** `{{slug}}.sync` 的消息体。 */
+export interface {{Pascal}}SyncPayload {
+  /** 要同步的记录 id。 */
+  {{camel}}Id: string
+  /** 触发原因，只用于日志（`create` / `update` / `manual`）。 */
+  reason: string
+}
+
+/** 一次执行的快照，见 {@link {{Pascal}}SyncHandler.lastRun}。 */
+export interface {{Pascal}}SyncRun {
+  {{camel}}Id: string
+  reason: string
+  /** 本次执行自己的 traceId。 */
+  traceId: string | undefined
+  /** 入队方的 traceId。链路靠它串回「用户点了哪个按钮」。 */
+  parentTraceId: string | undefined
+  /** 从信封恢复出来的租户上下文。 */
+  tenantId: string | undefined
+  at: number
+}
+
+@Injectable()
+@JobHandler({ name: {{CONST}}_SYNC_JOB_NAME, attempts: 3 })
+export class {{Pascal}}SyncHandler implements JobProcessor<{{Pascal}}SyncPayload> {
+  /**
+   * 最近一次执行的快照，没跑过时是 `null`。
+   *
+   * 存在的理由是**可观测**：队列执行发生在请求之外，出问题时唯一的线索是日志，
+   * 而日志在测试里抓起来很别扭。留一个只读快照，e2e 才能断言「handler 真的被执行了、
+   * 而且 traceId 链是对的」。
+   *
+   * 是一个可空对象而不是数组/Map：**不累积**，所以它不是进程内状态，
+   * 多实例下也没有「各存各的」的问题。
+   */
+  lastRun: {{Pascal}}SyncRun | null = null
+
+  constructor(@Inject(AppLogger) private readonly logger: AppLogger) {}
+
+  async process(envelope: JobEnvelope<{{Pascal}}SyncPayload>): Promise<void> {
+    const ctx = currentContext()
+    const { {{camel}}Id, reason } = envelope.data
+
+    this.lastRun = {
+      {{camel}}Id,
+      reason,
+      traceId: ctx?.traceId,
+      parentTraceId: ctx?.parentTraceId,
+      tenantId: ctx?.tenantId,
+      at: Date.now(),
+    }
+
+    this.logger.log(
+      '已同步{{name}} ' + {{camel}}Id + '（原因 ' + reason + '，租户 ' + (ctx?.tenantId ?? '无') + '）',
+      '{{Pascal}}Sync',
+    )
+    await Promise.resolve()
+  }
+}

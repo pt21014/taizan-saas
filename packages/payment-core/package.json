@@ -1,0 +1,42 @@
+{
+  "name": "@taizan/payment-core",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "description": "支付 Provider 统一接口（下单/回调解析/查单/退款/退款回调）、outTradeNo 前缀规范与领域路由、分账金额拆分、支付错误类型、供 e2e 用的 FakeProvider。零框架依赖，只依赖 @taizan/contracts。",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@taizan/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@taizan/eslint-config": "workspace:*",
+    "@taizan/tsconfig": "workspace:*",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

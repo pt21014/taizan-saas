@@ -1,0 +1,108 @@
+/**
+ * **就地改写**：往已有文件里插一行/一块，且**可重复执行不重复插**。
+ *
+ * ## 为什么不用 AST
+ *
+ * 要插的东西全是「import 一行 + 数组/对象里加一项」，形状固定。上 ts-morph 的代价是
+ * 多一个几十 MB 的依赖、以及「格式化后与仓库 prettier 风格不一致」这个每次都要处理的
+ * 尾巴。锚点插入的代价是「锚点变了就失效」——而这一点是**可检测的**：找不到锚点直接抛，
+ * 不静默跳过。静默跳过才是真正危险的：生成器说成功了，而七件事只做了六件，
+ * 那漏掉的一件恰恰可能是「注册隔离」，后果是跨租户泄漏。
+ *
+ * ## 幂等
+ *
+ * 每次插入都先看 `marker`（通常就是要插的那行的特征串）在不在。在就跳过并报告
+ * `skipped`——重跑一次 `pnpm gen:module order` 不该产出两份注册。
+ *
+ * @packageDocumentation
+ */
+
+import { readFileSync, writeFileSync } from 'node:fs'
+
+/** 一次插入的结果。 */
+export type EditOutcome = 'inserted' | 'skipped'
+
+export interface InsertSpec {
+  /** 目标文件绝对路径。 */
+  file: string
+  /** 要插入的文本（不含结尾换行）。 */
+  text: string
+  /** 幂等标记：文件里已经有它就不再插。 */
+  marker: string
+  /** 这次插入对应蓝图 §7 的哪一件事，报告与报错信息里用。 */
+  what: string
+}
+
+/**
+ * 插在**最后一条匹配 `after` 的行之后**。
+ *
+ * 「最后一条」而不是第一条：import 区、数组里的条目都是同类多行，插在最后一条之后
+ * 才能保持分组不被打散。
+ */
+export function insertAfterLast(spec: InsertSpec & { after: RegExp }): EditOutcome {
+  return edit(spec, (lines) => {
+    let at = -1
+    for (let i = 0; i < lines.length; i++) if (spec.after.test(lines[i] as string)) at = i
+    if (at === -1) throw anchorMissing(spec.file, spec.what, String(spec.after))
+    return at + 1
+  })
+}
+
+/** 插在**第一条匹配 `before` 的行之前**。 */
+export function insertBeforeFirst(spec: InsertSpec & { before: RegExp }): EditOutcome {
+  return edit(spec, (lines) => {
+    const at = lines.findIndex((l) => spec.before.test(l))
+    if (at === -1) throw anchorMissing(spec.file, spec.what, String(spec.before))
+    return at
+  })
+}
+
+function edit(spec: InsertSpec, locate: (lines: string[]) => number): EditOutcome {
+  const original = readFileSync(spec.file, 'utf8')
+  if (original.includes(spec.marker)) return 'skipped'
+  const lines = original.split('\n')
+  const at = locate(lines)
+  lines.splice(at, 0, ...spec.text.split('\n'))
+  writeFileSync(spec.file, lines.join('\n'), 'utf8')
+  return 'inserted'
+}
+
+function anchorMissing(file: string, what: string, anchor: string): Error {
+  return new Error(
+    `[codegen] 在 ${file} 里找不到插入锚点（${what}）。\n` +
+      `  锚点：${anchor}\n` +
+      '  这个文件被改过，或者项目不是由 create-taizan-saas 生成的。\n' +
+      '  **不要跳过这一步**——蓝图 §7 的七件事漏掉任何一件，`pnpm test:arch` 都会红，\n' +
+      '  而漏掉「注册隔离」那一件的后果是跨租户泄漏。手动照着 example 模块补上。',
+  )
+}
+
+/**
+ * 在 JSON 文件的某个字符串字段里追加一个逗号分隔项（幂等）。
+ *
+ * 唯一的用户是 `apps/api/package.json` 的
+ * `taizan:verify-schema --registered={{DomainPascal}},{{DomainPascal}}Sku`——它不是代码，没有锚点行可插。
+ */
+export function appendToDelimitedScript(
+  file: string,
+  scriptName: string,
+  flag: string,
+  value: string,
+): EditOutcome {
+  const pkg = JSON.parse(readFileSync(file, 'utf8')) as {
+    scripts?: Record<string, string>
+  }
+  const script = pkg.scripts?.[scriptName]
+  if (script === undefined) {
+    throw new Error(`[codegen] ${file} 里没有 "${scriptName}" 脚本，无法追加 ${flag}${value}。`)
+  }
+  const re = new RegExp(`(${flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})([^\\s"]*)`)
+  const m = re.exec(script)
+  if (!m) throw new Error(`[codegen] "${scriptName}" 里没有 ${flag} 参数。`)
+  const items = (m[2] ?? '').split(',').filter(Boolean)
+  if (items.includes(value)) return 'skipped'
+  items.push(value)
+  ;(pkg.scripts as Record<string, string>)[scriptName] = script.replace(re, `$1${items.join(',')}`)
+  writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n', 'utf8')
+  return 'inserted'
+}

@@ -1,0 +1,103 @@
+import { Card, colors, spacing, textVariants, toast } from '@taizan/app-ui'
+import { router } from 'expo-router'
+import { useEffect } from 'react'
+import { ScrollView, Text, View } from 'react-native'
+
+import { sessionStore } from '../src/session'
+
+/** 看板：登录/换店后拿到的 `BootstrapResponse` 是唯一真源，这一屏只是把它摆出来。 */
+export default function DashboardScreen() {
+  const session = sessionStore.useSession()
+  const bootstrap = session.data?.bootstrap
+
+  useEffect(() => {
+    if (!bootstrap) {
+      toast.show('会话已失效，请重新登录', 'error')
+      router.replace('/login')
+    }
+  }, [bootstrap])
+
+  if (!bootstrap) {
+    return null
+  }
+
+  const { identity, tenant, shops, quotas } = bootstrap
+
+  return (
+    <ScrollView
+      style={{ flex: 1, backgroundColor: colors.bgBase }}
+      contentContainerStyle={{ padding: spacing.lg }}
+    >
+      <Card padded style={{ marginBottom: spacing.lg }}>
+        <Text style={{ fontSize: textVariants.title.fontSize, fontWeight: '700' }}>
+          {tenant.name}
+        </Text>
+        <Text
+          style={{
+            fontSize: textVariants.sub.fontSize,
+            color: colors.gray[500] ?? '#999',
+            marginTop: spacing.xs,
+          }}
+        >
+          {identity.name}
+          {identity.isOwner ? ' · 店主' : ''}
+        </Text>
+        {tenant.readonly ? (
+          <Text
+            style={{
+              fontSize: textVariants.sub.fontSize,
+              color: colors.warning,
+              marginTop: spacing.sm,
+            }}
+          >
+            套餐已到期，后台暂只读，请续费
+          </Text>
+        ) : null}
+      </Card>
+
+      {shops.length > 1 ? (
+        <Card padded style={{ marginBottom: spacing.lg }}>
+          <Text
+            style={{
+              fontSize: textVariants.body.fontSize,
+              color: colors.primary,
+              fontWeight: '600',
+            }}
+            onPress={() =>
+              router.push({ pathname: '/shop-chooser', params: { shops: JSON.stringify(shops) } })
+            }
+          >
+            换店（当前名下共 {shops.length} 家）
+          </Text>
+        </Card>
+      ) : null}
+
+      <Card padded>
+        <Text
+          style={{
+            fontSize: textVariants.head.fontSize,
+            fontWeight: '600',
+            marginBottom: spacing.md,
+          }}
+        >
+          配额用量
+        </Text>
+        {Object.entries(quotas).map(([key, quota]) => (
+          <View
+            key={key}
+            style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6 }}
+          >
+            <Text
+              style={{ fontSize: textVariants.sub.fontSize, color: colors.gray[600] ?? '#666' }}
+            >
+              {key}
+            </Text>
+            <Text style={{ fontSize: textVariants.sub.fontSize, fontWeight: '600' }}>
+              {quota.used} / {quota.limit ?? '不限'}
+            </Text>
+          </View>
+        ))}
+      </Card>
+    </ScrollView>
+  )
+}

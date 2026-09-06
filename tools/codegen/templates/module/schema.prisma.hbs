@@ -1,0 +1,47 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// {{name}}（{{slug}}）—— 业务表片段，由 `pnpm gen:module {{slug}}` 生成。
+//
+// 这里的每一条都不是风格偏好，各有一条静态断言看着（apps/api/test/arch/）：
+//
+//   · 主键 `String @id @db.VarChar(26)`，值是应用层生成的 ULID（不写 @default）；
+//   · `tenantId String` **NOT NULL**，且必须登记进 `src/tenancy/tenant-models.ts`；
+//   · 状态一律 enum，禁止裸 Int/String；
+//   · 金额一律 Int 且列名以 `Cents` 结尾，禁用 Decimal；
+//   · 软删列 `deletedAt DateTime?`；
+//   · 每张租户表必有 `@@index([tenantId, id])`；
+//   · 业务唯一索引必须带 `deletedAt` 维度（否则软删后同名记录建不回来）。
+//
+// 唯一索引带 deletedAt 的已知代价：MySQL 把 NULL 视为互不相同，所以
+// `@@unique([tenantId, name, deletedAt])` 在活跃行之间**不构成硬唯一**，
+// 活跃唯一性由应用层兜（见 {{slug}}.service.ts 的 assertNameAvailable）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// {{name}}。
+model {{Pascal}} {
+  id         String        @id @db.VarChar(26)
+  tenantId   String        @db.VarChar(26)
+  name       String
+  /// 金额，单位「分」。金额一律 Int + `Cents` 后缀，禁用 Decimal（对账口径只能有一个）。
+  priceCents Int           @default(0)
+  status     {{Pascal}}Status @default(DRAFT)
+  remark     String?       @db.Text
+  /// 创建人（Staff.id）。**数据范围（@DataScope）的归属列**——`dataScope = SELF` 的
+  /// 员工只看得到自己建的记录。可空：seed 造的数据与队列代建的行都没有「人」。
+  createdBy  String?       @db.VarChar(26)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+  deletedAt  DateTime?
+
+  @@unique([tenantId, name, deletedAt])
+  @@index([tenantId, id])
+  @@index([tenantId, status])
+  /// 数据范围收窄（`createdBy = 我`）是列表页的常规查询，没有索引它就是全表扫。
+  @@index([tenantId, createdBy])
+}
+
+/// {{name}}状态。状态列一律 enum（`enum-and-key.spec.ts` 看着）。
+enum {{Pascal}}Status {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}

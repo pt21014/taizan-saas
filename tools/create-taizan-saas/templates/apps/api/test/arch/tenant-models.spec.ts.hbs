@@ -1,0 +1,124 @@
+/**
+ * 蓝图 §8 **spec 1**：`TENANT_MODELS` ↔ `prisma/schema/**` 双向比对 + 解析器哨兵。
+ *
+ * 守的不变量：**漏登记 = 静默跨租户泄漏**（xiaodian 2026-08 的真实事故）。
+ * 一张带 `tenantId` 的新表如果没进注册表，隔离扩展会把它当「非租户域模型」原样放行，
+ * 于是那张表上的每一次查询都是全平台的——而且不报错，只是数据变多了。
+ *
+ * 三个方向都要查：
+ * - schema 有 `tenantId` 但注册表没有 → 那张表毫无隔离；
+ * - 注册表有但 schema 里查无此列 → 名字写错了，等于也没隔离；
+ * - `tenantId` 可空 → 蓝图 §3.1 明令禁止（可空归属 = 隔离有例外，例外最容易丢）。
+ *
+ * 外加**哨兵**：一份答案写死的 schema 文本喂给同一个解析器。正则哪天被改坏，
+ * 哨兵会先炸——而不是让真实 schema「一个问题都没扫到」地假通过。
+ * 「扫不到东西」和「没有问题」在断言上长得一模一样，这是静态扫描最容易骗过自己的地方。
+ */
+
+import { BASE_PLATFORM_ALLOWLIST } from '@taizan/prisma-base'
+import {
+  formatVerifySchemaReport,
+  parsePrismaModels,
+  runParserSentinel,
+  SENTINEL_SCHEMA,
+  verifySchema,
+} from '@taizan/tenant-scope'
+import { readFileSync } from 'node:fs'
+import { describe, expect, it } from 'vitest'
+
+import { SOFT_DELETE_MODELS, TENANT_MODELS } from '../../src/tenancy/tenant-models'
+import { SCHEMA_DIR } from './_helpers'
+
+const result = verifySchema({
+  schemaDirs: [SCHEMA_DIR],
+  registered: TENANT_MODELS,
+  allowlist: BASE_PLATFORM_ALLOWLIST,
+})
+
+describe('spec 1：租户模型注册表与 schema 双向比对', () => {
+  it('解析器哨兵通过（正则失效时这条先炸，而不是让真实 schema 假通过）', () => {
+    expect(runParserSentinel()).toBe(true)
+    // 再自己独立验一遍：哨兵 schema 里塞了注释掉的字段、`@@index([tenantId, id])`
+    // 这种块级属性里出现的 tenantId、以及 view 块——三种最容易把解析器带沟里的写法。
+    const parsed = parsePrismaModels(SENTINEL_SCHEMA)
+    expect(parsed.length).toBeGreaterThan(0)
+  })
+
+  it('真的扫到了文件（空目录会让下面每一条都「通过」）', () => {
+    // 生成器改写：框架仓库里写死 10（9 个框架片段 + 1 个示例片段），业务项目里
+    // 每跑一次 `pnpm gen:module` 就多一个片段，写死会让「加一张表」这件事本身把
+    // 测试跑红。改成下界——哨兵要防的是「扫了个空目录所以全绿」，下界同样防得住。
+    expect(result.scannedFiles.length).toBeGreaterThanOrEqual(9)
+    expect(result.unreadable).toEqual([])
+  })
+
+  it('schema 里带 tenantId 的 model 全部在注册表里', () => {
+    expect(result.missingInRegistry, formatVerifySchemaReport(result)).toEqual([])
+  })
+
+  it('注册表里的 model 在 schema 里都有 tenantId 列', () => {
+    expect(result.missingInSchema, formatVerifySchemaReport(result)).toEqual([])
+  })
+
+  it('没有可空的 tenantId（§3.1：需要「平台共享 + 租户私有」的一律拆表）', () => {
+    expect(result.nullableTenantId, formatVerifySchemaReport(result)).toEqual([])
+  })
+
+  it('白名单条目全部合法（理由不能为空）', () => {
+    expect(result.invalidAllowlist).toEqual([])
+  })
+
+  it('整体通过', () => {
+    expect(result.ok, formatVerifySchemaReport(result)).toBe(true)
+  })
+
+  it('业务表确实在清单里（防止 register 那行被误删后本 spec 仍然全绿）', () => {
+    expect(TENANT_MODELS.has('{{DomainPascal}}')).toBe(true)
+    expect(TENANT_MODELS.has('{{DomainPascal}}Sku')).toBe(true)
+    expect(result.modelsWithTenantId).toContain('{{DomainPascal}}')
+  })
+})
+
+describe('SOFT_DELETE_MODELS 与 schema 的 deletedAt 列双向比对', () => {
+  /**
+   * 这条不在蓝图 §8 的清单里，但它守的是同一类失败：**漏登记不报错**。
+   *
+   * 软删清单漏一张表，那张表的 `delete()` 会真的把行物理删掉，而读路径看起来完全正常
+   * （本来也没有 deletedAt 要过滤）。等到有人要恢复数据 / 查审计追溯时才发现记录没了。
+   */
+  /** 扫所有 `.prisma`，收集「有 deletedAt 列」的 model 名。 */
+  function modelsWithDeletedAt(): Set<string> {
+    const found = new Set<string>()
+    for (const file of result.scannedFiles) {
+      const text = readFileSync(file, 'utf8')
+      const modelBlocks = text.matchAll(/^model\s+([A-Za-z_][\w]*)\s*\{([\s\S]*?)^\}/gm)
+      for (const match of modelBlocks) {
+        const [, name = '', body = ''] = match
+        if (/^\s*deletedAt\s+DateTime\?/m.test(body)) found.add(name)
+      }
+    }
+    return found
+  }
+
+  const actual = modelsWithDeletedAt()
+
+  it('哨兵：确实解析出了若干张软删表（正则失效会让下面两条假通过）', () => {
+    expect(actual.size).toBeGreaterThanOrEqual(5)
+  })
+
+  it('schema 里每张有 deletedAt 的表都登记进了 SOFT_DELETE_MODELS', () => {
+    const missing = [...actual].filter((m) => !SOFT_DELETE_MODELS.has(m)).sort()
+    expect(
+      missing,
+      `这些表有 deletedAt 列却不在 SOFT_DELETE_MODELS 里，它们的 delete() 会**物理删除**：\n  ${missing.join('\n  ')}`,
+    ).toEqual([])
+  })
+
+  it('SOFT_DELETE_MODELS 里的表在 schema 里都真的有 deletedAt', () => {
+    const stale = [...SOFT_DELETE_MODELS].filter((m) => !actual.has(m)).sort()
+    expect(
+      stale,
+      `这些名字在 schema 里查无 deletedAt 列（写错了？表删了？）：${stale.join(', ')}`,
+    ).toEqual([])
+  })
+})

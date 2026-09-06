@@ -1,0 +1,100 @@
+import { Card, Col, Descriptions, Progress, Row, Space, Typography } from 'antd'
+import {
+  AuditOutlined,
+  CreditCardOutlined,
+  NotificationOutlined,
+  SafetyCertificateOutlined,
+  TeamOutlined,
+  UserOutlined,
+} from '@ant-design/icons'
+import { Link } from 'react-router-dom'
+import { useSession } from '@taizan/admin-ui'
+
+/** 配额条：`limit === null` 表示不限量（蓝图 §4.5 三态语义），不画进度条只写「不限量」。 */
+function QuotaCard({ kind, used, limit }: { kind: string; used: number; limit: number | null }) {
+  const label = kind === 'STAFF' ? '员工数' : kind === 'CUSTOM' ? '商品数（示例配额）' : kind
+  return (
+    <Col xs={24} sm={12} md={8}>
+      <Card size="small" title={label}>
+        {limit === null ? (
+          <Typography.Text>{used} / 不限量</Typography.Text>
+        ) : (
+          <>
+            <Typography.Text>
+              {used} / {limit}
+            </Typography.Text>
+            <Progress
+              percent={limit === 0 ? 100 : Math.min(100, Math.round((used / limit) * 100))}
+              size="small"
+              status={used >= limit ? 'exception' : 'active'}
+              showInfo={false}
+            />
+          </>
+        )}
+      </Card>
+    </Col>
+  )
+}
+
+const SHORTCUTS = [
+  { to: '/staff', icon: <TeamOutlined />, label: '员工' },
+  { to: '/roles', icon: <SafetyCertificateOutlined />, label: '角色与权限' },
+  { to: '/billing', icon: <CreditCardOutlined />, label: '账单与套餐' },
+  { to: '/audit', icon: <AuditOutlined />, label: '审计日志' },
+  { to: '/announcements', icon: <NotificationOutlined />, label: '公告' },
+  { to: '/profile', icon: <UserOutlined />, label: '个人设置' },
+]
+
+/**
+ * 工作台：身份/租户概览 + 配额用量。
+ *
+ * 只读态横幅（`<ReadonlyBanner>`）已经由 `<AppShell>` 在内容区上方统一渲染，
+ * 这里不重复放一份——重复渲染会让「套餐到期」这句话在页面上出现两次。
+ *
+ * 下面这排「快捷入口」是本页特有的：员工/角色/账单/审计/公告/个人设置这几个框架页面
+ * 后端还没有把对应菜单注册进 `registry/menus.ts`（T1-6 的 TODO，见
+ * `src/routes/component-map.ts` 的注释），所以侧边栏暂时看不到它们——工作台是
+ * 目前唯一能点进去的入口，直到后端补上菜单、它们能自己出现在侧边栏为止。
+ */
+export default function DashboardPage() {
+  const identity = useSession((s) => s.identity)
+  const tenant = useSession((s) => s.tenant)
+  const shops = useSession((s) => s.shops)
+  const quotas = useSession((s) => s.quotas)
+
+  return (
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <Card title="工作台">
+        <Descriptions column={2} size="small">
+          <Descriptions.Item label="当前身份">
+            {identity?.name}（{identity?.isOwner ? '店主' : '员工'}）
+          </Descriptions.Item>
+          <Descriptions.Item label="当前店铺">{tenant?.name}</Descriptions.Item>
+          <Descriptions.Item label="套餐到期日">
+            {tenant?.planExpireAt ? new Date(tenant.planExpireAt).toLocaleDateString() : '未设置'}
+          </Descriptions.Item>
+          <Descriptions.Item label="名下店铺数">{shops.length}</Descriptions.Item>
+        </Descriptions>
+      </Card>
+
+      <Row gutter={[16, 16]}>
+        {Object.entries(quotas).map(([kind, quota]) => (
+          <QuotaCard key={kind} kind={kind} used={quota.used} limit={quota.limit} />
+        ))}
+      </Row>
+
+      <Card title="快捷入口" size="small">
+        <Space size={24} wrap>
+          {SHORTCUTS.map((s) => (
+            <Link key={s.to} to={s.to}>
+              <Space size={6}>
+                {s.icon}
+                {s.label}
+              </Space>
+            </Link>
+          ))}
+        </Space>
+      </Card>
+    </Space>
+  )
+}

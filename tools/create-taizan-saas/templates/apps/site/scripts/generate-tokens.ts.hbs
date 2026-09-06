@@ -1,0 +1,49 @@
+/**
+ * `@taizan/tokens` → `src/styles/tokens.css`。
+ *
+ * 官网零 UI 库，没有 AntD 的 `ThemeConfig` 也没有 Taro 的 SCSS 构建管线，
+ * 所以既不能用 `toAntdTheme()` 也不能直接吃 `toScssVariables()` 的 `$var: value;` 语法——
+ * 浏览器不认识 SCSS 变量。这个脚本复用**同一个** `toScssVariables()` 输出，只是把
+ * `$name: value;` 逐行改写成 CSS 自定义属性 `--name: value;`，包进 `:root {}`。
+ *
+ * 这样色板/间距/字号/圆角/阴影仍然只在 `packages/tokens/src/*.ts` 里定义一份，
+ * 官网这份 `.css` 是纯派生产物——改 palette 后重新跑 `pnpm dev`/`pnpm build`
+ * （已经接在这两个脚本的最前面）即可同步，不需要在这个文件里手改任何颜色值。
+ */
+import { writeFileSync, mkdirSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { toScssVariables, tokens } from '@taizan/tokens'
+
+const here = dirname(fileURLToPath(import.meta.url))
+const outPath = resolve(here, '../src/styles/tokens.css')
+
+function scssLineToCss(line: string): string | null {
+  const trimmed = line.trim()
+  if (trimmed.length === 0) return ''
+  if (trimmed.startsWith('//')) return `  /*${trimmed.slice(2)} */`
+  const m = /^\$([\w-]+):\s*(.+);$/.exec(trimmed)
+  if (!m) return null
+  return `  --${m[1]}: ${m[2]};`
+}
+
+function build(): string {
+  const scss = toScssVariables(tokens)
+  const body = scss
+    .split('\n')
+    .map(scssLineToCss)
+    .filter((line): line is string => line !== null)
+  return [
+    '/* 本文件由 `pnpm -F {{scope}}/site dev|build` 自动生成（apps/site/scripts/generate-tokens.ts），',
+    ' * 源自 @taizan/tokens 的 toScssVariables()。不要手改——改 packages/tokens/src/*.ts',
+    ' * 里的色板/间距/字号后重新跑一次生成脚本即可同步。 */',
+    ':root {',
+    ...body,
+    '}',
+    '',
+  ].join('\n')
+}
+
+mkdirSync(dirname(outPath), { recursive: true })
+writeFileSync(outPath, build(), 'utf8')
+process.stdout.write(`[tokens] 写入 ${outPath}\n`)

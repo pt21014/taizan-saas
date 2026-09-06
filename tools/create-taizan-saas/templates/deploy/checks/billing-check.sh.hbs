@@ -1,0 +1,306 @@
+#!/bin/bash
+# 套餐计费自检：**打开 BILLING_ENFORCE 之前必须跑一遍**。
+#
+# 这个开关一旦打开，到期的租户会同时发生三件事：后台转只读（1440301）、
+# C 端店铺打烊（1440302）、到期提示开始倒计时。其中「打烊」拦的是**顾客**——
+# 他既没违约又没有任何办法补救，而他找的客服是平台。
+# 所以绝不能靠「应该没问题吧」就去改 .env。
+#
+# 本脚本回答一个问题：**现在打开，谁会被锁、谁会打烊、谁快到期了。**
+# 它**只读不写**，随时可以跑，跑一百遍也不会改一个字节。
+#
+# 用法：
+#   bash deploy/checks/billing-check.sh                 # 从当前目录的 .env 读 DATABASE_URL
+#   DATABASE_URL='mysql://u:p@127.0.0.1:3306/{{projectSlug}}' bash deploy/checks/billing-check.sh
+#   bash deploy/checks/billing-check.sh --env apps/api/.env
+#   bash deploy/checks/billing-check.sh --help
+#
+# 为什么用 mysql CLI 而不是 node + Prisma：宝塔面板的服务器上 mysql 客户端一定在，
+# 而 node_modules 可能正在部署中间态（半个 pnpm install），
+# @prisma/client 甚至可能还没 generate。自检脚本必须在「系统有点不对劲」的时候还能跑。
+#
+# 刻意**不用 set -e**：下面几段在「有商家会被锁」时属于正常输出而非错误，
+# set -e 会在第一处非零返回时中止，把最需要看的后几项跳过——
+# 有问题时反而检查得更少，方向正好反了。
+set -uo pipefail
+
+RETENTION_HINT_DAYS=7
+SOON_DAYS=7
+
+usage() {
+  cat <<'USAGE'
+用法：bash deploy/checks/billing-check.sh [选项]
+
+  只读地列出「打开 BILLING_ENFORCE 之后谁会被锁」，不写任何数据。
+
+选项：
+  --env <文件>    从指定的 .env 读取 DATABASE_URL（默认依次找 ./.env、apps/api/.env）
+  --url <连接串>  直接给 DATABASE_URL，形如 mysql://用户:密码@主机:端口/库名
+  -h, --help      显示本帮助
+
+环境变量：
+  DATABASE_URL    同 --url，优先级低于命令行参数
+
+输出四段：
+  0. 当前开关状态
+  1. 套餐清单（没有在售套餐 = 开了闸却没有出口）
+  2. 打开后会被锁只读 / 会打烊的租户
+  3. 未来 7 天内到期的租户（该催了）
+
+退出码：0 一切正常；1 有租户会被锁或缺在售套餐（属于「要人看一眼」，不是脚本出错）；2 脚本自身没跑起来。
+USAGE
+}
+
+die() {
+  echo "❌ $1" >&2
+  [ $# -gt 1 ] && echo "   $2" >&2
+  exit 2
+}
+
+# ── 参数 ────────────────────────────────────────────────────────────────
+ENV_FILE=""
+URL="${DATABASE_URL:-}"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --env) ENV_FILE="${2:-}"; [ -n "$ENV_FILE" ] || die "--env 后面要跟文件路径"; shift 2 ;;
+    --url) URL="${2:-}"; [ -n "$URL" ] || die "--url 后面要跟数据库连接串"; shift 2 ;;
+    *) die "认不出的参数：$1" "用 --help 看用法" ;;
+  esac
+done
+
+# ── 找 .env ─────────────────────────────────────────────────────────────
+read_env_value() {
+  # $1=文件 $2=键名。取第一条未被注释的赋值，去掉引号。
+  grep -E "^[[:space:]]*$2=" "$1" 2>/dev/null | head -1 | cut -d= -f2- | sed -e 's/^["'"'"']//' -e 's/["'"'"']$//'
+}
+
+if [ -z "$URL" ]; then
+  if [ -n "$ENV_FILE" ]; then
+    [ -f "$ENV_FILE" ] || die "找不到 env 文件：$ENV_FILE"
+    URL=$(read_env_value "$ENV_FILE" DATABASE_URL)
+  else
+    for candidate in ./.env ./apps/api/.env; do
+      if [ -f "$candidate" ]; then
+        URL=$(read_env_value "$candidate" DATABASE_URL)
+        [ -n "$URL" ] && { ENV_FILE="$candidate"; break; }
+      fi
+    done
+  fi
+fi
+
+if [ -z "$URL" ]; then
+  die "没有拿到 DATABASE_URL。" "用 --url 直接给，或用 --env 指定 .env 文件；也可以 export DATABASE_URL=… 再跑。--help 有例子。"
+fi
+
+# ── 拆连接串 ────────────────────────────────────────────────────────────
+# mysql://用户:密码@主机:端口/库名?参数
+proto=${URL%%://*}
+if [ "$proto" != "mysql" ]; then
+  die "只认 mysql:// 连接串，收到的是「${proto}://…」。" "本项目的 datasource provider 是 mysql（packages/prisma-base/schema/00-datasource.prisma）。"
+fi
+
+rest=${URL#*://}
+creds=${rest%%@*}
+hostpart=${rest#*@}
+[ "$creds" = "$rest" ] && die "连接串里没有 @，拆不出主机名。" "正确形状：mysql://用户:密码@主机:端口/库名"
+
+DB_USER=${creds%%:*}
+DB_PASS=${creds#*:}
+[ "$DB_PASS" = "$creds" ] && DB_PASS=""
+
+hostport=${hostpart%%/*}
+dbpath=${hostpart#*/}
+DB_NAME=${dbpath%%\?*}
+DB_HOST=${hostport%%:*}
+DB_PORT=${hostport#*:}
+[ "$DB_PORT" = "$hostport" ] && DB_PORT=3306
+
+[ -n "$DB_NAME" ] || die "连接串里没有库名。" "正确形状：mysql://用户:密码@主机:端口/库名"
+
+command -v mysql >/dev/null 2>&1 || die "找不到 mysql 命令。" "宝塔面板：/www/server/mysql/bin/mysql，可以 export PATH=/www/server/mysql/bin:\$PATH 之后再跑。"
+
+# ── 开关状态 ────────────────────────────────────────────────────────────
+ENFORCE="${BILLING_ENFORCE:-}"
+if [ -z "$ENFORCE" ] && [ -n "$ENV_FILE" ]; then
+  ENFORCE=$(read_env_value "$ENV_FILE" BILLING_ENFORCE)
+fi
+ENFORCE=${ENFORCE:-false}
+
+echo "=========== 0. 当前开关状态 ==========="
+echo "数据库：${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}${ENV_FILE:+（配置来自 $ENV_FILE）}"
+case "$ENFORCE" in
+  true|1|yes|on)
+    echo "⚠️  BILLING_ENFORCE=${ENFORCE} —— 限制**已生效**，下面列出的影响是正在发生的" ;;
+  *)
+    echo "BILLING_ENFORCE=${ENFORCE} —— 限制未生效，下面列出的是「一旦打开会发生什么」" ;;
+esac
+echo
+
+# ── 查询 ────────────────────────────────────────────────────────────────
+# --batch 出制表符分隔、无边框；--raw 不转义。所有语句都是 SELECT。
+run_sql() {
+  MYSQL_PWD="$DB_PASS" mysql \
+    --host="$DB_HOST" --port="$DB_PORT" --user="$DB_USER" \
+    --database="$DB_NAME" --batch --raw --skip-column-names \
+    --connect-timeout=10 -e "$1" 2>&1
+}
+
+probe=$(run_sql "SELECT 1;")
+if [ $? -ne 0 ]; then
+  case "$probe" in
+    *"Access denied"*)      die "数据库拒绝登录（用户名或密码不对）。" "连接串里的用户是 ${DB_USER}，请核对 .env 的 DATABASE_URL。" ;;
+    *"Unknown database"*)   die "库 ${DB_NAME} 不存在。" "是不是还没建库或者连错了环境？先跑 pnpm prisma migrate deploy。" ;;
+    *"Can't connect"*|*"Connection refused"*)
+                            die "连不上 ${DB_HOST}:${DB_PORT}。" "MySQL 没起，或者防火墙/安全组挡了这个端口。" ;;
+    *)                      die "数据库连接失败。" "$(echo "$probe" | head -2)" ;;
+  esac
+fi
+
+if [ -z "$(run_sql "SHOW TABLES LIKE 'Tenant';")" ]; then
+  die "库 ${DB_NAME} 里没有 Tenant 表。" "这个库还没跑过 migration（空库），先执行 pnpm prisma migrate deploy 再来自检。"
+fi
+
+# ── 1. 套餐 ─────────────────────────────────────────────────────────────
+echo "=========== 1. 套餐 ==========="
+plans=$(run_sql "
+  SELECT status, code, name, firstPriceCents, renewPriceCents, periodMonths
+  FROM Plan ORDER BY sort ASC, code ASC;")
+if [ -z "$plans" ]; then
+  echo "❌ 一个套餐都没有。商家侧「续费 / 升级」会是空的，等于开了闸却没有出口。"
+  NO_PLAN=1
+else
+  printf '  %-6s %-16s %-20s %-12s %-12s %s\n' 状态 code 名称 首开价 续费价 周期
+  echo "$plans" | while IFS=$'\t' read -r status code name first renew months; do
+    case "$status" in
+      ENABLED)  mark="✅在售" ;;
+      DISABLED) mark="⏸️下架" ;;
+      *)        mark="🗄️归档" ;;
+    esac
+    printf '  %-6s %-16s %-20s ¥%-11s ¥%-11s %s 个月\n' \
+      "$mark" "$code" "$name" \
+      "$(awk "BEGIN{printf \"%.2f\", $first/100}")" \
+      "$(awk "BEGIN{printf \"%.2f\", $renew/100}")" "$months"
+  done
+  if [ -z "$(run_sql "SELECT 1 FROM Plan WHERE status='ENABLED' LIMIT 1;")" ]; then
+    echo "❌ 没有任何在售套餐，商家无法自助续费。"
+    NO_PLAN=1
+  fi
+fi
+echo
+
+# ── 2. 会被锁 / 会打烊的租户 ────────────────────────────────────────────
+# 判定与 @taizan/billing-rules 的 evaluateTenantGate 对齐：
+#   - 到期按「日」比，到期当天 23:59:59 仍算未到期 → 用 DATE(anchor) < CURDATE()
+#   - TRIAL 用 trialEndAt（没有就回落 planExpireAt），其余用 planExpireAt
+#   - 宽限期 graceDays 内后台仍可写、C 端仍开门
+#   - anchor 为 NULL = 未开通（PENDING），打开开关后同样只读
+# 这里刻意重算一遍而不是调用那边的代码：自检脚本要能独立回答问题，
+# 跟被检查的实现同源就成了自说自话。
+echo "=========== 2. 打开后会被锁的租户 ==========="
+locked=$(run_sql "
+  SELECT
+    slug, name, status,
+    COALESCE(DATE_FORMAT(IF(status='TRIAL', COALESCE(trialEndAt, planExpireAt), planExpireAt), '%Y-%m-%d'), '(从未开通)'),
+    graceDays,
+    IFNULL(DATEDIFF(CURDATE(), DATE(IF(status='TRIAL', COALESCE(trialEndAt, planExpireAt), planExpireAt))), -1)
+  FROM Tenant
+  WHERE status IN ('TRIAL','ACTIVE')
+    AND (
+      IF(status='TRIAL', COALESCE(trialEndAt, planExpireAt), planExpireAt) IS NULL
+      OR DATE(IF(status='TRIAL', COALESCE(trialEndAt, planExpireAt), planExpireAt)) < DATE_SUB(CURDATE(), INTERVAL graceDays DAY)
+    )
+  ORDER BY planExpireAt ASC;")
+
+if [ -z "$locked" ]; then
+  echo "✅ 没有租户会因为「到期」被锁。"
+else
+  echo "$locked" | while IFS=$'\t' read -r slug name status expire grace overdue; do
+    if [ "$expire" = "(从未开通)" ]; then
+      echo "  ❌ ${slug} · ${name} —— 后台只读 + 店铺打烊（从未开通套餐，状态 ${status}）"
+    else
+      echo "  ❌ ${slug} · ${name} —— 后台只读 + 店铺打烊（${expire} 到期，已过期 ${overdue} 天，宽限 ${grace} 天）"
+    fi
+  done
+  LOCKED_COUNT=$(echo "$locked" | grep -c '' )
+fi
+
+# 宽限期内的：还没被锁，但离被锁只有几天
+grace_list=$(run_sql "
+  SELECT slug, name,
+    DATE_FORMAT(IF(status='TRIAL', COALESCE(trialEndAt, planExpireAt), planExpireAt), '%Y-%m-%d'),
+    DATEDIFF(DATE_ADD(DATE(IF(status='TRIAL', COALESCE(trialEndAt, planExpireAt), planExpireAt)), INTERVAL graceDays DAY), CURDATE())
+  FROM Tenant
+  WHERE status IN ('TRIAL','ACTIVE')
+    AND IF(status='TRIAL', COALESCE(trialEndAt, planExpireAt), planExpireAt) IS NOT NULL
+    AND DATE(IF(status='TRIAL', COALESCE(trialEndAt, planExpireAt), planExpireAt)) < CURDATE()
+    AND DATE(IF(status='TRIAL', COALESCE(trialEndAt, planExpireAt), planExpireAt)) >= DATE_SUB(CURDATE(), INTERVAL graceDays DAY)
+  ORDER BY planExpireAt ASC;")
+if [ -n "$grace_list" ]; then
+  echo
+  echo "  —— 以下租户已到期但还在宽限期内（暂不受影响，宽限一过就进上面那张表）："
+  echo "$grace_list" | while IFS=$'\t' read -r slug name expire left; do
+    echo "  ⏳ ${slug} · ${name} —— ${expire} 到期，宽限期还剩 ${left} 天"
+  done
+fi
+
+# 平台自己按下去的：与开关无关，单独列，免得被算进「开关的影响面」
+frozen=$(run_sql "
+  SELECT slug, name, status, COALESCE(DATE_FORMAT(deregisterAt, '%Y-%m-%d'), '-')
+  FROM Tenant WHERE status IN ('SUSPENDED','DEREGISTERED') ORDER BY status, slug;")
+if [ -n "$frozen" ]; then
+  echo
+  echo "  —— 以下租户本来就不可用（平台逐个按下去的，**与开关无关**）："
+  echo "$frozen" | while IFS=$'\t' read -r slug name status dereg; do
+    if [ "$status" = "SUSPENDED" ]; then
+      echo "  ⏸️  ${slug} · ${name} —— 已冻结"
+    else
+      echo "  🚫 ${slug} · ${name} —— 已提交注销（${dereg}）"
+    fi
+  done
+fi
+echo
+
+# ── 3. 快到期的 ─────────────────────────────────────────────────────────
+echo "=========== 3. ${SOON_DAYS} 天内到期（该催了）==========="
+soon=$(run_sql "
+  SELECT slug, name,
+    DATE_FORMAT(IF(status='TRIAL', COALESCE(trialEndAt, planExpireAt), planExpireAt), '%Y-%m-%d'),
+    DATEDIFF(DATE(IF(status='TRIAL', COALESCE(trialEndAt, planExpireAt), planExpireAt)), CURDATE()),
+    status
+  FROM Tenant
+  WHERE status IN ('TRIAL','ACTIVE')
+    AND IF(status='TRIAL', COALESCE(trialEndAt, planExpireAt), planExpireAt) IS NOT NULL
+    AND DATE(IF(status='TRIAL', COALESCE(trialEndAt, planExpireAt), planExpireAt)) >= CURDATE()
+    AND DATE(IF(status='TRIAL', COALESCE(trialEndAt, planExpireAt), planExpireAt)) <= DATE_ADD(CURDATE(), INTERVAL ${SOON_DAYS} DAY)
+  ORDER BY planExpireAt ASC;")
+if [ -z "$soon" ]; then
+  echo "✅ ${SOON_DAYS} 天内没有到期的租户。"
+else
+  echo "$soon" | while IFS=$'\t' read -r slug name expire left status; do
+    tag=$([ "$status" = "TRIAL" ] && echo "试用" || echo "付费")
+    echo "  ⚠️  ${slug} · ${name} —— ${tag}，${expire} 到期，还剩 ${left} 天"
+  done
+fi
+echo
+
+# ── 结论 ────────────────────────────────────────────────────────────────
+echo "=========== 结论 ==========="
+EXIT=0
+if [ -n "${LOCKED_COUNT:-}" ]; then
+  echo "有 ${LOCKED_COUNT} 家租户会在打开 BILLING_ENFORCE 的那一刻转为只读 + 打烊。"
+  echo "先把它们的 planExpireAt 补上（或给 graceDays），再开开关。"
+  echo "提示：到期后数据仍保留 Tenant.retentionDays 天（默认 ${RETENTION_HINT_DAYS} 天）才由清理任务处理。"
+  EXIT=1
+else
+  echo "✅ 打开 BILLING_ENFORCE 不会锁住任何正在营业的租户。"
+fi
+if [ -n "${NO_PLAN:-}" ]; then
+  echo "⚠️  但没有在售套餐——商家被锁之后没有地方付钱，等于把人关在门外还不给钥匙。"
+  EXIT=1
+fi
+echo
+echo "开关关着时闸门照常计算并打 warn，两者互为印证："
+echo "  pm2 logs {{projectName}}-api --nostream --lines 500 | grep 'BILLING_ENFORCE=false'"
+exit $EXIT

@@ -1,0 +1,753 @@
+/**
+ * **自助注册 e2e**（T1-8）—— 真 MySQL + Redis。
+ *
+ * ```
+ * pnpm dev:infra
+ * pnpm -F {{scope}}/api prisma:migrate
+ * pnpm -F {{scope}}/api test:e2e
+ * ```
+ *
+ * ## 这条路为什么值得一份专门的 e2e
+ *
+ * `/api/public/signup` 是全站**唯一**「谁都能调、而且会往库里写东西」的入口。
+ * 它同时承担着一条数据约定：**自助注册开出来的店，必须和运营手工开的店是同一种东西**。
+ * 这条约定没法用单测证明——单测里两边都是 fake tx；只有把两家店真的建到同一个库里、
+ * 再**逐列**比对，才谈得上「一样」。用例 ② 就是这么写的。
+ *
+ * ## 用例清单
+ *
+ * | # | 断言 |
+ * |---|---|
+ * | ① | 注册成功：Tenant(TRIAL, trialEndAt=当天最后一刻) / StaffAccount / Staff(owner) / Role 全套 / QuotaCounter 齐全；**响应里没有任何 token**；店主能用这个口令正常登录 |
+ * | ② | 平台后台开一家同参数的店 → 与①产出的租户**逐列一致**（除 id/slug/name/时间戳与 source 相关的审计） |
+ * | ③ | 保留字 slug（`admin`）被拒；形状非法的 slug 也被拒 |
+ * | ④ | 同 IP 第 4 次注册 → `1042900`，且第 4 家店**没有**被建出来（前 3 次全是成功的——「成功也计数」） |
+ * | ⑤ | 已有手机号：不给 `existingPassword` 拒、给错的拒、给对的成功；**两种拒绝的 code 与文案逐字节相同**（不泄露账号是否存在） |
+ * | ⑥ | `SIGNUP_ENABLED=false` → 拒绝，且库里没有多出这家店 |
+ * | ⑦ | 平台后台用 `attachExistingAccount` 开通：成功、复用同一个账号、`PlatformAuditLog` 里有 `tenant.create-attach-existing` |
+ * | ⑧ | `GET /api/public/site-config` 里的套餐与平台后台刚建的那个**逐字段一致**（官网不许再抄一份价格） |
+ *
+ * ## 两个夹具上的决定
+ *
+ * **每组用例一个伪 `X-Forwarded-For`**：`signup` 档是 `clientLimit: 3 / 24h`，
+ * 而 e2e 全部从 `127.0.0.1` 打过来。不分桶的话第 4 个请求就会拿到 `1042900`——
+ * 包括用例 ⑥ 那个「本该被开关拒掉」的请求，于是它会**因为错误的原因**通过。
+ * IP 里掺了 `RUN`：24 小时的窗口意味着同一天重复跑 e2e 时上一趟的计数还在。
+ *
+ * **`SIGNUP_ENABLED=false` 用改 `ENV` 对象实现，不是另起一个 app**：
+ * `CoreModule.forRoot()` 在**模块求值时**就把 `process.env` 解析成了一个对象，
+ * 测试文件里改 `process.env` 已经晚了；而为一条用例再建一个完整的 Nest app
+ * 会多一套 Redis / BullMQ 连接。直接改那个对象上的一个字段、用完还原，
+ * 走的仍然是真实的 `ConfigService.get('SIGNUP_ENABLED')` → `isSignupOpen()` 链路。
+ *
+ * @packageDocumentation
+ */
+
+import 'reflect-metadata'
+import 'dotenv/config'
+
+import type { INestApplication } from '@nestjs/common'
+import { Test } from '@nestjs/testing'
+import { PrismaClient } from '@prisma/client'
+import { ulid } from '@taizan/contracts'
+import { ENV } from '@taizan/nest-core'
+import { seedBase } from '@taizan/prisma-base'
+import { computeTrialEnd } from '@taizan/billing-rules'
+import request from 'supertest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+
+import { AppModule } from '../src/bootstrap/app.module'
+import { configureApp } from '../src/bootstrap/configure-app'
+import { findFirstUpsertDelegate } from '../src/seed-delegates'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 夹具
+// ─────────────────────────────────────────────────────────────────────────────
+
+const RUN = ulid().slice(-8).toLowerCase()
+
+/** 注册用的口令。两类字符 + 16 位，满足 `assertOwnerPasswordPolicy`。 */
+const PASSWORD = 'e2e-signup-pw-2026'
+
+/** `SIGNUP_TRIAL_DAYS` 的默认值。改 env 默认值时这里要一起改（用例 ① 会断言它）。 */
+const TRIAL_DAYS = 14
+
+let app: INestApplication
+let prisma: PrismaClient
+let platformToken = ''
+let env: Record<string, unknown>
+
+function http(): Parameters<typeof request>[0] {
+  return app.getHttpServer() as Parameters<typeof request>[0]
+}
+
+function expectOk<T>(body: unknown): T {
+  const envelope = body as { code: number; message: string; data: T }
+  expect(envelope.code, `期望 code=0，实际：${JSON.stringify(envelope)}`).toBe(0)
+  return envelope.data
+}
+
+function codeOf(body: unknown): number {
+  return (body as { code: number }).code
+}
+
+function messageOf(body: unknown): string {
+  return (body as { message: string }).message
+}
+
+/**
+ * 把一个标签映射成本次运行专属的伪客户端 IP（同组用例共享一个限流桶）。
+ *
+ * **按登记顺序发号，不是对标签做哈希**：哈希有撞的可能，而两组用例撞进同一个桶的
+ * 表现是「某一条用例莫名其妙拿到 1042900」——一个每几十次跑才出现一次的 flaky，
+ * 排查成本远高于在这里多写五行。第二段掺 `RUN`：`signup` 档的窗口是 24 小时，
+ * 同一天重复跑 e2e 时上一趟的计数还在。
+ */
+const RUN_OCTET = ([...RUN].reduce((a, c) => (a + c.charCodeAt(0)) % 250, 0) + 1).toString()
+const ipRegistry = new Map<string, string>()
+function ipFor(tag: string): string {
+  const known = ipRegistry.get(tag)
+  if (known !== undefined) return known
+  const n = ipRegistry.size
+  const ip = `10.${RUN_OCTET}.${String(Math.floor(n / 250) + 1)}.${String((n % 250) + 1)}`
+  ipRegistry.set(tag, ip)
+  return ip
+}
+
+/** 平台登录与店主登录共用的桶（`login` 档 5 分钟 10 次，本文件只登 2 次）。 */
+const LOGIN_IP = ipFor('login')
+
+/**
+ * 造一个本次运行专用的手机号（全局唯一键，不能和别的 e2e 文件撞）。
+ *
+ * `137` + 运行后缀 6 位 + 序号 2 位 = **恰好 11 位**。序号补零不是洁癖：
+ * 少补一位就是 10 位，会被 DTO 的 `PHONE_PATTERN` 挡在门外，而失败信息
+ * 长得像「手机号校验写错了」。
+ */
+function phoneFor(n: number): string {
+  const digits = [...RUN]
+    .map((c) => c.charCodeAt(0) % 10)
+    .join('')
+    .slice(0, 6)
+  return `137${digits}${String(n).padStart(2, '0')}`
+}
+
+function slugFor(tag: string): string {
+  return `e2e-su-${tag}-${RUN}`
+}
+
+/** 发一个注册请求。`ip` 决定它落进哪个限流桶。 */
+function signup(ip: string, body: Record<string, unknown>) {
+  return request(http()).post('/api/public/signup').set('X-Forwarded-For', ip).send(body)
+}
+
+function authedPlatform() {
+  return {
+    post: (url: string) =>
+      request(http()).post(url).set('Authorization', `Bearer ${platformToken}`),
+  }
+}
+
+/**
+ * 一家店在库里的**全貌**，归一化成可以直接 `toEqual` 比对的形状。
+ *
+ * 刻意**不**挑几列比对，而是把 Tenant / Staff / Role / QuotaCounter 全拿出来：
+ * 「两条建店路径会走偏」的典型形态正是「某一列 / 某一张表只有一边建了」，
+ * 而挑列比对恰好会漏掉那一列。id、slug、name、时间戳与 ownerAccountId 这些
+ * **本来就该不一样**的字段在这里被剔掉，剩下的每一项两边都必须逐字节相同。
+ */
+async function snapshot(tenantId: string): Promise<Record<string, unknown>> {
+  const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } })
+  const staff = await prisma.staff.findMany({ where: { tenantId }, orderBy: { id: 'asc' } })
+  const roles = await prisma.role.findMany({ where: { tenantId }, orderBy: { code: 'asc' } })
+  const quotas = await prisma.quotaCounter.findMany({
+    where: { tenantId },
+    orderBy: { kind: 'asc' },
+  })
+  const account = await prisma.staffAccount.findUniqueOrThrow({
+    where: { id: tenant.ownerAccountId },
+  })
+  const ownerRoleId = roles.find((r) => r.code === 'owner')?.id
+
+  return {
+    tenant: {
+      status: tenant.status,
+      planId: tenant.planId,
+      graceDays: tenant.graceDays,
+      retentionDays: tenant.retentionDays,
+      deregisterAt: tenant.deregisterAt,
+      // 两条路都算「今天 + trialDays 天的最后一刻」，同一天跑必然逐毫秒相同。
+      trialEndAt: tenant.trialEndAt?.toISOString() ?? null,
+      planExpireAt: tenant.planExpireAt?.toISOString() ?? null,
+      // 两边的 trialEndAt 与 planExpireAt 必须是同一个值（TRIAL 店的到期日就是试用到期日）。
+      expireEqualsTrialEnd: tenant.planExpireAt?.getTime() === tenant.trialEndAt?.getTime(),
+    },
+    ownerAccount: { status: account.status },
+    staff: staff.map((s) => ({
+      status: s.status,
+      isOwner: s.isOwner,
+      dataScope: s.dataScope,
+      scopeTargets: s.scopeTargets,
+      invitedBy: s.invitedBy,
+      accountIsOwnerAccount: s.accountId === tenant.ownerAccountId,
+      // 只给店主角色：其余模板已经建好挂在店里，等他自己分配给员工。
+      roleIdsAreOwnerOnly: JSON.stringify(s.roleIds) === JSON.stringify([ownerRoleId]),
+    })),
+    roles: roles.map((r) => ({
+      code: r.code,
+      name: r.name,
+      builtin: r.builtin,
+      permissionCodes: r.permissionCodes,
+      menuKeys: r.menuKeys,
+    })),
+    quotas: quotas.map((q) => ({ kind: q.kind, used: q.used, version: q.version })),
+  }
+}
+
+beforeAll(async () => {
+  prisma = new PrismaClient()
+  await seedBase(
+    {
+      platformAdmin: prisma.platformAdmin,
+      plan: prisma.plan,
+      tenant: prisma.tenant,
+      staffAccount: prisma.staffAccount,
+      staff: findFirstUpsertDelegate(prisma.staff),
+      role: findFirstUpsertDelegate(prisma.role),
+      rolePreset: prisma.rolePreset,
+    },
+    { withDemoTenant: false },
+  )
+
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
+  app = moduleRef.createNestApplication({ logger: false })
+  configureApp(app)
+  await app.init()
+
+  env = app.get<Record<string, unknown>>(ENV)
+
+  const login = await request(http())
+    .post('/api/platform/auth/login')
+    .set('X-Forwarded-For', LOGIN_IP)
+    .send({ username: 'admin', password: 'admin123' })
+  platformToken = expectOk<{ access: string }>(login.body).access
+})
+
+afterAll(async () => {
+  await app?.close()
+  await prisma?.$disconnect()
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ① 注册成功
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SIGNUP_SHOP = { slug: slugFor('a'), name: `自助注册店 ${RUN}`, phone: phoneFor(1) }
+let signupTenantId = ''
+
+describe('① 自助注册开出一家完整的店', () => {
+  it('注册成功，回执里有 slug / 试用天数，且**没有任何 token**', async () => {
+    const res = await signup(ipFor('case-1'), {
+      slug: SIGNUP_SHOP.slug,
+      name: SIGNUP_SHOP.name,
+      phone: SIGNUP_SHOP.phone,
+      password: PASSWORD,
+    })
+    const data = expectOk<{
+      tenantId: string
+      slug: string
+      trialDays: number
+      accountCreated: boolean
+    }>(res.body)
+
+    expect(data.slug).toBe(SIGNUP_SHOP.slug)
+    expect(data.trialDays).toBe(TRIAL_DAYS)
+    expect(data.accountCreated).toBe(true)
+    signupTenantId = data.tenantId
+
+    // 在这里签一个 token 等于开了第三条进后台的路：登录接口上挂着的验证码、失败限流、
+    // 账号停用判定、换店重签逻辑，注册接口一条都没有。整个响应体里不许出现任何一个。
+    const raw = JSON.stringify(res.body)
+    for (const forbidden of ['access', 'refresh', 'token', 'Bearer', 'expiresIn']) {
+      expect(raw, `注册回执里出现了 "${forbidden}"`).not.toContain(forbidden)
+    }
+  })
+
+  it('Tenant 是 TRIAL，且 trialEndAt 落在「今天 + 14 天」的当天最后一刻', async () => {
+    const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: signupTenantId } })
+    expect(tenant.status).toBe('TRIAL')
+    expect(tenant.planId).toBeNull()
+    expect(tenant.trialEndAt).not.toBeNull()
+    // 与 provision 内部用的是同一个 `computeTrialEnd`，所以这是逐毫秒相等的断言，
+    // 不是「差不多在那一天」。差一毫秒都说明有人在中间又算了一遍。
+    expect(tenant.trialEndAt?.toISOString()).toBe(
+      computeTrialEnd(new Date(), TRIAL_DAYS).toISOString(),
+    )
+    // 到期日 = 试用到期日。TRIAL 店没有单独的 planExpireAt，否则闸门会按两个日子算。
+    expect(tenant.planExpireAt?.getTime()).toBe(tenant.trialEndAt?.getTime())
+  })
+
+  it('StaffAccount / Staff(店主) / 全套内置角色 / 配额计数器都建出来了', async () => {
+    const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: signupTenantId } })
+    const account = await prisma.staffAccount.findUniqueOrThrow({
+      where: { phone: SIGNUP_SHOP.phone },
+    })
+    expect(tenant.ownerAccountId).toBe(account.id)
+    expect(account.status).toBe('ACTIVE')
+
+    const staff = await prisma.staff.findMany({ where: { tenantId: signupTenantId } })
+    expect(staff).toHaveLength(1)
+    expect(staff[0]?.isOwner).toBe(true)
+    expect(staff[0]?.dataScope).toBe('ALL')
+    expect(staff[0]?.accountId).toBe(account.id)
+
+    // **全套**内置角色，不只是 owner。T1-8 之前平台后台那条路只建 owner 一个，
+    // 而这正是「两条建店路径会走偏」最典型的形态。
+    const roles = await prisma.role.findMany({ where: { tenantId: signupTenantId } })
+    const presets = await prisma.rolePreset.findMany({ where: { side: 'ADMIN', builtin: true } })
+    expect(roles.map((r) => r.code).sort()).toEqual(presets.map((p) => p.code).sort())
+    expect(roles.length).toBeGreaterThanOrEqual(2)
+    expect(roles.every((r) => r.builtin)).toBe(true)
+
+    // 店主本人就是第一个员工：STAFF 配额从 1 开始，不是 0。
+    const quotas = await prisma.quotaCounter.findMany({ where: { tenantId: signupTenantId } })
+    expect(quotas.length).toBeGreaterThan(0)
+    expect(quotas.find((q) => q.kind === 'STAFF')?.used).toBe(1)
+    expect(quotas.filter((q) => q.kind !== 'STAFF').every((q) => q.used === 0)).toBe(true)
+  })
+
+  it('注册产生的口令哈希与登录那边是同一种：店主能直接登录进去', async () => {
+    // 这条断言的真正对象是 `createProvisionDeps().hashPassword`——注册用一套哈希、
+    // 登录用另一套的话，商家会拿着刚设的密码登不进自己刚开的店，而两边各自都「没报错」。
+    const res = await request(http())
+      .post('/api/admin/auth/login')
+      .set('X-Forwarded-For', LOGIN_IP)
+      .send({ phone: SIGNUP_SHOP.phone, password: PASSWORD, tenantId: signupTenantId })
+    const session = expectOk<{ access: string; needChooseShop: boolean }>(res.body)
+    expect(session.access.length).toBeGreaterThan(0)
+    expect(session.needChooseShop).toBe(false)
+  })
+
+  it('写了一条 SYSTEM 身份的开通审计（自助注册没有操作者）', async () => {
+    // `buildProvisionAudit()` 的 action 只有两段式 `tenant.create` /
+    // `tenant.create-attach-existing`，`source` 不参与拼接（见 `@taizan/provision`）——
+    // 自助注册与平台后台正常开通写的是**同一个** action，区别只在 `actorType`。
+    const logs = await prisma.platformAuditLog.findMany({
+      where: { targetTenantId: signupTenantId },
+    })
+    const provisioned = logs.find((l) => l.action === 'tenant.create')
+    expect(provisioned, `审计里没有 tenant.create：${JSON.stringify(logs)}`).toBeDefined()
+    expect(provisioned?.actorType).toBe('SYSTEM')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ② 平台后台开的店与自助注册开的店逐列一致
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PLATFORM_SHOP = { slug: slugFor('b'), name: `平台开通店 ${RUN}`, phone: phoneFor(2) }
+let platformTenantId = ''
+
+describe('② 两条路建出来的店必须是同一种东西', () => {
+  it('平台后台开一家同参数的店', async () => {
+    const res = await authedPlatform().post('/api/platform/tenants').send({
+      slug: PLATFORM_SHOP.slug,
+      name: PLATFORM_SHOP.name,
+      ownerPhone: PLATFORM_SHOP.phone,
+      ownerPassword: PASSWORD,
+      trialDays: TRIAL_DAYS,
+    })
+    const data = expectOk<{
+      tenant: { id: string; status: string }
+      owner: { attachedExistingAccount: boolean; initialPassword: string | null }
+    }>(res.body)
+    platformTenantId = data.tenant.id
+    expect(data.tenant.status).toBe('TRIAL')
+    expect(data.owner.attachedExistingAccount).toBe(false)
+    expect(data.owner.initialPassword).toBe(PASSWORD)
+  })
+
+  it('两家店的 Tenant / Staff / Role / QuotaCounter **逐列一致**', async () => {
+    const [fromSignup, fromPlatform] = await Promise.all([
+      snapshot(signupTenantId),
+      snapshot(platformTenantId),
+    ])
+    // 这条断言就是「建租户只有一条路」的可执行定义。它红的时候，
+    // 说明有人在其中一条路上多做（或少做）了一件事——而线上不会有任何报错，
+    // 只会在半年后表现为「从注册进来的店某个功能用不了」。
+    expect(fromSignup).toEqual(fromPlatform)
+  })
+
+  it('唯一的差别在审计：自助注册记 SYSTEM，平台后台记 PLATFORM_ADMIN', async () => {
+    // `@taizan/provision` 的 `buildProvisionAudit()` 把 action 定死成两段式
+    // `tenant.create` / `tenant.create-attach-existing`，`source` 不参与拼接——
+    // 自助注册与平台后台正常开通因此写的是**同一个** action，区别只在 `actorType`
+    // （以及下面说的 `targetTenantId`）。
+    const signupLogs = await prisma.platformAuditLog.findMany({
+      where: { targetTenantId: signupTenantId },
+    })
+    expect(signupLogs.some((l) => l.action === 'tenant.create' && l.actorType === 'SYSTEM')).toBe(
+      true,
+    )
+
+    // 平台那条路只能按 action + targetTenantId 为空来区分，不能只按 action 查：
+    // `@taizan/nest-audit` 的 `resolveTargetTenantId()` 依次看 `req.params.tenantId` →
+    // `req.body.tenantId` → 当前上下文，而 `POST /api/platform/tenants` 三样都没有
+    // （那家店是这次请求**新建**的，请求进来时它还不存在）。于是这条开通审计的
+    // targetTenantId 落成了 null——这是框架侧的一处已知缺口，写在这里免得下一个人
+    // 以为是断言写松了。自助注册那条路的 `tenant.create` 反而**有** targetTenantId
+    // （`buildProvisionAudit()` 填的是 `result.tenantId`），用它把两者分开。
+    const creates = await prisma.platformAuditLog.findMany({
+      where: { action: 'tenant.create', targetTenantId: null },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+    })
+    expect(creates.length).toBeGreaterThan(0)
+    expect(creates.every((l) => l.actorType === 'PLATFORM_ADMIN')).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ③ 保留字与形状
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('③ 保留字 slug 被拒', () => {
+  it('`admin` 是保留字 → 1040000，且库里没多出这家店', async () => {
+    const res = await signup(ipFor('case-3'), {
+      slug: 'admin',
+      name: `保留字店 ${RUN}`,
+      phone: phoneFor(3),
+      password: PASSWORD,
+    })
+    expect(codeOf(res.body)).toBe(1040000)
+    expect(messageOf(res.body)).toContain('保留')
+    expect(await prisma.tenant.findUnique({ where: { slug: 'admin' } })).toBeNull()
+  })
+
+  it('形状非法的 slug（大写 / 太短 / 首尾连字符）在 DTO 层就被拒', async () => {
+    // 只试 3 个：`signup` 档一天 3 次，第 4 个请求会拿到 1042900 而不是 1040000——
+    // 那时这条用例会「因为错误的原因」失败。
+    for (const slug of ['AB', '-abc', 'abc-']) {
+      const res = await signup(ipFor('case-3-shape'), {
+        slug,
+        name: `形状店 ${RUN}`,
+        phone: phoneFor(3),
+        password: PASSWORD,
+      })
+      expect(codeOf(res.body), `slug=${slug}`).toBe(1040000)
+    }
+  })
+
+  it('check-slug 查重：保留字不可用、已占用不可用、没人用的可用', async () => {
+    const lookup = (slug: string) =>
+      request(http())
+        .get('/api/public/signup/check-slug')
+        .query({ slug })
+        .set('X-Forwarded-For', ipFor('case-3-lookup'))
+
+    expect(expectOk<{ available: boolean }>((await lookup('admin')).body).available).toBe(false)
+    expect(expectOk<{ available: boolean }>((await lookup(SIGNUP_SHOP.slug)).body).available).toBe(
+      false,
+    )
+    expect(
+      expectOk<{ available: boolean }>((await lookup(slugFor('never-used'))).body).available,
+    ).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ④ 同 IP 限流：成功也计数
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('④ 同 IP 第 4 次注册被限流（前 3 次全是成功的）', () => {
+  const ip = ipFor('case-4')
+
+  it('前 3 次都成功——`signup` 档 counts=requests，成功一样消耗额度', async () => {
+    for (let i = 0; i < 3; i += 1) {
+      const res = await signup(ip, {
+        slug: slugFor(`rl${String(i)}`),
+        name: `限流店 ${String(i)} ${RUN}`,
+        // 每次换手机号：手机号维度也是一天 3 次，用同一个号的话第 4 次会被
+        // **账号维度**拦下，那就证明不了「客户端 IP 维度」这件事了。
+        phone: phoneFor(40 + i),
+        password: PASSWORD,
+      })
+      expect(codeOf(res.body), `第 ${String(i + 1)} 次注册：${JSON.stringify(res.body)}`).toBe(0)
+    }
+  })
+
+  it('第 4 次 → 1042900，且那家店没有被建出来', async () => {
+    const slug = slugFor('rl3')
+    const res = await signup(ip, {
+      slug,
+      name: `限流店 3 ${RUN}`,
+      phone: phoneFor(43),
+      password: PASSWORD,
+    })
+    expect(codeOf(res.body)).toBe(1042900)
+    expect(res.status).toBe(429)
+    expect(res.headers['retry-after']).toBeDefined()
+    expect(await prisma.tenant.findUnique({ where: { slug } })).toBeNull()
+  })
+
+  it('换一个 IP 立刻又能注册（限的是「这个客户端」，不是「这个接口」）', async () => {
+    const res = await signup(ipFor('case-4-other'), {
+      slug: slugFor('rl-other'),
+      name: `限流店 other ${RUN}`,
+      phone: phoneFor(44),
+      password: PASSWORD,
+    })
+    expect(codeOf(res.body)).toBe(0)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑤ 一号多店：必须验原口令，且不泄露账号是否存在
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑤ 手机号已注册过：要验原口令', () => {
+  // 这个号先用**平台后台**那条路开一家店（平台路不消耗 signup 额度），
+  // 这样下面三次注册请求正好用掉这个号一天的 3 次配额，一次不多。
+  const phone = phoneFor(5)
+  const ip = ipFor('case-5')
+  let firstTenantId = ''
+  let refusedWithoutPassword = { code: 0, message: '' }
+
+  it('先用平台后台给这个号开一家店', async () => {
+    const res = await authedPlatform()
+      .post('/api/platform/tenants')
+      .send({
+        slug: slugFor('c'),
+        name: `一号多店 A ${RUN}`,
+        ownerPhone: phone,
+        ownerPassword: PASSWORD,
+        trialDays: TRIAL_DAYS,
+      })
+    firstTenantId = expectOk<{ tenant: { id: string } }>(res.body).tenant.id
+  })
+
+  it('不给 existingPassword → 1140100，且什么都没建', async () => {
+    const slug = slugFor('d')
+    const res = await signup(ip, { slug, name: `一号多店 B ${RUN}`, phone, password: PASSWORD })
+    expect(codeOf(res.body)).toBe(1140100)
+    refusedWithoutPassword = { code: codeOf(res.body), message: messageOf(res.body) }
+    expect(await prisma.tenant.findUnique({ where: { slug } })).toBeNull()
+  })
+
+  it('给错的 existingPassword → 同一个 code、同一句话（不泄露账号是否存在）', async () => {
+    const slug = slugFor('e')
+    const res = await signup(ip, {
+      slug,
+      name: `一号多店 C ${RUN}`,
+      phone,
+      password: PASSWORD,
+      existingPassword: 'totally-wrong-9999',
+    })
+    // 两种失败必须**逐字节相同**：不一样的话，任何人都能拿一份手机号表扫出
+    // 「哪些号是本平台商家」——那是一份可以直接拿去做定向诈骗的名单。
+    expect({ code: codeOf(res.body), message: messageOf(res.body) }).toEqual(refusedWithoutPassword)
+    expect(messageOf(res.body)).not.toMatch(/已注册|已存在|已经/)
+    expect(await prisma.tenant.findUnique({ where: { slug } })).toBeNull()
+  })
+
+  it('给对的 existingPassword → 成功，复用同一个账号，且**没有改**它的口令', async () => {
+    const slug = slugFor('f')
+    const res = await signup(ip, {
+      slug,
+      name: `一号多店 D ${RUN}`,
+      phone,
+      // password 是「新账号才会用到」的那一个，这里必须被忽略：
+      // 用它覆盖已有口令的话，商家别的店会在毫不知情的情况下被踹下线。
+      password: 'brand-new-password-1',
+      existingPassword: PASSWORD,
+    })
+    const data = expectOk<{ tenantId: string; accountCreated: boolean }>(res.body)
+    expect(data.accountCreated).toBe(false)
+
+    const first = await prisma.tenant.findUniqueOrThrow({ where: { id: firstTenantId } })
+    const second = await prisma.tenant.findUniqueOrThrow({ where: { id: data.tenantId } })
+    expect(second.ownerAccountId).toBe(first.ownerAccountId)
+
+    // 原口令仍然有效 = 没被覆盖。
+    const login = await request(http())
+      .post('/api/admin/auth/login')
+      .set('X-Forwarded-For', LOGIN_IP)
+      .send({ phone, password: PASSWORD, tenantId: data.tenantId })
+    expect(codeOf(login.body)).toBe(0)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑥ 总开关
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑥ SIGNUP_ENABLED=false 时注册被拒', () => {
+  it('关掉之后注册回 1040000，且库里没多出这家店；打开又能注册', async () => {
+    const slug = slugFor('off')
+    const previous = env.SIGNUP_ENABLED
+    try {
+      env.SIGNUP_ENABLED = false
+
+      const res = await signup(ipFor('case-6'), {
+        slug,
+        name: `开关店 ${RUN}`,
+        phone: phoneFor(6),
+        password: PASSWORD,
+      })
+      expect(codeOf(res.body)).toBe(1040000)
+      expect(messageOf(res.body)).toContain('自助注册')
+      expect(await prisma.tenant.findUnique({ where: { slug } })).toBeNull()
+
+      // 官网落地页读的是**同一个**开关：不然会出现「按钮还在、点了报错」。
+      const config = await request(http())
+        .get('/api/public/site-config')
+        .set('X-Forwarded-For', ipFor('case-6'))
+      expect(expectOk<{ signupEnabled: boolean }>(config.body).signupEnabled).toBe(false)
+    } finally {
+      env.SIGNUP_ENABLED = previous
+    }
+
+    const reopened = await signup(ipFor('case-6'), {
+      slug,
+      name: `开关店 ${RUN}`,
+      phone: phoneFor(6),
+      password: PASSWORD,
+    })
+    expect(codeOf(reopened.body)).toBe(0)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑦ 平台后台绑定既有账号
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑦ 平台后台 attachExistingAccount', () => {
+  it('绑定既有账号成功：复用账号、口令没变、响应明说「已绑定既有账号」', async () => {
+    const res = await authedPlatform()
+      .post('/api/platform/tenants')
+      .send({
+        slug: slugFor('g'),
+        name: `绑定既有账号店 ${RUN}`,
+        // 用①里那个自助注册出来的账号——运营拿不到它的口令，这正是这条口子存在的理由。
+        ownerPhone: SIGNUP_SHOP.phone,
+        attachExistingAccount: true,
+        trialDays: TRIAL_DAYS,
+      })
+    const data = expectOk<{
+      tenant: { id: string }
+      owner: {
+        accountId: string
+        attachedExistingAccount: boolean
+        initialPassword: string | null
+        notice: string
+      }
+    }>(res.body)
+
+    expect(data.owner.attachedExistingAccount).toBe(true)
+    // 没有新建账号，就不该回任何「初始口令」——回了运营就会把它转告给商家，
+    // 而商家用它登不进去。
+    expect(data.owner.initialPassword).toBeNull()
+    expect(data.owner.notice).toContain('已绑定既有账号')
+
+    const original = await prisma.staffAccount.findUniqueOrThrow({
+      where: { phone: SIGNUP_SHOP.phone },
+    })
+    expect(data.owner.accountId).toBe(original.id)
+
+    const audit = await prisma.platformAuditLog.findMany({
+      where: { targetTenantId: data.tenant.id, action: 'tenant.create-attach-existing' },
+    })
+    // 这条口子的全部安全性建立在「事后查得出是谁按的」上面：审计缺了，口子就不该存在。
+    expect(audit, '缺少 tenant.create-attach-existing 审计').toHaveLength(1)
+    expect(audit[0]?.actorType).toBe('PLATFORM_ADMIN')
+    expect(audit[0]?.actorId.length).toBeGreaterThan(0)
+    expect((audit[0]?.after as Record<string, unknown>).attachedAccountId).toBe(original.id)
+    expect((audit[0]?.after as Record<string, unknown>).skipped).toBe('owner-password-verification')
+
+    // 原口令仍然有效。
+    const login = await request(http())
+      .post('/api/admin/auth/login')
+      .set('X-Forwarded-For', LOGIN_IP)
+      .send({ phone: SIGNUP_SHOP.phone, password: PASSWORD, tenantId: data.tenant.id })
+    expect(codeOf(login.body)).toBe(0)
+  })
+
+  it('手机号还没有账号时用 attachExistingAccount → 直接拒绝（绝不退化成「建个新账号」）', async () => {
+    const slug = slugFor('h')
+    const phone = phoneFor(8)
+    const res = await authedPlatform()
+      .post('/api/platform/tenants')
+      .send({ slug, name: `没有账号 ${RUN}`, ownerPhone: phone, attachExistingAccount: true })
+    expect(codeOf(res.body)).toBe(1040000)
+    expect(await prisma.tenant.findUnique({ where: { slug } })).toBeNull()
+    expect(await prisma.staffAccount.findUnique({ where: { phone } })).toBeNull()
+  })
+
+  it('**不**开这个开关、又给了别人的手机号 → provision 照常要求验原口令', async () => {
+    const slug = slugFor('i')
+    const res = await authedPlatform()
+      .post('/api/platform/tenants')
+      .send({
+        slug,
+        name: `没开开关 ${RUN}`,
+        ownerPhone: SIGNUP_SHOP.phone,
+        ownerPassword: 'not-the-right-password-1',
+      })
+    expect(codeOf(res.body)).toBe(1040000)
+    expect(await prisma.tenant.findUnique({ where: { slug } })).toBeNull()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑧ site-config 的套餐来自 Plan 表
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑧ site-config 的套餐与平台后台建的那个逐字段一致', () => {
+  it('平台后台新建一个套餐 → 官网立刻看得到，价格逐字段相同', async () => {
+    const code = `e2e-su-plan-${RUN}`
+    const created = await authedPlatform()
+      .post('/api/platform/plans')
+      .send({
+        code,
+        name: `E2E 官网套餐 ${RUN}`,
+        firstPriceCents: 12800,
+        renewPriceCents: 9800,
+        periodMonths: 3,
+        quotas: { STAFF: 5 },
+        appKeys: ['admin', 'client'],
+      })
+    const plan = expectOk<{ id: string; status: string }>(created.body)
+
+    const res = await request(http())
+      .get('/api/public/site-config')
+      .set('X-Forwarded-For', ipFor('case-8'))
+    const config = expectOk<{
+      signupEnabled: boolean
+      trialDays: number
+      plans: Array<Record<string, unknown>>
+    }>(res.body)
+
+    expect(config.signupEnabled).toBe(true)
+    expect(config.trialDays).toBe(TRIAL_DAYS)
+
+    const row = await prisma.plan.findUniqueOrThrow({ where: { code } })
+    const shown = config.plans.find((p) => p.code === code)
+    expect(shown, `site-config 里没有刚建的套餐 ${code}`).toBeDefined()
+    // 官网上的价目表和 Plan 表如果是两份，改一次价必然只改一边——
+    // 而漂掉的那一边是**商家看到的价格**。
+    expect(shown).toEqual({
+      id: row.id,
+      code: row.code,
+      name: row.name,
+      firstPriceCents: row.firstPriceCents,
+      renewPriceCents: row.renewPriceCents,
+      periodMonths: row.periodMonths,
+      sort: row.sort,
+    })
+    expect(plan.status).toBe('ENABLED')
+
+    // 归档的套餐不该出现在官网上（只列 ENABLED）。
+    const archived = config.plans.filter((p) => p.code === 'no-such-plan')
+    expect(archived).toEqual([])
+  })
+})

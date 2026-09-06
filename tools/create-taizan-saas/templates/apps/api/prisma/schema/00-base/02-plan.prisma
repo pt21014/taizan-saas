@@ -1,0 +1,141 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// 本文件由 @taizan/prisma-base 托管，勿手改；升级请 pnpm taizan:schema-sync
+// ─────────────────────────────────────────────────────────────────────────────
+// 套餐、平台收费订单、配额物化计数。金额一律 Int + `*Cents` 结尾，禁用 Decimal。
+
+/// 平台售卖的套餐（SKU）。【平台域】——全平台共享一份，租户只读。
+model Plan {
+  id              String     @id @db.VarChar(26)
+  /// 稳定标识，代码里按 code 取，不按 id。
+  code            String     @unique
+  name            String
+  /// 首开价（分）。字段名以 Cents 结尾是硬约定（蓝图 §3.1 + spec 9）。
+  firstPriceCents Int
+  /// 续费价（分）。首开与续费分开定价，续费通常更便宜。
+  renewPriceCents Int
+  /// 一个计费周期的月数。
+  periodMonths    Int
+  /// 配额三态：`{"STAFF": 3}` 上限 3；`{"STAFF": 0}` 禁用；`{"STAFF": null}` 不限。
+  /// **null ≠ 0 ≠ 缺省**，清空必须显式传 null，key 取值见 QuotaKind。
+  quotas          Json
+  /// 功能开关白名单。**null = 全部功能**，`[]` = 一个都没有，两者不是一回事。
+  features        Json?
+  /// 允许接入的端：["admin","client","app"]。
+  appKeys         Json
+  /// 每月流量额度（MB），0 = 不单独售卖流量。
+  trafficMb       Int        @default(0)
+  status          PlanStatus @default(ENABLED)
+  sort            Int        @default(0)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([status, sort])
+}
+
+/// 平台向租户收费的订单（开通/续费/升级）。【租户域】
+/// 商家在自己的账单页看自己的；平台看全量走 raw 逃生口（raw-reason 见 spec 3 白名单）。
+model PlanOrder {
+  id             String          @id @db.VarChar(26)
+  tenantId       String          @db.VarChar(26)
+  planId         String          @db.VarChar(26)
+  type           PlanOrderType
+  /// 一次买几个计费周期。
+  periods        Int             @default(1)
+  /// 实付金额（分）。
+  amountCents    Int
+  /// 优惠金额（分）。
+  discountCents  Int             @default(0)
+  status         PlanOrderStatus @default(PENDING)
+  payChannel     PayChannel?
+  /// 商户订单号，全局唯一，回调按它定位（回调时还没有租户上下文）。
+  outTradeNo     String          @unique
+  /// 渠道流水号。
+  transactionId  String?
+  paidAt         DateTime?
+  /// 权益已发放（延长了 planExpireAt）的时刻。付款与发放分两步，中间可重放。
+  fulfilledAt    DateTime?
+  /// 发放前后的到期时间快照，用于对账与回滚。
+  expireBeforeAt DateTime?
+  expireAfterAt  DateTime?
+  /// 线下开单/后台代下单时的操作人（PlatformAdmin.id）。
+  operatorId     String?         @db.VarChar(26)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@index([tenantId, id])
+  @@index([tenantId, status, createdAt])
+  @@index([status, createdAt])
+  @@index([transactionId])
+}
+
+/// 配额物化计数。【租户域】
+/// 闸门挂在每个写请求上，不可能每次都 COUNT(*)；version 给乐观锁用。
+model QuotaCounter {
+  id        String    @id @db.VarChar(26)
+  tenantId  String    @db.VarChar(26)
+  kind      QuotaKind
+  used      Int       @default(0)
+  /// 乐观锁版本号，每次增减 +1。
+  version   Int       @default(0)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([tenantId, kind])
+  @@index([tenantId, id])
+}
+
+/// 套餐上下架状态。
+enum PlanStatus {
+  /// 在售。
+  ENABLED
+  /// 暂时下架，存量租户不受影响。
+  DISABLED
+  /// 归档：永不再售，只为存量租户与历史订单保留。
+  ARCHIVED
+}
+
+/// 平台订单类型。
+enum PlanOrderType {
+  /// 首次开通。
+  OPEN
+  /// 续费（同套餐延长）。
+  RENEW
+  /// 升级（换更高档套餐）。
+  UPGRADE
+}
+
+/// 平台订单状态。
+enum PlanOrderStatus {
+  PENDING
+  /// 已付款，权益尚未发放。
+  PAID
+  /// 权益已发放（planExpireAt 已延长）。
+  FULFILLED
+  CANCELLED
+  REFUNDED
+}
+
+/// 收款渠道。
+enum PayChannel {
+  WECHAT
+  ALIPAY
+  DOUYIN
+  /// 线下打款，由平台运营手工核销。
+  OFFLINE
+}
+
+/// 配额维度。Plan.quotas 与 QuotaCounter.kind 共用这套 key。
+enum QuotaKind {
+  /// 员工数。
+  STAFF
+  /// 门店数。
+  STORE
+  /// 会员数。
+  MEMBER
+  /// 存储占用（MB）。
+  STORAGE_MB
+  /// 月流量（MB）。
+  TRAFFIC_MB
+  /// 业务自定义维度，具体含义由业务层约定。
+  CUSTOM
+}

@@ -1,0 +1,41 @@
+{
+  "name": "@taizan/billing-rules",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "description": "套餐 / 配额 / 功能开关 / 到期闸门 / 续费白名单 / 续期日期计算的纯函数集合。零框架依赖，只依赖 @taizan/contracts 的错误码，可在裸 node 环境跑单测。算错会锁错商家或漏收钱，四条不可退让写在 src/index.ts 文件头。",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@taizan/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@taizan/eslint-config": "workspace:*",
+    "@taizan/tsconfig": "workspace:*",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

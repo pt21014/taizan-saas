@@ -1,0 +1,78 @@
+import { Button, Card, checkUpdate, colors, spacing, textVariants, toast } from '@taizan/app-ui'
+import { router } from 'expo-router'
+import { useState } from 'react'
+import { Text, View } from 'react-native'
+
+import { api } from '../src/api'
+import { sessionStore } from '../src/session'
+
+/** 设置：当前身份、登出、OTA 更新检查。 */
+export default function SettingsScreen() {
+  const session = sessionStore.useSession()
+  const [loggingOut, setLoggingOut] = useState(false)
+  const [checking, setChecking] = useState(false)
+
+  async function logout() {
+    setLoggingOut(true)
+    try {
+      // 只登出当前这一条会话——蓝图 §4.3：手机上退出登录不该把收银台踢掉。
+      await api.post('/admin/auth/logout')
+    } catch {
+      // 网络失败也不阻塞本地登出：token 反正马上要清掉。
+    } finally {
+      await sessionStore.clear()
+      router.replace('/login')
+      setLoggingOut(false)
+    }
+  }
+
+  async function checkForUpdate() {
+    setChecking(true)
+    try {
+      const result = await checkUpdate()
+      if (!result.checked) {
+        toast.show('当前环境不支持热更新检查（Expo Go / 未接 EAS Update）')
+      } else if (result.isAvailable) {
+        toast.show('已下载新版本，重启后生效')
+      } else {
+        toast.show('已是最新版本')
+      }
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  const identity = session.data?.bootstrap.identity
+
+  return (
+    <View style={{ flex: 1, backgroundColor: colors.bgBase, padding: spacing.lg }}>
+      <Card padded style={{ marginBottom: spacing.lg }}>
+        <Text style={{ fontSize: textVariants.body.fontSize }}>{identity?.name ?? '未登录'}</Text>
+        <Text
+          style={{
+            fontSize: textVariants.sub.fontSize,
+            color: colors.gray[500] ?? '#999',
+            marginTop: spacing.xs,
+          }}
+        >
+          员工号 {identity?.staffId ?? '-'}
+        </Text>
+      </Card>
+
+      <Button
+        kind="plain"
+        title={checking ? '检查中…' : '检查更新'}
+        loading={checking}
+        onPress={() => void checkForUpdate()}
+        style={{ marginBottom: spacing.md }}
+      />
+      <Button
+        kind="ghost"
+        danger
+        title="退出登录"
+        loading={loggingOut}
+        onPress={() => void logout()}
+      />
+    </View>
+  )
+}

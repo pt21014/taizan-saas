@@ -1,0 +1,59 @@
+import { usePageTitle } from '../hooks/usePageTitle'
+import { PageHead } from '../components/PageHead'
+import { Cta } from '../components/Cta'
+import { useSiteConfig } from '../context/SiteConfigContext'
+import { NAV } from '../config/NAV'
+
+const STAGES = [
+  ['开店', '填店铺名、路径、手机号、密码，注册当场生效，不需要审核。'],
+  ['上架', '商品/课程从浏览器直传，图文、音频、视频都支持。'],
+  ['装修', '拖组件排版店铺首页，或者直接套一个模板。'],
+  ['收款', '填自己的微信特约商户号，学员/顾客直接付给你，钱不经过平台。'],
+  ['经营', '会员、订单、数据看板一站管理，续费不丢历史数据。'],
+]
+
+export default function Product() {
+  const meta = NAV[1]
+  usePageTitle(meta?.title ?? '产品介绍', meta?.description)
+  const { cfg } = useSiteConfig()
+
+  return (
+    <>
+      <PageHead
+        eyebrow="产品介绍"
+        title="一套系统，覆盖开店到收款的全流程"
+        desc="不是一堆功能的拼盘，而是从注册那一刻起就能跑通的一条完整链路。"
+      />
+
+      <section className="section">
+        <div className="container">
+          <div className="grid grid--3">
+            {STAGES.map(([title, desc], i) => (
+              <div className="card" key={title}>
+                <span style=\{{ color: 'var(--{{projectName}}-color-primary)', fontWeight: 700 }}>
+                  0{i + 1}
+                </span>
+                <h3 style=\{{ marginTop: 8 }}>{title}</h3>
+                <p style=\{{ color: '#6b7078', marginTop: 8 }}>{desc}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="section section--tint">
+        <div className="container">
+          <div className="card card--pad-lg">
+            <h3>一套后台，多端同步</h3>
+            <p style=\{{ marginTop: 10, color: '#4d5158' }}>
+              商家在后台改一次商品或价格，微信公众号与小程序两端立刻同步，不需要分别维护两份内容。
+              员工账号可以按权限点分配，只看得到自己该管的那部分。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <Cta trialDays={cfg?.trialDays ?? null} />
+    </>
+  )
+}

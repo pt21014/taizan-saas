@@ -1,0 +1,75 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// 本文件由 @taizan/prisma-base 托管，勿手改；升级请 pnpm taizan:schema-sync
+// ─────────────────────────────────────────────────────────────────────────────
+// 审计日志。租户侧与平台侧**拆成两张表**，理由同蓝图 §3.1 的「不许可空 tenantId」：
+// 平台高危操作没有归属租户，塞一个可空 tenantId 就等于给隔离开了个例外口子。
+
+/// 租户内的操作审计。【租户域】
+model AuditLog {
+  id         String      @id @db.VarChar(26)
+  tenantId   String      @db.VarChar(26)
+  actorType  ActorType
+  /// 操作者 id（Staff.id / Member.id / PlatformAdmin.id；SYSTEM 时为任务名）。
+  actorId    String
+  /// 操作者名字快照：人删了日志还得看得懂。
+  actorName  String
+  /// 动作码，例如 {{domainSlug}}.sku.update。
+  action     String
+  /// 被操作对象的类型名（业务实体名，自由文本，**不是枚举**）。
+  targetType String?
+  targetId   String?
+  /// 变更前后的快照，敏感字段由 redact 处理后再写。
+  before     Json?
+  after      Json?
+  /// 客户端 IP，只能由 resolveIps 得出（spec 13）。
+  ip         String
+  traceId    String
+  result     AuditResult @default(SUCCESS)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  @@index([tenantId, id])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, action, createdAt])
+  @@index([traceId])
+}
+
+/// 平台高危操作审计。【平台域】——用 targetTenantId 记「操作打到了哪家店」，它不是归属列。
+model PlatformAuditLog {
+  id             String      @id @db.VarChar(26)
+  /// 本次操作影响到的租户；平台自身操作（改全局配置等）为 null。
+  /// 刻意不叫 tenantId：叫 tenantId 会被隔离校验器当成归属列，而本表是平台域。
+  targetTenantId String?     @db.VarChar(26)
+  actorType      ActorType   @default(PLATFORM_ADMIN)
+  actorId        String
+  actorName      String
+  action         String
+  targetType     String?
+  targetId       String?
+  before         Json?
+  after          Json?
+  ip             String
+  traceId        String
+  result         AuditResult @default(SUCCESS)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([targetTenantId, createdAt])
+  @@index([action, createdAt])
+  @@index([traceId])
+}
+
+/// 操作者身份类型。AuditLog / PlatformAuditLog / AnnouncementRead 共用。
+enum ActorType {
+  PLATFORM_ADMIN
+  STAFF
+  MEMBER
+  /// 定时任务、队列消费者等无人值守的执行体。
+  SYSTEM
+}
+
+/// 审计结果。
+enum AuditResult {
+  SUCCESS
+  FAIL
+}

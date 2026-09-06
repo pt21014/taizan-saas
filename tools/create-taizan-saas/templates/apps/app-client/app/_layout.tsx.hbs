@@ -1,0 +1,45 @@
+import { ToastHost } from '@taizan/app-ui'
+import { Stack } from 'expo-router'
+import { StatusBar } from 'expo-status-bar'
+import { useEffect, useState } from 'react'
+import { ActivityIndicator, View } from 'react-native'
+import { SafeAreaProvider } from 'react-native-safe-area-context'
+
+import { sessionStore } from '../src/session'
+
+/**
+ * 根布局：先把 SecureStore 里的旧会话读回内存（`hydrate`），
+ * 读完之前画一个启动屏而不是直接判「未登录」——冷启动瞬间两者是分不开的。
+ */
+export default function RootLayout() {
+  const [ready, setReady] = useState(sessionStore.getState().ready)
+
+  useEffect(() => {
+    if (!ready) {
+      void sessionStore.hydrate().then(() => setReady(true))
+    }
+  }, [ready])
+
+  if (!ready) {
+    return (
+      <View style=\{{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+        <ActivityIndicator />
+      </View>
+    )
+  }
+
+  return (
+    <SafeAreaProvider>
+      <StatusBar style="dark" />
+      <Stack screenOptions=\{{ headerShown: false }}>
+        <Stack.Screen name="index" />
+        <Stack.Screen name="{{domainSlug}}/index" options=\{{ headerShown: true, title: '商品' }} />
+        <Stack.Screen name="{{domainSlug}}/[id]" options=\{{ headerShown: true, title: '商品详情' }} />
+        <Stack.Screen name="profile" options=\{{ headerShown: true, title: '我的' }} />
+        <Stack.Screen name="closed" />
+        <Stack.Screen name="tenant-missing" />
+      </Stack>
+      <ToastHost />
+    </SafeAreaProvider>
+  )
+}

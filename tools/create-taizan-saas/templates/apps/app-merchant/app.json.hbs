@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "台账商家",
+    "slug": "{{projectName}}-app-merchant",
+    "scheme": "{{projectSlug}}merchant",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "web": {
+      "bundler": "metro",
+      "output": "static"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "vip.{{projectSlug}}.app.merchant"
+    },
+    "android": {
+      "package": "vip.{{projectSlug}}.app.merchant"
+    },
+    "plugins": ["expo-router", "expo-secure-store"],
+    "extra": {
+      "apiBase": "http://localhost:3000/api"
+    }
+  }
+}

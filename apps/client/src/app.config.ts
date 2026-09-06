@@ -1,0 +1,16 @@
+export default defineAppConfig({
+  pages: [
+    'pages/index/index',
+    'pages/goods/detail/index',
+    'pages/login/index',
+    'pages/order/confirm/index',
+    'pages/closed/index',
+    'pages/tenant-missing/index',
+  ],
+  window: {
+    backgroundTextStyle: 'light',
+    navigationBarBackgroundColor: '#ffffff',
+    navigationBarTitleText: '示例店铺',
+    navigationBarTextStyle: 'black',
+  },
+})

@@ -1,0 +1,161 @@
+import { useEffect, useState } from 'react'
+import { Alert, Button, Card, Form, Input, Result, Spin, Typography, message } from 'antd'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import {
+  InviteApiError,
+  useInviteApi,
+  type AcceptInviteInput,
+  type InviteLookupResult,
+} from '../../api/invite'
+
+/** 配额超限（`QUOTA_EXCEEDED`），域 15、语义 403、段 1 → `1540301`。 */
+const QUOTA_EXCEEDED_CODE = 1540301
+/** 手机号或密码不正确（`UNAUTHENTICATED`），域 11、语义 401、段 0 → `1140100`。 */
+const WRONG_PASSWORD_CODE = 1140100
+
+/** {@link InviteLookupResult.reason} → 人话文案。认不出的原因兜底显示「已失效」。 */
+const INVALID_REASON_TEXT: Record<string, string> = {
+  NOT_FOUND: '这个邀请链接不存在，请确认链接是否完整。',
+  USED: '这张邀请已经被用过了，如果就是你本人加入的，直接去登录即可。',
+  EXPIRED: '这张邀请已经过期，请联系店主重新生成一张。',
+  SHOP_UNAVAILABLE: '这家店铺当前不可加入，请联系店主。',
+}
+
+type LoadState = { loading: boolean; lookup: InviteLookupResult | null }
+
+/**
+ * 员工邀请落地页（`/invites/:token`），**免登录**——被邀请人此刻可能连账号都没有。
+ * 不经过 `RequireAuth`，`App.tsx` 里直接挂在 `/login` 同一层级。
+ *
+ * 三态：查询中 → 无效（按 `reason` 显示对应文案）→ 有效（表单：手机号 + 密码，
+ * 提交后跳登录页走一次正常登录——这条接口刻意不下发 token，见 `invite.service.ts`）。
+ */
+export default function InviteAcceptPage() {
+  const { token } = useParams<{ token: string }>()
+  const navigate = useNavigate()
+  const api = useInviteApi()
+  const [state, setState] = useState<LoadState>({ loading: true, lookup: null })
+  const [submitting, setSubmitting] = useState(false)
+  const [form] = Form.useForm<AcceptInviteInput>()
+
+  useEffect(() => {
+    if (!token) return
+    setState({ loading: true, lookup: null })
+    void api
+      .lookup(token)
+      .then((lookup) => setState({ loading: false, lookup }))
+      .catch(() =>
+        setState({
+          loading: false,
+          lookup: {
+            valid: false,
+            reason: 'NOT_FOUND',
+            shopName: null,
+            phoneMask: null,
+            expiresAt: null,
+          },
+        }),
+      )
+  }, [token])
+
+  const handleSubmit = async (values: AcceptInviteInput) => {
+    if (!token) return
+    setSubmitting(true)
+    try {
+      await api.accept(token, values)
+      void message.success('已加入店铺，请用刚才填的手机号和密码登录')
+      navigate('/login', { replace: true })
+    } catch (err) {
+      if (err instanceof InviteApiError) {
+        if (err.code === QUOTA_EXCEEDED_CODE) {
+          void message.error('这家店的员工数已经用满了，请联系店主先升级套餐或清退员工')
+          return
+        }
+        if (err.code === WRONG_PASSWORD_CODE) {
+          void message.error('这个手机号已经有账号了，密码不对——请填它现有的登录密码')
+          return
+        }
+        void message.error(err.message)
+        return
+      }
+      void message.error('提交失败，请稍后重试')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  if (!token || state.loading) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', padding: 96 }}>
+        <Spin size="large" />
+      </div>
+    )
+  }
+
+  const { lookup } = state
+
+  if (lookup === null || !lookup.valid) {
+    const reasonText =
+      (lookup?.reason && INVALID_REASON_TEXT[lookup.reason]) ?? '这个邀请链接已经失效。'
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 96 }}>
+        <Result
+          status="warning"
+          title="邀请链接无法使用"
+          subTitle={reasonText}
+          extra={
+            <Link to="/login">
+              <Button type="primary">去登录</Button>
+            </Link>
+          }
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 64 }}>
+      <Card title={`加入「${lookup.shopName}」`} style={{ width: 420 }}>
+        {lookup.phoneMask && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={`这张邀请只对尾号与 ${lookup.phoneMask} 一致的手机号有效`}
+          />
+        )}
+        <Typography.Paragraph type="secondary">
+          填手机号和密码即可加入。如果这个手机号在 taizan-saas 已经有账号，密码必须是它
+          <b>现有的登录密码</b>；如果是新手机号，这里填的就是新账号的登录密码。
+        </Typography.Paragraph>
+        <Form form={form} layout="vertical" onFinish={(v) => void handleSubmit(v)}>
+          <Form.Item
+            name="phone"
+            label="手机号"
+            rules={[
+              { required: true, message: '请填手机号' },
+              { pattern: /^1\d{10}$/, message: '请输入正确的 11 位手机号' },
+            ]}
+          >
+            <Input maxLength={11} placeholder="用于登录" />
+          </Form.Item>
+          <Form.Item
+            name="password"
+            label="密码"
+            rules={[
+              { required: true, message: '请填密码' },
+              { min: 6, message: '密码至少 6 位' },
+            ]}
+          >
+            <Input.Password autoComplete="new-password" />
+          </Form.Item>
+          <Form.Item>
+            <Button type="primary" htmlType="submit" loading={submitting} block>
+              加入店铺
+            </Button>
+          </Form.Item>
+        </Form>
+      </Card>
+    </div>
+  )
+}

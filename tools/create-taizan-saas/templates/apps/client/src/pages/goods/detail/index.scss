@@ -1,0 +1,16 @@
+.detail {
+  padding: 32px;
+
+  &__name {
+    font-size: 36px;
+    color: #333;
+    margin-bottom: 16px;
+  }
+
+  &__price {
+    font-size: 40px;
+    color: #ff4d4f;
+    font-weight: 600;
+    margin-bottom: 48px;
+  }
+}

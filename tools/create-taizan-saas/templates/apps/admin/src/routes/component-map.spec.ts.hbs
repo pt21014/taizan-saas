@@ -1,0 +1,71 @@
+import { describe, expect, it } from 'vitest'
+import { describeComponentMapReport, verifyComponentMap } from '@taizan/admin-ui'
+import type { MenuNode } from '@taizan/contracts'
+import adminMenusFixture from './__fixtures__/admin-menus.json'
+import { componentMap } from './component-map'
+
+/**
+ * spec 7（蓝图 §8）：`component-map.ts` 与后端 ADMIN 菜单注册表的双向对账。
+ *
+ * `adminMenusFixture` 是 `apps/api/src/registry/menus.ts` 里 `ADMIN_MENUS` 的 JSON 快照，
+ * 由 `pnpm -F {{scope}}/admin sync-menus`（`scripts/sync-menus.ts`）导出——脚本本身零 Nest
+ * 依赖，直接 `tsx` 相对路径 import 后端源文件即可跑，这份快照是脚本真实跑出来的，
+ * 不是手抄的。
+ *
+ * T1-9 之后 `ADMIN_MENUS` 已经登记齐了全部 8 个菜单（`example-{{domainSlug}}` 的 `{{DomainPascal}}List`，
+ * 加上工作台/员工/角色/账单/审计/公告/个人设置七个框架页面），`component-map.ts` 这边
+ * 也一一对应——不再有「component-map 有、菜单没引用」的已知缺口，`unused` 恒为空数组。
+ * `apps/api/test/arch/menu-route-map.spec.ts`（服务端那一半的 spec 7）从这个文件里
+ * 静态解析出同一份 key 集合，两条 spec 守的是同一件事的两个方向。
+ */
+describe('component-map 与后端 ADMIN 菜单双向对齐（spec 7）', () => {
+  it('componentKey 双向对齐：missing / unused / pathWithoutComponentKey 均为空', () => {
+    const report = verifyComponentMap(adminMenusFixture as MenuNode[], componentMap)
+    expect(describeComponentMapReport(report)).toBe('componentKey 双向对齐')
+    expect(report.missing).toEqual([])
+    expect(report.unused).toEqual([])
+    expect(report.pathWithoutComponentKey).toEqual([])
+  })
+
+  it('哨兵：菜单多引用一个未登记的 componentKey 时，missing 必须非空', () => {
+    const withExtraMenu: MenuNode[] = [
+      ...(adminMenusFixture as MenuNode[]),
+      {
+        key: 'sentinel-missing',
+        title: '哨兵：不存在的页面',
+        type: 'MENU',
+        path: '/__sentinel__',
+        componentKey: 'SentinelNotRegistered',
+        sort: 999,
+      },
+    ]
+    const report = verifyComponentMap(withExtraMenu, componentMap)
+    expect(report.ok).toBe(false)
+    expect(report.missing).toEqual(['SentinelNotRegistered'])
+  })
+
+  it('哨兵：component-map 多登记一个没有菜单引用的 key 时，unused 必须非空', () => {
+    const report = verifyComponentMap(adminMenusFixture as MenuNode[], {
+      ...componentMap,
+      SentinelUnused: componentMap.Dashboard,
+    })
+    expect(report.ok).toBe(false)
+    expect(report.unused).toEqual(['SentinelUnused'])
+  })
+
+  it('哨兵：`MENU` 有 path 却没 componentKey 时，pathWithoutComponentKey 必须非空', () => {
+    const withPathOnly: MenuNode[] = [
+      ...(adminMenusFixture as MenuNode[]),
+      {
+        key: 'sentinel-path',
+        title: '哨兵：没有组件',
+        type: 'MENU',
+        sort: 999,
+        path: '/__no_component__',
+      },
+    ]
+    const report = verifyComponentMap(withPathOnly, componentMap)
+    expect(report.ok).toBe(false)
+    expect(report.pathWithoutComponentKey).toEqual(['sentinel-path'])
+  })
+})

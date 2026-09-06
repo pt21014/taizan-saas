@@ -1,0 +1,86 @@
+import { Button, Card, EmptyState, colors, spacing, textVariants, toast } from '@taizan/app-ui'
+import { useLocalSearchParams } from 'expo-router'
+import { Platform, Text, View } from 'react-native'
+
+/**
+ * {{domainName}}详情。
+ *
+ * **`/api/client/{{domainSlug}}` 目前只有列表接口**（`apps/api/src/modules/client/{{domainSlug}}/client-{{domainSlug}}.controller.ts`
+ * 的文件头写明：这条路由存在的唯一理由是证明 C 端也被租户隔离住了，还没有 `:id` 详情接口）。
+ * 所以这一屏不去凭空调一个不存在的接口，而是吃列表页传过来的字段——
+ * 真详情接口（含图片/详情富文本）留给后续任务接。
+ */
+export default function {{DomainPascal}}DetailScreen() {
+  const { id, name, priceCents, stock } = useLocalSearchParams<{
+    id: string
+    name?: string
+    priceCents?: string
+    stock?: string
+  }>()
+
+  if (!name) {
+    return (
+      <View style=\{{ flex: 1, backgroundColor: colors.bgBase, justifyContent: 'center' }}>
+        <EmptyState
+          title="打开方式不对"
+          hint="{{domainName}}详情请从列表页进入（目前还没有独立的详情接口）。"
+        />
+      </View>
+    )
+  }
+
+  const priceYuan = ((Number(priceCents) || 0) / 100).toFixed(2)
+
+  /**
+   * iOS 应用商店规则要求虚拟{{domainName}}/服务走 App 内购（或走「虚拟支付」这条专门通道），
+   * 不能走微信支付这类站外收款——本骨架版本还没接支付网关，
+   * 在真正接入虚拟支付前，**iOS 上直接隐藏购买入口**，不是含糊地弹一个「即将上线」，
+   * 这样才不会造出一个「点了没反应」的假按钮。
+   */
+  const canShowPurchase = Platform.OS !== 'ios'
+
+  return (
+    <View style=\{{ flex: 1, backgroundColor: colors.bgBase, padding: spacing.lg }}>
+      <Card padded>
+        <Text style=\{{ fontSize: textVariants.title.fontSize, fontWeight: '700' }}>{name}</Text>
+        <Text
+          style=\{{
+            fontSize: textVariants.body.fontSize,
+            color: colors.error,
+            fontWeight: '700',
+            marginTop: spacing.sm,
+          }}
+        >
+          ¥{priceYuan}
+        </Text>
+        <Text
+          style=\{{
+            fontSize: textVariants.sub.fontSize,
+            color: colors.gray[500] ?? '#999',
+            marginTop: spacing.xs,
+          }}
+        >
+          库存 {stock ?? '-'} · {{domainName}}号 {id}
+        </Text>
+
+        {canShowPurchase ? (
+          <Button
+            title="立即购买（演示，未接支付）"
+            style=\{{ marginTop: spacing.xl }}
+            onPress={() => toast.show('支付网关尚未接入，这里只是骨架')}
+          />
+        ) : (
+          <Text
+            style=\{{
+              fontSize: textVariants.micro.fontSize,
+              color: colors.gray[500] ?? '#999',
+              marginTop: spacing.xl,
+            }}
+          >
+            iOS 版购买需走虚拟支付通道，接入前暂不展示购买入口。
+          </Text>
+        )}
+      </Card>
+    </View>
+  )
+}

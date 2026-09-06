@@ -1,0 +1,44 @@
+import { ToastHost } from '@taizan/app-ui'
+import { Stack } from 'expo-router'
+import { StatusBar } from 'expo-status-bar'
+import { useEffect, useState } from 'react'
+import { ActivityIndicator, View } from 'react-native'
+import { SafeAreaProvider } from 'react-native-safe-area-context'
+
+import { sessionStore } from '../src/session'
+
+/** 根布局：先把 SecureStore 里的旧会话（staff token + bootstrap）读回内存。 */
+export default function RootLayout() {
+  const [ready, setReady] = useState(sessionStore.getState().ready)
+
+  useEffect(() => {
+    if (!ready) {
+      void sessionStore.hydrate().then(() => setReady(true))
+    }
+  }, [ready])
+
+  if (!ready) {
+    return (
+      <View style=\{{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+        <ActivityIndicator />
+      </View>
+    )
+  }
+
+  return (
+    <SafeAreaProvider>
+      <StatusBar style="dark" />
+      <Stack screenOptions=\{{ headerShown: false }}>
+        <Stack.Screen name="index" />
+        <Stack.Screen name="login" />
+        <Stack.Screen name="shop-chooser" options=\{{ headerShown: true, title: '选择店铺' }} />
+        <Stack.Screen name="dashboard" options=\{{ headerShown: true, title: '看板' }} />
+        <Stack.Screen name="{{domainSlug}}/index" options=\{{ headerShown: true, title: '商品' }} />
+        <Stack.Screen name="{{domainSlug}}/[id]" options=\{{ headerShown: true, title: '商品详情' }} />
+        <Stack.Screen name="audit" options=\{{ headerShown: true, title: '审计日志' }} />
+        <Stack.Screen name="settings" options=\{{ headerShown: true, title: '设置' }} />
+      </Stack>
+      <ToastHost />
+    </SafeAreaProvider>
+  )
+}

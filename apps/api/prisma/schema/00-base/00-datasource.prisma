@@ -1,0 +1,20 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// 本文件由 @taizan/prisma-base 托管，勿手改；升级请 pnpm taizan:schema-sync
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// generator + datasource 全仓唯一一处，必须留在 00- 前缀的第一个片段里：
+// Prisma 的多文件 schema（目录形态）要求整个目录里有且只有一个 generator/datasource 块。
+//
+// 关于多文件 schema 的 preview flag：`prismaSchemaFolder` 在 Prisma 6 已经 GA，
+// 本包实测 prisma 6.19.3 直接 `prisma validate --schema schema` 通过，**不需要**
+// 写 previewFeatures = ["prismaSchemaFolder"]（写了反而会在 Prisma 7 起告警）。
+// 如果把本片段同步到仍在用 Prisma 5.15–6.6 的项目里，才需要自行补上该 preview flag。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}

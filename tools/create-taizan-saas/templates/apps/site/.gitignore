@@ -1,0 +1,6 @@
+# `robots.txt` / `sitemap.xml` 只应该出现在构建产物 `dist/`（根 .gitignore 已经忽略
+# 整个 dist/）。这两条是防呆：万一以后有人把 `scripts/generate-seo.ts` 改回写
+# `public/`，这两个文件也不会被意外提交回受版本管理的 `public/`——那正是
+# T4-5 那次「lastmod 写今天日期导致 build:templates:check 必红」的根因。
+public/robots.txt
+public/sitemap.xml

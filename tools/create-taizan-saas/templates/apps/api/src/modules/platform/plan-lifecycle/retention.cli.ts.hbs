@@ -1,0 +1,150 @@
+/**
+ * `pnpm -F {{scope}}/api retention --dry-run` —— 注销租户的保留期清理（T2-7，蓝图 §4.6）。
+ *
+ * ## 只列名单，不动任何一行数据
+ *
+ * 蓝图那条红线："数据保留 `retentionDays`，物理清理只允许过期后由脚本执行（禁止物理删表）"。
+ * 本脚本比那条红线还保守一步：**目前只列出超过保留期的租户，什么都不清**——真正的物理
+ * 清理是一次不可逆的操作，理应由一条独立、经过双重确认、带审计留痕的运维脚本来做
+ * （TODO：那条脚本本身也不该出现在业务应用里，应该是平台运维工具链的一部分）。
+ *
+ * 本文件因此**故意不出现任何移除数据的调用**——不是漏写，是这一版明确的范围。
+ * `test/../retention.cli.spec.ts`（放在同目录）会扫本文件源码，断言这一点没有被
+ * 后人不小心破坏。
+ *
+ * ## 判定口径
+ *
+ * `Tenant.status === 'DEREGISTERED'` 且 `deregisterAt + retentionDays 天 <= now`——
+ * 到期时刻按自然日 + 天数的整点计算（不引入时区换算，`retentionDays` 是「过了这么多个
+ * 24 小时」而不是「过了这么多个日历日」，与到期闸门那种「当天算未到期」的口径不是
+ * 同一件事：闸门是给商家一个完整的最后一天，保留期是纯粹的机械倒计时）。
+ *
+ * @packageDocumentation
+ */
+
+import 'dotenv/config'
+
+import { PrismaClient } from '@prisma/client'
+
+/** 一天的毫秒数。 */
+export const DAY_MS = 24 * 60 * 60 * 1000
+
+/** 一条超期候选。 */
+export interface OverdueTenant {
+  id: string
+  slug: string
+  name: string
+  deregisterAt: Date
+  retentionDays: number
+  /** 保留期截止的那一刻：`deregisterAt + retentionDays 天`。 */
+  dueAt: Date
+}
+
+/** 保留期截止时刻 = `deregisterAt + retentionDays` 天。 */
+export function computeRetentionDueAt(deregisterAt: Date, retentionDays: number): Date {
+  return new Date(deregisterAt.getTime() + retentionDays * DAY_MS)
+}
+
+/** 这家租户的保留期是不是已经过了。 */
+export function isRetentionOverdue(deregisterAt: Date, retentionDays: number, now: Date): boolean {
+  return computeRetentionDueAt(deregisterAt, retentionDays).getTime() <= now.getTime()
+}
+
+/** 喂给 {@link listOverdueTenants} 的最小 Prisma 接口（方便单测用假实现替换）。 */
+export interface RetentionScanClient {
+  tenant: {
+    findMany(args: {
+      where: { status: 'DEREGISTERED'; deregisterAt: { not: null } }
+      select: {
+        id: true
+        slug: true
+        name: true
+        deregisterAt: true
+        retentionDays: true
+      }
+    }): Promise<
+      { id: string; slug: string; name: string; deregisterAt: Date | null; retentionDays: number }[]
+    >
+  }
+}
+
+/**
+ * 列出已经超过保留期的 `DEREGISTERED` 租户。**只读**，不写一行数据库。
+ *
+ * @param prisma - 原始 client 就够，这条查询天然跨租户（`Tenant` 本身是平台域表）
+ * @param now - 现在，测试里传固定值好断言边界
+ */
+export async function listOverdueTenants(
+  prisma: RetentionScanClient,
+  now: Date = new Date(),
+): Promise<OverdueTenant[]> {
+  const candidates = await prisma.tenant.findMany({
+    where: { status: 'DEREGISTERED', deregisterAt: { not: null } },
+    select: { id: true, slug: true, name: true, deregisterAt: true, retentionDays: true },
+  })
+
+  const overdue: OverdueTenant[] = []
+  for (const row of candidates) {
+    if (!row.deregisterAt) continue
+    if (!isRetentionOverdue(row.deregisterAt, row.retentionDays, now)) continue
+    overdue.push({
+      id: row.id,
+      slug: row.slug,
+      name: row.name,
+      deregisterAt: row.deregisterAt,
+      retentionDays: row.retentionDays,
+      dueAt: computeRetentionDueAt(row.deregisterAt, row.retentionDays),
+    })
+  }
+  return overdue
+}
+
+/** 把名单格式化成人读的报告文本，`main()` 与单测共用。 */
+export function formatReport(rows: readonly OverdueTenant[], dryRun: boolean): string {
+  if (rows.length === 0) {
+    return '没有已超过保留期的注销租户。'
+  }
+  const lines = rows.map(
+    (r) =>
+      `  ${r.slug}（${r.id}）${r.name} —— 注销于 ${r.deregisterAt.toISOString()}，` +
+      `保留 ${String(r.retentionDays)} 天，已于 ${r.dueAt.toISOString()} 到期`,
+  )
+  const header = dryRun
+    ? `以下 ${String(rows.length)} 家租户已超过保留期（--dry-run，只列名单，不做任何改动）：`
+    : `以下 ${String(rows.length)} 家租户已超过保留期：`
+  return [header, ...lines].join('\n')
+}
+
+async function main(): Promise<void> {
+  const dryRun = process.argv.includes('--dry-run')
+  // raw-reason: 独立运维脚本（与 src/seed.ts 同一取舍）——这是一次性、跨全体租户的
+  // 扫描，本身就不该套租户隔离扩展；脚本自己起停，没有 Nest 容器可以注入 RawPrismaService。
+  const prisma = new PrismaClient()
+  try {
+    const overdue = await listOverdueTenants(prisma)
+    process.stdout.write(`${formatReport(overdue, dryRun)}\n`)
+    if (!dryRun) {
+      process.stdout.write(
+        '\n注意：本脚本目前只支持列名单（--dry-run），真正的物理清理还没有实现——' +
+          '按蓝图的红线，那需要一条独立的、经过双重确认的运维脚本，不在本次范围内（TODO）。\n',
+      )
+    }
+  } finally {
+    await prisma.$disconnect()
+  }
+}
+
+// 按文件名（而不是 `import.meta.url` 转 `file://`）判断是不是被直接跑起来的——
+// Windows 路径分隔符转 URL 容易踩坑，这里只关心「入口脚本是不是本文件」这一件事，
+// 好让单测能安全地 `import` 这些函数而不触发 `main()`。
+const entryFile = process.argv[1] ?? ''
+const isDirectRun = entryFile.endsWith('retention.cli.ts') || entryFile.endsWith('retention.cli.js')
+
+if (isDirectRun) {
+  main().catch((error: unknown) => {
+    process.exitCode = 1
+    process.stderr.write(
+      `retention 失败：${error instanceof Error ? error.stack : String(error)}\n`,
+    )
+  })
+}

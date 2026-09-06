@@ -1,0 +1,109 @@
+import type { CrudListQuery, StatusTagConfig } from '@taizan/admin-ui'
+import type { PageResult } from '@taizan/contracts'
+import { useSession } from '../session'
+
+/** 租户状态全集，对齐 `apps/api/.../platform-tenant.dto.ts` 的 `TENANT_STATUSES`（刻意没有 EXPIRED）。 */
+export const TENANT_STATUSES = ['TRIAL', 'ACTIVE', 'SUSPENDED', 'DEREGISTERED'] as const
+
+export const TENANT_STATUS_TAGS: Record<string, StatusTagConfig> = {
+  TRIAL: { text: '试用中', color: 'processing' },
+  ACTIVE: { text: '正常', color: 'success' },
+  SUSPENDED: { text: '已冻结', color: 'error' },
+  DEREGISTERED: { text: '已注销', color: 'default' },
+}
+
+/** `GET /api/platform/tenants` 的一行。 */
+export interface TenantView {
+  id: string
+  slug: string
+  name: string
+  status: string
+  planId: string | null
+  planExpireAt: string | null
+  trialEndAt: string | null
+  ownerAccountId: string
+  createdAt: string
+}
+
+/** 租户看板：员工/会员/商品数，全部 count。 */
+export interface TenantOverview {
+  tenant: TenantView
+  staffActiveCount: number
+  memberCount: number
+  {{domainSlug}}Count: number
+}
+
+/**
+ * 开通一家店。`attachExistingAccount` 是后端已经支持的高危开关（`CreateTenantDto`）：
+ * 手机号已有账号时必须显式传 `true` 才能把新店挂到那个账号下（运营拿不到商家口令），
+ * 手机号还没有账号时传它会被直接拒绝。
+ */
+export interface CreateTenantInput {
+  slug: string
+  name: string
+  ownerPhone: string
+  ownerName?: string
+  /** 不填就随机生成一个，回填在 `CreateTenantResult.owner.initialPassword` 里 */
+  ownerPassword?: string
+  attachExistingAccount?: boolean
+  planId?: string
+  trialDays?: number
+}
+
+export interface CreateTenantResult {
+  tenant: TenantView
+  owner: {
+    accountId: string
+    staffId: string
+    phone: string
+    initialPassword: string | null
+    attachedExistingAccount: boolean
+    notice: string
+  }
+}
+
+export interface RenewTenantInput {
+  /** 换套餐续期时传；不传就沿用当前套餐 */
+  planId?: string
+  periods: number
+}
+
+export interface RenewTenantResult {
+  tenant: TenantView
+  order: { id: string; outTradeNo: string; amountCents: number; expireAfterAt: string }
+}
+
+export interface ResetOwnerPasswordResult {
+  accountId: string
+  phone: string
+  initialPassword: string | null
+}
+
+/** 租户模块的接口层。开通用 `useCrudForm({ create })`，其余动作（续期/改套餐/冻结…）是行内按钮直调。 */
+export function useTenantApi() {
+  const req = useSession((s) => s.request)
+  return {
+    list: (query: CrudListQuery) => req.get<PageResult<TenantView>>('/api/platform/tenants', query),
+    overview: (tenantId: string) =>
+      req.get<TenantOverview>(`/api/platform/tenants/${tenantId}/overview`),
+    create: (values: CreateTenantInput) =>
+      req.post<CreateTenantResult>('/api/platform/tenants', values),
+    suspend: (tenantId: string) =>
+      req.patch<TenantView>(`/api/platform/tenants/${tenantId}/suspend`),
+    resume: (tenantId: string) => req.patch<TenantView>(`/api/platform/tenants/${tenantId}/resume`),
+    renew: (tenantId: string, values: RenewTenantInput) =>
+      req.patch<RenewTenantResult>(`/api/platform/tenants/${tenantId}/renew`, values),
+    changePlan: (tenantId: string, planId: string) =>
+      req.patch<TenantView>(`/api/platform/tenants/${tenantId}/change-plan`, { planId }),
+    resetOwnerPassword: (tenantId: string, newPassword?: string) =>
+      req.patch<ResetOwnerPasswordResult>(
+        `/api/platform/tenants/${tenantId}/reset-owner-password`,
+        {
+          newPassword,
+        },
+      ),
+    /** 注销：后端只置状态位，没有 slug 二次确认参数——那一步是纯前端 UX 门槛（见页面组件）。 */
+    deregister: (tenantId: string) =>
+      req.patch<TenantView>(`/api/platform/tenants/${tenantId}/deregister`),
+  }
+}

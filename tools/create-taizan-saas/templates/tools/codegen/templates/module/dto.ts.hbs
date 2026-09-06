@@ -1,0 +1,115 @@
+/**
+ * `{{Pascal}}` 的 DTO（HTTP 边界的形状校验）。
+ *
+ * 分层：**DTO 只挡形状，业务规则在 `{{slug}}.rules.ts`**。
+ * DTO 校验依赖 class-validator + 显式 `Validate(Dto)` 管道，而规则要能在没有 Nest 的
+ * 情况下单测——混在一起的结果是边界用例只能靠起 HTTP 服务来测，于是没人写。
+ *
+ * `@ApiProperty` 一律**显式写 `type`**：本仓库没有开 `emitDecoratorMetadata`
+ * （esbuild 不支持，见 apps/api/tsconfig.json 的注释），Swagger 推断不出来。
+ *
+ * @packageDocumentation
+ */
+
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger'
+import { Type } from 'class-transformer'
+import { IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator'
+
+// 规则常量在 `../{{slug}}.rules`（**上一层**，不是 dto/ 里）：DTO 与规则共用同一组
+// 上限值，两处各写一份必然会漂——「DTO 放行 100 字、规则拦 60 字」这种分叉排查起来最费劲。
+import {
+  {{CONST}}_NAME_MAX,
+  {{CONST}}_PRICE_CENTS_MAX,
+  {{CONST}}_REMARK_MAX,
+  {{CONST}}_STATUSES,
+  type {{Pascal}}StatusLike,
+} from '../{{slug}}.rules'
+
+/** 新建{{name}}。 */
+export class Create{{Pascal}}Dto {
+  @ApiProperty({ type: String, description: '{{name}}名称' })
+  @IsString({ message: '名称必须是字符串' })
+  @MaxLength({{CONST}}_NAME_MAX, { message: '名称过长' })
+  name!: string
+
+  @ApiPropertyOptional({ type: Number, description: '金额，单位分', default: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: '金额必须是整数（单位：分）' })
+  @Min(0, { message: '金额不能为负' })
+  @Max({{CONST}}_PRICE_CENTS_MAX, { message: '金额超上限' })
+  priceCents?: number
+
+  @ApiPropertyOptional({ enum: {{CONST}}_STATUSES, description: '状态', default: 'DRAFT' })
+  @IsOptional()
+  @IsIn({{CONST}}_STATUSES as readonly string[], { message: '状态取值非法' })
+  status?: {{Pascal}}StatusLike
+
+  @ApiPropertyOptional({ type: String, description: '备注' })
+  @IsOptional()
+  @IsString({ message: '备注必须是字符串' })
+  @MaxLength({{CONST}}_REMARK_MAX, { message: '备注过长' })
+  remark?: string
+}
+
+/** 修改{{name}}：字段全可选，给了才校验。 */
+export class Update{{Pascal}}Dto {
+  @ApiPropertyOptional({ type: String, description: '{{name}}名称' })
+  @IsOptional()
+  @IsString({ message: '名称必须是字符串' })
+  @MaxLength({{CONST}}_NAME_MAX, { message: '名称过长' })
+  name?: string
+
+  @ApiPropertyOptional({ type: Number, description: '金额，单位分' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: '金额必须是整数（单位：分）' })
+  @Min(0, { message: '金额不能为负' })
+  @Max({{CONST}}_PRICE_CENTS_MAX, { message: '金额超上限' })
+  priceCents?: number
+
+  @ApiPropertyOptional({ enum: {{CONST}}_STATUSES, description: '状态' })
+  @IsOptional()
+  @IsIn({{CONST}}_STATUSES as readonly string[], { message: '状态取值非法' })
+  status?: {{Pascal}}StatusLike
+
+  @ApiPropertyOptional({ type: String, description: '备注' })
+  @IsOptional()
+  @IsString({ message: '备注必须是字符串' })
+  @MaxLength({{CONST}}_REMARK_MAX, { message: '备注过长' })
+  remark?: string
+}
+
+/** 列表查询。 */
+export class List{{Pascal}}QueryDto {
+  @ApiPropertyOptional({ type: Number, description: '页码，从 1 开始', default: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: 'page 必须是整数' })
+  @Min(1, { message: 'page 从 1 开始' })
+  page?: number
+
+  @ApiPropertyOptional({ type: Number, description: '每页条数，上限 200', default: 20 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: 'pageSize 必须是整数' })
+  @Min(1, { message: 'pageSize 至少 1' })
+  @Max(200, { message: 'pageSize 上限 200' })
+  pageSize?: number
+
+  @ApiPropertyOptional({ enum: {{CONST}}_STATUSES, description: '按状态筛选' })
+  @IsOptional()
+  @IsIn({{CONST}}_STATUSES as readonly string[], { message: '状态取值非法' })
+  status?: {{Pascal}}StatusLike
+}
+
+/** 出参形状。**不直接回 Prisma 行**：`tenantId` / `deletedAt` 不该出现在响应里。 */
+export class {{Pascal}}View {
+  @ApiProperty({ type: String }) id!: string
+  @ApiProperty({ type: String }) name!: string
+  @ApiProperty({ type: Number, description: '金额，单位分' }) priceCents!: number
+  @ApiProperty({ enum: {{CONST}}_STATUSES }) status!: {{Pascal}}StatusLike
+  @ApiProperty({ type: String, nullable: true }) remark!: string | null
+  @ApiProperty({ type: String }) createdAt!: string
+  @ApiProperty({ type: String }) updatedAt!: string
+}

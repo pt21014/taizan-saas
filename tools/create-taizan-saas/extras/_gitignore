@@ -1,0 +1,21 @@
+node_modules
+dist
+.turbo
+.env
+.env.*
+!.env.example
+coverage
+*.log
+.DS_Store
+
+# 前端 e2e 产物
+test-results
+playwright-report
+
+# 发布包
+deploy/.releases
+
+# 注意：`apps/api/prisma/schema/00-base/**` 与 `base.lock.json` **要进 git**。
+# 它们由 `pnpm taizan:schema-sync` 从 @taizan/prisma-base 同步而来，
+# `test/arch/base-schema-integrity.spec.ts` 拿 lock 里的 sha256 与文件逐字节比对——
+# 不提交的话，别人 clone 下来在跑 schema-sync 之前那条 spec 一定是红的。

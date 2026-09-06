@@ -1,0 +1,91 @@
+import { useCallback, useEffect, useState } from 'react'
+import { Badge, Typography } from 'antd'
+import { CrudTable, dateTimeColumn, statusTagColumn, useCrudTable } from '@taizan/admin-ui'
+import { ANNOUNCEMENT_READ, useAnnouncementsApi, type Announcement } from '../../api/announcements'
+
+/**
+ * 公告：只读列表 + 标记已读——方向是**平台 → 商家**，商家是读者不是作者
+ * （`apps/api/src/modules/admin/announcement` 的文件头写了理由：「商家自己发店内
+ * 公告」需要一张新的租户域表，是一个独立的、还没落地的业务需求）。
+ */
+export default function AnnouncementListPage() {
+  const api = useAnnouncementsApi()
+  const [unread, setUnread] = useState(0)
+
+  const table = useCrudTable<Announcement>({
+    list: api.list,
+    rowKey: 'id',
+    searchSchema: [
+      {
+        name: 'unreadOnly',
+        label: '只看未读',
+        type: 'select',
+        options: [{ label: '未读', value: 'true' }],
+      },
+    ],
+  })
+
+  const refreshUnreadCount = useCallback(() => {
+    void api.list({ page: 1, pageSize: 1, unreadOnly: true }).then((res) => setUnread(res.total))
+  }, [])
+
+  useEffect(() => {
+    refreshUnreadCount()
+  }, [refreshUnreadCount])
+
+  const markRead = (row: Announcement) => {
+    void api.markRead(row.id).then(() => {
+      table.refresh()
+      refreshUnreadCount()
+    })
+  }
+
+  return (
+    <CrudTable<Announcement>
+      table={table}
+      title={
+        <span>
+          公告 <Badge count={unread} overflowCount={99} title={`${unread} 条未读`} />
+        </span>
+      }
+      columns={[
+        { title: '标题', dataIndex: 'title', key: 'title' },
+        {
+          title: '级别',
+          dataIndex: 'level',
+          key: 'level',
+          render: (level: string) => level,
+        },
+        statusTagColumn({
+          title: '已读',
+          dataIndex: 'read',
+          map: ANNOUNCEMENT_READ,
+        }),
+        dateTimeColumn({ title: '发布时间', dataIndex: 'publishAt' }),
+        {
+          title: '内容',
+          dataIndex: 'contentHtml',
+          key: 'contentHtml',
+          render: (html: string) => {
+            // 只展示去标签后的纯文本摘要——即使 contentHtml 来自可信的运营后台，
+            // 这里也不用 dangerouslySetInnerHTML 把它当标记语言渲染，省一类隐患。
+            const text = html.replace(/<[^>]+>/g, '')
+            return (
+              <Typography.Text ellipsis={{ tooltip: text }} style={{ maxWidth: 320 }}>
+                {text}
+              </Typography.Text>
+            )
+          },
+        },
+      ]}
+      actions={[
+        {
+          key: 'read',
+          label: '标记已读',
+          hidden: (r) => r.read,
+          onClick: markRead,
+        },
+      ]}
+    />
+  )
+}

@@ -1,0 +1,107 @@
+[
+  {
+    "key": "dashboard",
+    "title": "工作台",
+    "icon": "DashboardOutlined",
+    "path": "/",
+    "componentKey": "Dashboard",
+    "type": "MENU",
+    "side": "ADMIN",
+    "sort": 10
+  },
+  {
+    "key": "staff",
+    "title": "员工",
+    "icon": "TeamOutlined",
+    "path": "/staff",
+    "componentKey": "StaffList",
+    "type": "MENU",
+    "side": "ADMIN",
+    "permission": "staff:list",
+    "sort": 30
+  },
+  {
+    "key": "role",
+    "title": "角色权限",
+    "icon": "SafetyCertificateOutlined",
+    "path": "/roles",
+    "componentKey": "RoleList",
+    "type": "MENU",
+    "side": "ADMIN",
+    "permission": "role:list",
+    "sort": 40
+  },
+  {
+    "key": "billing",
+    "title": "账单与续费",
+    "icon": "CreditCardOutlined",
+    "path": "/billing",
+    "componentKey": "BillingCenter",
+    "type": "MENU",
+    "side": "ADMIN",
+    "sort": 50
+  },
+  {
+    "key": "audit",
+    "title": "操作日志",
+    "icon": "AuditOutlined",
+    "path": "/audit",
+    "componentKey": "AuditList",
+    "type": "MENU",
+    "side": "ADMIN",
+    "permission": "audit:list",
+    "sort": 60
+  },
+  {
+    "key": "announcement",
+    "title": "平台公告",
+    "icon": "NotificationOutlined",
+    "path": "/announcements",
+    "componentKey": "AnnouncementList",
+    "type": "MENU",
+    "side": "ADMIN",
+    "permission": "announcement:list",
+    "sort": 70
+  },
+  {
+    "key": "profile",
+    "title": "个人设置",
+    "icon": "UserOutlined",
+    "path": "/profile",
+    "componentKey": "ProfileSettings",
+    "type": "MENU",
+    "side": "ADMIN",
+    "permission": "profile:read",
+    "sort": 80
+  },
+  {
+    "key": "goods",
+    "title": "商品",
+    "icon": "ShopOutlined",
+    "type": "DIR",
+    "side": "ADMIN",
+    "sort": 20,
+    "children": [
+      {
+        "key": "goods.list",
+        "title": "商品列表",
+        "path": "/goods",
+        "componentKey": "GoodsList",
+        "type": "MENU",
+        "side": "ADMIN",
+        "permission": "goods:list",
+        "featureKey": "goods",
+        "sort": 10
+      },
+      {
+        "key": "goods.create",
+        "title": "新增商品",
+        "type": "BUTTON",
+        "side": "ADMIN",
+        "permission": "goods:write",
+        "featureKey": "goods",
+        "sort": 20
+      }
+    ]
+  }
+]

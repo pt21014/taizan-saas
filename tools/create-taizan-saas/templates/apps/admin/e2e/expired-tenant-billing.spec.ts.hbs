@@ -1,0 +1,44 @@
+import { expect, test } from '@playwright/test'
+import { ACCOUNTS, login, zh } from './fixtures'
+
+/**
+ * 用例③：到期租户店主登录 → 顶部只读横幅、商品新增被禁、`/billing` 页可下单。
+ *
+ * B 店（`planExpireAt` 是昨天，`graceDays=0`）是店主账号，权限点齐全——「新增商品」
+ * 按钮本身**会**渲染（按钮级权限用的是 `{{domainSlug}}:write`，人有；只读闸门管的是「能不能提交」，
+ * 不是「按钮画不画」）。所以「新增被禁」断言的是 `<CrudDrawerForm>` 的保存按钮被
+ * `useWritableHere()` 禁掉，而不是按钮消失——这正是 `packages/admin-ui` 只读闸门的设计
+ * （见 `CrudDrawerForm.tsx` 的注释）。
+ */
+test('到期租户：只读横幅 + 新增商品被禁 + 账单页仍可下单', async ({ page }) => {
+  await login(page, ACCOUNTS.ownerBExpired.phone, ACCOUNTS.ownerBExpired.password)
+
+  // 顶部只读横幅（<AppShell> 内置的 <ReadonlyBanner>）。
+  await expect(page.getByText('套餐已到期，后台当前为只读状态，无法新增/编辑/删除')).toBeVisible()
+
+  // 商品新增被禁：抽屉打得开，保存按钮不可点。
+  await page.goto('/{{domainSlug}}')
+  await page.getByRole('button', { name: zh('新增商品') }).click()
+  await expect(page.getByText('套餐已到期，后台当前为只读状态，保存已禁用')).toBeVisible()
+  await expect(page.getByRole('button', { name: zh('保存') })).toBeDisabled()
+  await page.getByRole('button', { name: zh('取消') }).click()
+
+  // 账单页是续费白名单：横幅在这一页不再重复出现（AppShell 每页都会渲染一次，
+  // 但下单表单不受只读闸门影响），点「去下单」→ 填周期数 → 保存 → 拿到真实支付参数。
+  // 这台共享联调环境里 `/api/admin/billing/plans` 混进了大量其它并发 e2e 跑出来的
+  // 零元「E2E 套餐」垃圾数据，`.first()` 会点中它们、下单因为金额为 0 而业务失败——
+  // 用 seed 里真实的「标准版」套餐名字定位卡片，跳过这些噪音。
+  await page.goto('/billing')
+  // `.ant-card-small` 只命中套餐卡片本身（`size="small"`），排除外层「可购套餐」大卡片——
+  // 后者也含「标准版」三个字（因为它是子卡片的祖先），用 `.ant-card` 会连它一起选中。
+  const standardCard = page.locator('.ant-card-small', { hasText: '标准版' })
+  await expect(standardCard.getByRole('button', { name: zh('去下单') })).toBeVisible()
+  await standardCard.getByRole('button', { name: zh('去下单') }).click()
+  const saveButton = page.getByRole('button', { name: zh('保存') })
+  await expect(saveButton).toBeEnabled()
+  await saveButton.click()
+  // antd 的 Modal.success 用 confirm 系列布局渲染，可见的标题在 `.ant-modal-confirm-title`
+  // 上；同名文案还有一份不可见的 `.ant-modal-title`（confirm 布局没用到那份头部），
+  // `getByText().first()` 会先命中那份看不见的，所以精确定位到确实可见的那一个。
+  await expect(page.locator('.ant-modal-confirm-title', { hasText: '下单成功' })).toBeVisible()
+})

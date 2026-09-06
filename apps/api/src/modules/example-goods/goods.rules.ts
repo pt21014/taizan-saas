@@ -1,0 +1,194 @@
+/**
+ * 商品的**业务规则纯函数**（蓝图 §9「商业规则纯函数 + 单测」）。
+ *
+ * ## 为什么单独一个文件
+ *
+ * 规则写在 service 里就只能靠起 Nest + 连库才能测，于是实际上没人测边界值。
+ * 抽成不碰数据库、不读时钟、不 import `@nestjs/*` 的纯函数之后，
+ * `goods.rules.spec.ts` 可以把每条边界都过一遍（0 元、负库存、名字全是空格、
+ * 上架但没库存……），而这些恰恰是运营真的会踩到的输入。
+ *
+ * ## 三条规则
+ *
+ * 1. 名字去掉首尾空白后不能为空，不超过 60 字（`@@unique([tenantId,name,deletedAt])` 的活跃唯一性
+ *    要靠应用层兜，见 `goods.service.ts`）；
+ * 2. 价格是**分**，非负整数，上限 1 亿分（100 万元）——不设上限的话一次手滑多打几个 0
+ *    会直接进 C 端；
+ * 3. 库存非负整数；`ON_SHELF` 且库存为 0 不拦，只是提示——「上架待补货」是真实场景，
+ *    拦了商家就没法提前把商品配好。
+ *
+ * @packageDocumentation
+ */
+
+/** 商品状态（与 `prisma/schema/10-business/10-goods.prisma` 的 `GoodsStatus` 一一对应）。 */
+export type GoodsStatusLike = 'DRAFT' | 'ON_SHELF' | 'OFF_SHELF'
+
+/** 合法状态全集，供 DTO 校验与本文件共用（两处各写一份必然会漂）。 */
+export const GOODS_STATUSES: readonly GoodsStatusLike[] = ['DRAFT', 'ON_SHELF', 'OFF_SHELF']
+
+/** 商品名最大长度（字符数，不是字节）。 */
+export const GOODS_NAME_MAX = 60
+
+/** 价格上限：1 亿分 = 100 万元。 */
+export const GOODS_PRICE_CENTS_MAX = 100_000_000
+
+/** 库存上限：一千万件。 */
+export const GOODS_STOCK_MAX = 10_000_000
+
+/** 一条校验结论。 */
+export interface RuleViolation {
+  /** 出问题的字段名，与 DTO 字段同名，便于前端定位到输入框。 */
+  field: 'name' | 'priceCents' | 'stock' | 'status'
+  /** 面向商家的中文说明。 */
+  message: string
+}
+
+/** 待校验的商品输入（DTO 与 service 共用这一个形状）。 */
+export interface GoodsInput {
+  name?: unknown
+  priceCents?: unknown
+  stock?: unknown
+  status?: unknown
+}
+
+/** 归一化后的商品字段。 */
+export interface NormalizedGoods {
+  name: string
+  priceCents: number
+  stock: number
+  status: GoodsStatusLike
+}
+
+function isNonNegativeInt(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+}
+
+/**
+ * 把商品名归一化：去首尾空白 + 把连续空白压成一个空格。
+ *
+ * 压空白是有意义的：`"可乐  330ml"` 与 `"可乐 330ml"` 在商家眼里是同一个商品，
+ * 不归一的话唯一索引拦不住，商品列表里会出现两条看起来一模一样的记录。
+ *
+ * @param raw - 原始输入
+ * @returns 归一化后的名字；非字符串返回空串
+ */
+export function normalizeGoodsName(raw: unknown): string {
+  if (typeof raw !== 'string') return ''
+  return raw.trim().replace(/\s+/g, ' ')
+}
+
+/**
+ * 校验一次商品输入（新增用；改动用 {@link validateGoodsPatch}）。
+ *
+ * @param input - 待校验的字段
+ * @returns 全部违规，**一次返回完整清单**而不是遇到第一条就返回——
+ *   前端一次把三个输入框都标红，比让商家改一个提交一次友好得多
+ */
+export function validateGoodsInput(input: GoodsInput): RuleViolation[] {
+  const violations: RuleViolation[] = []
+
+  const name = normalizeGoodsName(input.name)
+  if (name.length === 0) {
+    violations.push({ field: 'name', message: '商品名不能为空' })
+  } else if ([...name].length > GOODS_NAME_MAX) {
+    violations.push({ field: 'name', message: `商品名最多 ${GOODS_NAME_MAX} 个字` })
+  }
+
+  if (!isNonNegativeInt(input.priceCents)) {
+    violations.push({ field: 'priceCents', message: '价格必须是非负整数（单位：分）' })
+  } else if (input.priceCents > GOODS_PRICE_CENTS_MAX) {
+    violations.push({
+      field: 'priceCents',
+      message: `价格不能超过 ${GOODS_PRICE_CENTS_MAX / 100} 元，请确认是不是多打了几个 0`,
+    })
+  }
+
+  if (!isNonNegativeInt(input.stock)) {
+    violations.push({ field: 'stock', message: '库存必须是非负整数' })
+  } else if (input.stock > GOODS_STOCK_MAX) {
+    violations.push({ field: 'stock', message: `库存不能超过 ${GOODS_STOCK_MAX}` })
+  }
+
+  if (input.status !== undefined && !GOODS_STATUSES.includes(input.status as GoodsStatusLike)) {
+    violations.push({
+      field: 'status',
+      message: `状态只能是 ${GOODS_STATUSES.join(' / ')}`,
+    })
+  }
+
+  return violations
+}
+
+/**
+ * 校验一次**部分更新**：只校验传了的字段。
+ *
+ * 与 {@link validateGoodsInput} 分开而不是「把必填改成可选」：那样一来
+ * 「新增时漏传价格」就静默通过了，而漏传价格建出来的商品在 C 端是 0 元。
+ *
+ * @param patch - 只包含要改的字段
+ */
+export function validateGoodsPatch(patch: GoodsInput): RuleViolation[] {
+  const violations: RuleViolation[] = []
+  if (patch.name !== undefined) {
+    const name = normalizeGoodsName(patch.name)
+    if (name.length === 0) violations.push({ field: 'name', message: '商品名不能为空' })
+    else if ([...name].length > GOODS_NAME_MAX) {
+      violations.push({ field: 'name', message: `商品名最多 ${GOODS_NAME_MAX} 个字` })
+    }
+  }
+  if (patch.priceCents !== undefined) {
+    if (!isNonNegativeInt(patch.priceCents)) {
+      violations.push({ field: 'priceCents', message: '价格必须是非负整数（单位：分）' })
+    } else if (patch.priceCents > GOODS_PRICE_CENTS_MAX) {
+      violations.push({
+        field: 'priceCents',
+        message: `价格不能超过 ${GOODS_PRICE_CENTS_MAX / 100} 元，请确认是不是多打了几个 0`,
+      })
+    }
+  }
+  if (patch.stock !== undefined) {
+    if (!isNonNegativeInt(patch.stock)) {
+      violations.push({ field: 'stock', message: '库存必须是非负整数' })
+    } else if (patch.stock > GOODS_STOCK_MAX) {
+      violations.push({ field: 'stock', message: `库存不能超过 ${GOODS_STOCK_MAX}` })
+    }
+  }
+  if (patch.status !== undefined && !GOODS_STATUSES.includes(patch.status as GoodsStatusLike)) {
+    violations.push({ field: 'status', message: `状态只能是 ${GOODS_STATUSES.join(' / ')}` })
+  }
+  return violations
+}
+
+/**
+ * 「上架了但没库存」的提示（**不是错误**）。
+ *
+ * 单独一个函数而不是塞进 violations：它不该阻止提交。商家常常先把商品配好、
+ * 上架，等供货到了再补库存；拦下来他就只能建成草稿然后忘了上架。
+ *
+ * @returns 需要提示时返回中文文案，否则 `null`
+ */
+export function warnOnShelfWithoutStock(input: {
+  status?: GoodsStatusLike
+  stock?: number
+}): string | null {
+  if (input.status !== 'ON_SHELF') return null
+  if (input.stock === undefined || input.stock > 0) return null
+  return '这个商品已上架但库存为 0，C 端会显示「售罄」'
+}
+
+/**
+ * 扣减库存：算出扣后的值，不够扣就返回 `null`。
+ *
+ * 纯函数版的「够不够扣」。真正的扣减要在事务里配合乐观锁做
+ * （`PrismaService.updateWithVersion`），但**该不该扣**这个判断必须能被单测覆盖。
+ *
+ * @param stock - 当前库存
+ * @param quantity - 要扣的数量（正整数）
+ * @returns 扣后库存；参数非法或库存不足返回 `null`
+ */
+export function deductStock(stock: number, quantity: number): number | null {
+  if (!isNonNegativeInt(stock)) return null
+  if (!Number.isInteger(quantity) || quantity <= 0) return null
+  const next = stock - quantity
+  return next < 0 ? null : next
+}

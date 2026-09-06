@@ -1,0 +1,110 @@
+import type { CrudListQuery, StatusTagConfig } from '@taizan/admin-ui'
+import type { PageResult } from '@taizan/contracts'
+import { useSession } from '../session'
+
+/** 套餐状态全集，对齐 `apps/api/.../plan.rules.ts` 的 `PLAN_STATUSES`。 */
+export const PLAN_STATUSES = ['ENABLED', 'DISABLED', 'ARCHIVED'] as const
+
+export const PLAN_STATUS_TAGS: Record<string, StatusTagConfig> = {
+  ENABLED: { text: '已上架', color: 'success' },
+  DISABLED: { text: '已下架', color: 'warning' },
+  ARCHIVED: { text: '已归档', color: 'default' },
+}
+
+/**
+ * 配额维度全集，对齐 `CreatePlanDto.quotas` 注释里点名的 `QuotaKind`。
+ * 三态语义（每个维度都一样）：`null` = 不限，`0` = 禁止，正整数 = 上限，key 缺省按不限处理。
+ */
+export const QUOTA_KINDS = [
+  'STAFF',
+  'STORE',
+  'MEMBER',
+  'STORAGE_MB',
+  'TRAFFIC_MB',
+  'CUSTOM',
+] as const
+
+export const QUOTA_KIND_LABELS: Record<(typeof QUOTA_KINDS)[number], string> = {
+  STAFF: '员工数',
+  STORE: '门店数',
+  MEMBER: '会员数',
+  STORAGE_MB: '存储空间（MB）',
+  TRAFFIC_MB: '每月流量（MB）',
+  CUSTOM: '自定义额度（示例业务用）',
+}
+
+/** 目前应用里真实在用的功能项（`apps/api/src/registry/features.ts` 的 `FEATURES`）。 */
+export const FEATURE_KEYS = ['goods'] as const
+export const FEATURE_LABELS: Record<(typeof FEATURE_KEYS)[number], string> = {
+  goods: '商品模块',
+}
+
+/** `GET /api/platform/plans` 的一行。 */
+export interface PlanView {
+  id: string
+  code: string
+  name: string
+  firstPriceCents: number
+  renewPriceCents: number
+  periodMonths: number
+  quotas: Record<string, number | null>
+  /** `null` = 全部可用，`[]` = 一个都不给，非空数组 = 白名单 */
+  features: string[] | null
+  appKeys: string[]
+  trafficMb: number
+  status: string
+  sort: number
+  createdAt: string
+  updatedAt: string
+}
+
+/**
+ * 新建套餐。`quotas` 是完整配额表——UI 上每个维度提供「不限（null）/ 禁止（0）/
+ * 限额（正整数）」三态，「留空」在新建时与「不限」等价（后端：key 缺省按不限处理），
+ * 但 UI 仍然分开画，好让运营明确表达意图，也和「修改套餐」的三态编辑用同一套控件。
+ */
+export interface CreatePlanInput {
+  code: string
+  name: string
+  firstPriceCents: number
+  renewPriceCents: number
+  periodMonths: number
+  quotas: Record<string, number | null>
+  features?: string[] | null
+  appKeys: string[]
+  trafficMb?: number
+  sort?: number
+}
+
+/**
+ * 修改套餐。`quotas` 按 key 合并（未提到的 key 不动，某个 key 传 `null` 就把那个维度
+ * 显式设为不限）；`features` 传 `null` 显式清空为全部可用，传数组整体覆盖，两者都不传就不动。
+ */
+export interface UpdatePlanInput {
+  code?: string
+  name?: string
+  firstPriceCents?: number
+  renewPriceCents?: number
+  periodMonths?: number
+  quotas?: Record<string, number | null>
+  features?: string[] | null
+  appKeys?: string[]
+  trafficMb?: number
+}
+
+/** 套餐模块的接口层。 */
+export function usePlanApi() {
+  const req = useSession((s) => s.request)
+  return {
+    list: (query: CrudListQuery) => req.get<PageResult<PlanView>>('/api/platform/plans', query),
+    get: (id: string) => req.get<PlanView>(`/api/platform/plans/${id}`),
+    create: (values: CreatePlanInput) => req.post<PlanView>('/api/platform/plans', values),
+    update: (id: string, values: UpdatePlanInput) =>
+      req.patch<PlanView>(`/api/platform/plans/${id}`, values),
+    enable: (id: string) => req.patch<PlanView>(`/api/platform/plans/${id}/enable`),
+    disable: (id: string) => req.patch<PlanView>(`/api/platform/plans/${id}/disable`),
+    archive: (id: string) => req.patch<PlanView>(`/api/platform/plans/${id}/archive`),
+    sort: (id: string, sort: number) =>
+      req.patch<PlanView>(`/api/platform/plans/${id}/sort`, { sort }),
+  }
+}

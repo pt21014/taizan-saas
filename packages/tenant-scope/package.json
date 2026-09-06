@@ -1,0 +1,45 @@
+{
+  "name": "@taizan/tenant-scope",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "description": "多租户隔离的决策层：零运行时依赖的纯函数 planTenantScope + 租户模型注册机 + schema 双向比对器与 CLI。执行层（Prisma extension）在 @taizan/nest-prisma。",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./cli/verify-schema": {
+      "types": "./dist/cli/verify-schema.d.ts",
+      "import": "./dist/cli/verify-schema.js",
+      "require": "./dist/cli/verify-schema.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "fixtures"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run --coverage",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@taizan/eslint-config": "workspace:*",
+    "@taizan/tsconfig": "workspace:*",
+    "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^3.2.7",
+    "eslint": "^9.17.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

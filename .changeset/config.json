@@ -1,0 +1,30 @@
+{
+  "$schema": "https://unpkg.com/@changesets/config@3.0.0/schema.json",
+  "changelog": "@changesets/cli/changelog",
+  "commit": false,
+  "fixed": [],
+  "linked": [
+    [
+      "@taizan/nest-audit",
+      "@taizan/nest-auth",
+      "@taizan/nest-billing",
+      "@taizan/nest-core",
+      "@taizan/nest-infra",
+      "@taizan/nest-notify",
+      "@taizan/nest-payment",
+      "@taizan/nest-prisma",
+      "@taizan/nest-rbac"
+    ]
+  ],
+  "access": "public",
+  "baseBranch": "main",
+  "updateInternalDependencies": "patch",
+  "ignore": [
+    "@taizan/_smoke",
+    "@taizan/api",
+    "@taizan/client",
+    "@taizan/eslint-config",
+    "@taizan/prettier-config",
+    "@taizan/tsconfig"
+  ]
+}

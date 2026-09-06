@@ -1,0 +1,43 @@
+// @taizan/eslint-config
+//
+// 全仓共用的 ESLint 9 flat config 基线。所有 packages/apps 都应在自己的
+// `eslint.config.js` 里引入这份基线，再按需追加/覆盖规则，而不是各写一份。
+//
+// 用法（照抄 packages/_smoke/eslint.config.js）：
+//
+//   import base from '@taizan/eslint-config'
+//   export default [...base]
+//
+// 如果这个包要加自己的规则/忽略项，直接在数组末尾追加一个新的 config 对象即可，
+// 后面的对象会覆盖前面同名规则（flat config 的合并规则）。
+import js from '@eslint/js'
+import prettier from 'eslint-config-prettier'
+import globals from 'globals'
+import tseslint from 'typescript-eslint'
+
+export default tseslint.config(
+  {
+    // 全仓统一忽略：构建产物、依赖、缓存目录一律不进 lint。
+    ignores: ['**/dist/**', '**/node_modules/**', '**/coverage/**', '**/.turbo/**'],
+  },
+  js.configs.recommended,
+  ...tseslint.configs.recommended,
+  {
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+    rules: {
+      // 硬性约束：全仓禁止 any，逃生口用 unknown + 类型收窄，或显式 eslint-disable 并写明原因。
+      '@typescript-eslint/no-explicit-any': 'error',
+      // 允许下划线前缀的未使用参数（常见于占位实现/接口对齐），其余未使用变量仍报警。
+      '@typescript-eslint/no-unused-vars': [
+        'warn',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
+      ],
+    },
+  },
+  // 关掉所有会和 prettier 打架的格式类规则，格式统一交给 prettier 负责，必须放在数组最后。
+  prettier,
+)

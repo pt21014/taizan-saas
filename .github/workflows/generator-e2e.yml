@@ -1,0 +1,148 @@
+name: Generator E2E
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 生成器端到端 = **框架的验收判据**（蓝图 §6 的 9 条）。
+#
+# 这条流水线守的是框架唯一真正的交付形态——别人拿到手的不是这个仓库，是生成器吐出来的
+# 那个项目。仓库里全绿而生成出来的项目跑不起来，是完全可能的：模板里少写一个依赖、
+# `.env.example` 少一行、架构 spec 里残留一句 `../../../../packages/xxx` 的相对路径
+# （那种路径在生成出来的项目里必然是错的）。
+#
+# ## 判据不写在这个文件里
+#
+# workflow 只负责提供环境（MySQL + Redis 两个 service 容器）。「什么算通过」是
+# `tools/create-taizan-saas/e2e/acceptance.spec.ts` 里的 9 个 `it`，本地
+# `pnpm acceptance` 跑的是**同一份**。CI 与本地判据分叉是最贵的一类漂移：
+# 线上红了没人能在本地复现。
+#
+# ## 启用条件对照（T4-5 时逐条核对，四条全过 → 已删掉 `if: false`）
+#
+#   1. ✅ 生成器能在本地跑通：`pnpm -F create-taizan-saas build` +
+#      `node dist/index.js my-app --preset=full --yes` 从空目录生成出可编译的项目。
+#      由 T4-1 的 `pnpm create:demo` 每次真跑一遍（full + api-only 两套，含 build/test）。
+#   2. ✅ 模板里带上了 `apps/api/test/arch/**`（含 `index.spec.ts`），且那份副本不依赖
+#      `packages/` 目录存在：`_helpers.ts` 的 `frameworkSchemaDir()` 走 `require.resolve`，
+#      `index.spec.ts` 的 spec 2 对「没有 packages/」做了退化处理。`create:demo` 在生成
+#      项目里跑 `pnpm test`（含 16 条架构约束）证明了这一点。
+#   3. ⚠️ **替代满足**：`@taizan/*` 还没发布到任何 registry。原条件要求「发过一次」，
+#      这里改用 `pnpm pack` + `file:<tgz>` 覆写（`e2e/harness.ts` 里做的），
+#      在 CI 里等价于「装的就是本仓库 `packages/` 的当前代码」。
+#      与真实 npm 安装路径的等价性到哪为止，见下面「§ 关于第 3 条」。
+#   4. ✅ `tools/create-taizan-saas/e2e/acceptance.spec.ts` 已落地（T4-5），
+#      下面的 Acceptance 步骤直接跑它。
+#
+# ## § 关于第 3 条：tarball 覆写与真实 npm 安装的差别
+#
+# `pnpm pack` 出来的 tarball 与将来 `npm publish` 上去的**是同一个包**（同一套 `files`
+# 字段、同一份 `dist`），所以它验得到：依赖清单是否完整、`files` 有没有漏打 `dist`、
+# 包名/入口/exports 对不对、以及最要紧的那条——依赖从**生成项目这边**解析，
+# 不会像 `link:` 那样让 `@nestjs/core` 在进程里出现两份（两个 `Reflector` 类，
+# Nest 的 DI 按类比对 token，直接报「can't resolve dependencies of ... (?)」）。
+#
+# 它验不到的只有两件事：registry 上的版本号解析（`^0.1.0` 到底落到哪个版本），
+# 以及 publish 时的 `prepublishOnly` 钩子。这两件由 `release.yml` 与 `docs/RELEASE.md`
+# 管。等 `@taizan/*` 真发布之后，把 harness 里的 overrides 去掉即可——判据一个字不用改。
+#
+# 全部包一视同仁走 tarball，前端包没有例外——`@taizan/admin-ui` 那处无后缀
+# `import 'antd/locale/zh_CN'`（装成真实 npm 依赖后 Node 解析不了）已经修掉了。
+#
+# ## 为什么不在每个 PR 上跑
+#
+# 一趟十几分钟（26 个包 pack、真装一遍依赖、真建一个库、真起一个进程）。所以：
+# 每天定时跑一次 + 生成器/模板/框架包变动的 PR 上跑 + 随时可以手动触发。
+# 它坏掉的方式通常是「上游包发了个新版本」，与本仓库当天的提交无关——那正是
+# 定时任务比 PR 触发更有价值的地方。
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+  # 每天 UTC 19:00（北京时间次日 03:00）。
+  schedule:
+    - cron: '0 19 * * *'
+  # 只在生成器、模板或框架包变动时跟着 PR 跑。
+  pull_request:
+    paths:
+      - 'tools/create-taizan-saas/**'
+      - 'packages/**'
+      - 'scripts/acceptance.sh'
+      - '.github/workflows/generator-e2e.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+  DO_NOT_TRACK: '1'
+
+jobs:
+  acceptance:
+    name: 蓝图 §6 的 9 条验收断言
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          # root：验收要建库、删库，`prisma migrate dev` 还要建一个 shadow database。
+          # 普通用户给不了这些权限，而那三件事都是判据的一部分（不是绕得过去的细节）。
+          MYSQL_ROOT_PASSWORD: gen_ci_root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pgen_ci_root"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+          --health-start-period=30s
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
+
+    env:
+      # 验收自己建一个 `acc_<随机>` 库，所以这里只给「连到哪台服务器」。
+      ACC_DB_HOST: 127.0.0.1
+      ACC_DB_PORT: '3306'
+      ACC_DB_USER: root
+      ACC_DB_PASS: gen_ci_root
+      ACC_REDIS_HOST: 127.0.0.1
+      ACC_REDIS_PORT: '6379'
+      # Redis 库序号仍然刻意避开 0（同 ci.yml 的 api-e2e，见 docs/CI.md §2）。
+      ACC_REDIS_DB: '5'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Acceptance（`pnpm acceptance`：依赖库在线 → build → 模板对账 → 9 条断言）
+        run: pnpm acceptance
+
+      - name: 失败时把生成项目的日志留下来
+        if: failure()
+        run: |
+          echo "验收失败。9 条断言的定义在 tools/create-taizan-saas/e2e/acceptance.spec.ts；"
+          echo "上面的 [api] 前缀行是生成项目那个进程的输出，先看它。"
+          echo "本地复现：pnpm dev:infra && pnpm acceptance --keep"

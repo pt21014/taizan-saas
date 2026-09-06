@@ -1,0 +1,374 @@
+import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
+import {
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  PHONE_PATTERN,
+  checkPasswordPolicy,
+  validateSlug,
+  validateTenantName,
+} from '../lib/signupRules'
+import { usePageTitle } from '../hooks/usePageTitle'
+import { PageHead } from '../components/PageHead'
+import { useSiteConfig } from '../context/SiteConfigContext'
+import { BRAND } from '../config/BRAND'
+import { checkSlug, fetchCaptcha, friendlyErrorMessage, signup, type SignupResult } from '../api'
+
+const SLUG_CHECK_DEBOUNCE_MS = 400
+
+/**
+ * 验证码 svg 是**自家后端**（`CaptchaService.issue()`）生成的，不是用户输入，
+ * 信任边界上不算「不可信内容」；这里仍然剥掉 `<script>`/事件属性两类明显不该出现在
+ * 一段 svg 里的东西，作为多一层防御，不依赖额外的 sanitizer 依赖包。
+ */
+function sanitizeCaptchaSvg(svg: string): string {
+  return svg.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/\son\w+="[^"]*"/gi, '')
+}
+
+interface SlugState {
+  status: 'idle' | 'invalid' | 'checking' | 'available' | 'taken' | 'unknown'
+  message: string
+}
+
+/**
+ * 口令强度提示。`checkPasswordPolicy` 的逻辑与 `provisionTenant()` 落库前调用的
+ * `assertOwnerPasswordPolicy` 一致（`signupRules.spec.ts` 做行为级 diff 盯着），
+ * 不在这里另写一套长度/字符类正则——各写一遍的下场是「前端说能用，提交被后端拒」。
+ */
+function passwordHint(password: string): { ok: boolean; message: string } {
+  if (password.length === 0) {
+    return {
+      ok: false,
+      message: `${PASSWORD_MIN_LENGTH}–${PASSWORD_MAX_LENGTH} 位，至少包含字母/数字/符号里的两类`,
+    }
+  }
+  return checkPasswordPolicy(password)
+}
+
+export default function Signup() {
+  usePageTitle('免费注册', '店铺名、店铺路径、手机号、密码，四项填完试用当场生效。')
+  const { cfg } = useSiteConfig()
+  const days = cfg?.trialDays ?? 14
+  const signupEnabled = cfg?.signupEnabled ?? true
+
+  const [name, setName] = useState('')
+  const [slug, setSlug] = useState('')
+  const [phone, setPhone] = useState('')
+  const [password, setPassword] = useState('')
+  const [existingPassword, setExistingPassword] = useState('')
+  const [agree, setAgree] = useState(false)
+  const [captcha, setCaptcha] = useState<{ id: string; svg: string } | null>(null)
+  const [captchaCode, setCaptchaCode] = useState('')
+  const [captchaFailed, setCaptchaFailed] = useState(false)
+  const [slugState, setSlugState] = useState<SlugState>({ status: 'idle', message: '' })
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+  const [result, setResult] = useState<SignupResult | null>(null)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+
+  const loadCaptcha = () => {
+    setCaptchaFailed(false)
+    fetchCaptcha()
+      .then((c) => setCaptcha(c))
+      .catch(() => setCaptchaFailed(true))
+  }
+
+  useEffect(() => {
+    loadCaptcha()
+  }, [])
+
+  // slug：先在**本地**用 provision 的同一个 validateSlug 做形状 + 保留字判定，
+  // 不合法（含保留字）时不发请求、即时给出提示；只有形状合法时才防抖查库里是否被占用。
+  useEffect(() => {
+    window.clearTimeout(debounceRef.current)
+    const raw = slug.trim()
+    if (!raw) {
+      setSlugState({ status: 'idle', message: '' })
+      return
+    }
+    const local = validateSlug(raw)
+    if (!local.ok) {
+      setSlugState({ status: 'invalid', message: local.message })
+      return
+    }
+    setSlugState({ status: 'checking', message: '正在查这个路径有没有被占用…' })
+    debounceRef.current = setTimeout(() => {
+      checkSlug(local.value)
+        .then((res) => {
+          setSlugState(
+            res.available
+              ? { status: 'available', message: '这个路径可以用' }
+              : { status: 'taken', message: res.reason ?? '这个路径已经被占用了' },
+          )
+        })
+        .catch(() => {
+          // 查不通就不表态：说「可以用」是骗人，说「不能用」会把人挡在门外。
+          setSlugState({ status: 'unknown', message: '' })
+        })
+    }, SLUG_CHECK_DEBOUNCE_MS)
+    return () => window.clearTimeout(debounceRef.current)
+  }, [slug])
+
+  const nameCheck = validateTenantName(name || '')
+  const phoneOk = PHONE_PATTERN.test(phone.trim())
+  const pwd = passwordHint(password)
+  const slugLocalOk = slug.trim().length > 0 && validateSlug(slug).ok
+  const canSubmit =
+    agree &&
+    nameCheck.ok &&
+    slugLocalOk &&
+    slugState.status !== 'taken' &&
+    phoneOk &&
+    pwd.ok &&
+    signupEnabled &&
+    !submitting
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!canSubmit) return
+    setSubmitting(true)
+    setError('')
+    try {
+      const normalizedSlug = validateSlug(slug)
+      const payload = {
+        slug: normalizedSlug.ok ? normalizedSlug.value : slug.trim().toLowerCase(),
+        name: name.trim(),
+        phone: phone.trim(),
+        password,
+        ...(existingPassword ? { existingPassword } : {}),
+        ...(captcha && captchaCode ? { captchaId: captcha.id, captchaCode } : {}),
+      }
+      const res = await signup(payload)
+      setResult(res)
+      window.scrollTo(0, 0)
+    } catch (e2) {
+      setError(friendlyErrorMessage(e2))
+      loadCaptcha()
+      setCaptchaCode('')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  if (result) {
+    return (
+      <section className="section">
+        <div className="container" style=\{{ maxWidth: 560 }}>
+          <div className="card card--pad-lg" style=\{{ textAlign: 'center' }}>
+            <div
+              style=\{{
+                width: 56,
+                height: 56,
+                borderRadius: '50%',
+                background: '#e6f7ed',
+                color: 'var(--{{projectName}}-color-success)',
+                display: 'grid',
+                placeItems: 'center',
+                margin: '0 auto 16px',
+                fontSize: 28,
+              }}
+            >
+              ✓
+            </div>
+            <h2 style=\{{ fontSize: 24 }}>店铺开好了</h2>
+            <p style=\{{ color: '#6b7078', marginTop: 10 }}>
+              {result.accountCreated ? (
+                <>{result.trialDays} 天试用已经生效。请用刚才设置的密码，到商家后台登录后台。</>
+              ) : (
+                <>
+                  {result.trialDays} 天试用已经生效。这家新店挂在你原有的账号下——登录还是用同一个
+                  手机号和原来的密码，进去之后在右上角切换店铺。
+                </>
+              )}
+            </p>
+            <div style=\{{ textAlign: 'left', margin: '20px 0', fontSize: 14, color: '#4d5158' }}>
+              <div>
+                <b>店铺名称：</b>
+                {result.name}
+              </div>
+              <div>
+                <b>店铺路径：</b>
+                <code>{result.slug}</code>
+              </div>
+              <div>
+                <b>试用到期：</b>
+                {result.trialEndAt ? new Date(result.trialEndAt).toLocaleString('zh-CN') : '—'}
+              </div>
+            </div>
+            <a
+              className="btn btn--primary btn--lg btn--block"
+              href={BRAND.adminUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              去商家后台登录
+            </a>
+            <p style=\{{ color: '#8a8f98', fontSize: 13, marginTop: 16 }}>
+              把店铺路径收藏起来，它以后不能改——会出现在你发出去的每一个链接里。
+            </p>
+          </div>
+        </div>
+      </section>
+    )
+  }
+
+  return (
+    <>
+      <PageHead
+        eyebrow="自助注册"
+        title={`填四项，${days} 天试用当场生效`}
+        desc="不用等审核、不用先付款。"
+      />
+
+      <section className="section">
+        <div className="container" style=\{{ maxWidth: 560 }}>
+          {!signupEnabled && (
+            <div className="notice notice--bad" style=\{{ marginBottom: 20 }}>
+              自助注册暂时关闭了，请联系平台开通。
+            </div>
+          )}
+
+          <form className="form card card--pad-lg" onSubmit={submit} noValidate>
+            <div className="field">
+              <label htmlFor="signup-name">店铺名称</label>
+              <input
+                id="signup-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="楼下便利店"
+                maxLength={30}
+                aria-invalid={name.length > 0 && !nameCheck.ok}
+              />
+              <div className={`field__hint${name && !nameCheck.ok ? ' field__hint--bad' : ''}`}>
+                {name && !nameCheck.ok
+                  ? nameCheck.message
+                  : '学员/顾客在店里看到的名字，以后可以改。'}
+              </div>
+            </div>
+
+            <div className="field">
+              <label htmlFor="signup-slug">店铺路径</label>
+              <input
+                id="signup-slug"
+                value={slug}
+                onChange={(e) => setSlug(e.target.value.toLowerCase())}
+                placeholder="my-shop"
+                maxLength={32}
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+                aria-invalid={slugState.status === 'invalid' || slugState.status === 'taken'}
+              />
+              <div
+                className={`field__hint${
+                  slugState.status === 'invalid' || slugState.status === 'taken'
+                    ? ' field__hint--bad'
+                    : slugState.status === 'available'
+                      ? ' field__hint--ok'
+                      : ''
+                }`}
+              >
+                {slugState.message ||
+                  '小写字母、数字、连字符，3–32 位。开通后不能改，它会出现在你发出去的每个链接里。'}
+              </div>
+            </div>
+
+            <div className="field">
+              <label htmlFor="signup-phone">店主手机号</label>
+              <input
+                id="signup-phone"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="用来登录商家后台"
+                inputMode="numeric"
+                maxLength={11}
+                aria-invalid={phone.length > 0 && !phoneOk}
+              />
+              <div className={`field__hint${phone && !phoneOk ? ' field__hint--bad' : ''}`}>
+                {phone && !phoneOk ? '手机号填错了，要 11 位' : '同时是登录名，注册后不建议更换。'}
+              </div>
+            </div>
+
+            <div className="field">
+              <label htmlFor="signup-password">登录密码</label>
+              <input
+                id="signup-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={`${PASSWORD_MIN_LENGTH}–${PASSWORD_MAX_LENGTH} 位`}
+                maxLength={PASSWORD_MAX_LENGTH}
+                aria-invalid={password.length > 0 && !pwd.ok}
+              />
+              <div className={`field__hint${password && !pwd.ok ? ' field__hint--bad' : ''}`}>
+                {pwd.message}
+              </div>
+            </div>
+
+            <div className="field">
+              <label htmlFor="signup-existing-password">原密码（可选）</label>
+              <input
+                id="signup-existing-password"
+                type="password"
+                value={existingPassword}
+                onChange={(e) => setExistingPassword(e.target.value)}
+                placeholder="如果这个手机号已经开过店，填它现有的登录密码"
+                maxLength={PASSWORD_MAX_LENGTH}
+              />
+              <div className="field__hint">
+                这个手机号如果已经开过店，请在这里填写它现有的登录密码，新店会开在同一个账号下、
+                登录后可以切换；如果这是第一次注册，留空即可。
+              </div>
+            </div>
+
+            {captcha && !captchaFailed && (
+              <div className="field">
+                <label htmlFor="signup-captcha">图形验证码</label>
+                <div className="captcha">
+                  <div
+                    role="img"
+                    aria-label="图形验证码，点击可刷新"
+                    onClick={loadCaptcha}
+                    style=\{{ cursor: 'pointer' }}
+                    // 后端直接给一段 svg 字符串，不是图片地址；点击刷新换一张。
+                    dangerouslySetInnerHTML=\{{ __html: sanitizeCaptchaSvg(captcha.svg) }}
+                  />
+                  <input
+                    id="signup-captcha"
+                    value={captchaCode}
+                    onChange={(e) => setCaptchaCode(e.target.value)}
+                    placeholder="看图填写"
+                    maxLength={16}
+                    style=\{{ flex: 1 }}
+                  />
+                </div>
+                <div className="field__hint">看不清楚点一下图片换一张。</div>
+              </div>
+            )}
+
+            <label className="check">
+              <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} />
+              <span>
+                我已阅读并同意 <Link to="/terms">《服务条款》</Link> 与{' '}
+                <Link to="/privacy">《隐私政策》</Link>
+              </span>
+            </label>
+
+            {error && <div className="notice notice--bad">{error}</div>}
+
+            <button
+              className="btn btn--primary btn--lg btn--block"
+              type="submit"
+              disabled={!canSubmit}
+            >
+              {submitting ? '正在开通…' : `免费开通（${days} 天）`}
+            </button>
+            <p style=\{{ color: '#8a8f98', fontSize: 13, textAlign: 'center' }}>
+              不绑卡、不自动续费。到期只是暂停营业，数据一直留着。
+            </p>
+          </form>
+        </div>
+      </section>
+    </>
+  )
+}

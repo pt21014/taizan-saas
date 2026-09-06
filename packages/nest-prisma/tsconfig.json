@@ -1,0 +1,13 @@
+{
+  "extends": "@taizan/tsconfig/node.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    // Nest 的 @Injectable()/@Inject() 是 TS 传统装饰器。
+    // 构建走 tsup(esbuild)，esbuild **不支持 emitDecoratorMetadata**，
+    // 所以本包所有构造函数注入一律显式写 `@Inject(TOKEN)`，不依赖 design:paramtypes。
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": false
+  },
+  "include": ["src"]
+}

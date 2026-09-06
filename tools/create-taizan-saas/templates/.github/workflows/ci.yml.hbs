@@ -1,0 +1,108 @@
+name: CI
+
+# {{productName}} 的流水线。三个 job：
+#
+#   quality  —— lint / typecheck / build / 单测 + 架构约束 spec，不连库。
+#   e2e      —— 起 MySQL + Redis，migrate + seed + 隔离/权限/账单专项。
+#   schema   —— `taizan:schema-check`：框架 schema 片段有没有被手改过。
+#
+# 为什么架构约束 spec 与单测同一个 job：它们都不连库，跑起来只有几秒，而它们守的是
+# 「多租户隔离有没有被绕过」这类不变量——分成两个 job 只会让「哪个红了」多点一次鼠标。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: $\{{ github.workflow }}-$\{{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+  DO_NOT_TRACK: '1'
+
+jobs:
+  quality:
+    name: lint / typecheck / build / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: $\{{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 单测里有 import 到 @prisma/client 类型的模块；client 没生成时是 import 期报错。
+      - run: pnpm prisma:generate
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm build
+      - run: pnpm test
+      - name: 架构约束 spec（隔离 / 权限 / 金额 / cron / 限流取 IP）
+        run: pnpm test:arch
+
+  e2e:
+    name: e2e（真 MySQL + Redis）
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci_root
+          MYSQL_DATABASE: {{projectSlug}}_ci
+          MYSQL_USER: {{projectSlug}}
+          MYSQL_PASSWORD: ci_pass
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pci_root"
+          --health-interval=5s --health-timeout=5s --health-retries=20 --health-start-period=30s
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd="redis-cli ping" --health-interval=5s --health-timeout=3s --health-retries=20
+    env:
+      # Redis 刻意避开 0 号库：本机开发常年占着 0 号，CI 用别的号能让「串库」当场暴露。
+      DATABASE_URL: mysql://{{projectSlug}}:ci_pass@127.0.0.1:3306/{{projectSlug}}_ci
+      REDIS_URL: redis://127.0.0.1:6379/5
+      JWT_SECRET_PLATFORM: ci-platform-secret-ci-platform-secret-01
+      JWT_SECRET_STAFF: ci-staff-secret-ci-staff-secret-000001
+      JWT_SECRET_MEMBER: ci-member-secret-ci-member-secret-00001
+      CRYPTO_KEYS: '{"k1":"0000000000000000000000000000000000000000000000000000000000000001"}'
+      CRYPTO_ACTIVE_KEY_ID: k1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: $\{{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm taizan:schema-sync
+      - run: pnpm prisma:generate
+      - run: pnpm -F {{scope}}/api exec prisma migrate deploy
+      - run: pnpm seed
+      - run: pnpm test:e2e
+
+  schema:
+    name: 框架 schema 片段未被手改
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: $\{{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 手改 00-base/**.prisma 的后果是升级框架时 merge 冲突到无法收拾，
+      # 所以它是一条硬闸门而不是提示。要改基础表，去开 @taizan/prisma-base 的 issue。
+      - run: pnpm taizan:schema-check

@@ -1,0 +1,24 @@
+/**
+ * `{{name}}`（{{slug}}）的 e2e 骨架——**需要真 MySQL + Redis**，走 `pnpm test:e2e`。
+ *
+ * ## 这份骨架先给出三条最该有的断言
+ *
+ * 1. **跨租户拿不到**：A 店的 token 去读 B 店的 id，必须是 1240300（不存在），
+ *    不是 403——回 403 等于确认了「这个 id 存在」，本身就是跨租户信息泄漏。
+ * 2. **权限点真的在拦**：只有 `{{slug}}:list` 的员工能 GET、不能 POST（1340300）。
+ * 3. **软删之后同名能再建**：唯一索引带 `deletedAt`，这条是它的活体验收。
+ *
+ * 三条都标了 `it.todo`：脚手架不知道你这个项目的测试夹具长什么样（登录怎么拿 token、
+ * 租户怎么造）。照抄 `test/tenant-isolation.e2e-spec.ts` 的夹具把它们填上——
+ * **留着 todo 不填等于没有 e2e**，而这三条恰恰是最容易在重构中悄悄失效的。
+ *
+ * @packageDocumentation
+ */
+
+import { describe, it } from 'vitest'
+
+describe('{{slug}} e2e', () => {
+  it.todo('租户 A 的 token 读租户 B 的 {{slug}} → 1240300')
+  it.todo('只有 {{slug}}:list 的员工：GET 通过，POST 返回 1340300')
+  it.todo('软删之后可以再建一条同名记录（唯一索引带 deletedAt）')
+})

@@ -1,0 +1,482 @@
+/**
+ * 商家后台的员工管理（T1-9）。
+ *
+ * ## 全文没有一处 `where: { tenantId }`
+ *
+ * 与 `example-goods/goods.service.ts` 同一条约定，也由同一条 spec（`no-manual-tenant-filter`）
+ * 扫着：`Staff` / `StaffInvite` / `Role` 都是租户域表，一律走 `prisma.tenant`。
+ *
+ * 唯一的 raw 用点是 `StaffAccount`——它是**平台域**表（一号多店的载体，手机号全局唯一，
+ * 没有 `tenantId` 列）。列表页要显示手机号、要按手机号搜，绕不开它；但那些查询里
+ * 一个 `tenantId` 都不会出现，隔离由「先用 `prisma.tenant` 查出本店的 accountId 集合、
+ * 再按 id 反查账号」这个**顺序**保证，而不是由 where 保证。
+ *
+ * ## 三处「改了之后必须立刻失效缓存」
+ *
+ * | 改了什么 | 谁在缓存 | 不失效的后果 |
+ * |---|---|---|
+ * | `Staff.roleIds` | `MembershipProvider`（30s） | 降权后他还能用旧权限最多 30 秒 |
+ * | `Role.permissionCodes` | `RolePermissionsService`（30s） | 同上 |
+ * | `Staff.status` | `MembershipProvider`（30s） | 停用后他还能操作最多 30 秒 |
+ *
+ * 两个缓存都是**进程内**的，多实例部署下别的实例仍要等自然过期——这是框架已经接受的
+ * 取舍（见 `RolePermissionsService` 的 TSDoc），本模块只负责把本实例压到 0 秒。
+ *
+ * ## 三条「不许对自己/店主动手」的红线
+ *
+ * 停用自己 = 把自己锁在门外，而且没有第二个人能把你放回来（如果你是唯一的管理员）。
+ * 停用店主 = 一个拿到 `staff:disable` 的员工可以把老板踢下线。改店主的角色 = 绕过
+ * `ASSIGNABLE_ROLE_RULE`：店主身份只能通过转让流程转移。三条都在服务层判，不在 DTO 里。
+ *
+ * @packageDocumentation
+ */
+
+import { randomBytes } from 'node:crypto'
+
+import { Inject, Injectable } from '@nestjs/common'
+import { ErrorCode, normalizePage, type PageResult } from '@taizan/contracts'
+import { MEMBERSHIP_PROVIDER, type AuthPrincipal, type MembershipProvider } from '@taizan/nest-auth'
+import { BizException } from '@taizan/nest-core'
+import { PrismaService, RawPrismaService } from '@taizan/nest-prisma'
+import { RolePermissionsService } from '@taizan/nest-rbac'
+import { ASSIGNABLE_ROLE_RULE, canAssignRole } from '@taizan/rbac-core'
+import { OWNER_ROLE_CODE } from '@taizan/prisma-base'
+import type { Prisma, Staff } from '@prisma/client'
+
+import { autoTenantData } from '../../../common/prisma.types'
+import type { AppPrismaClient, AppPrismaService } from '../../../common/prisma.types'
+import type {
+  CreateStaffInviteDto,
+  ListStaffQueryDto,
+  TransferOwnerDto,
+  UpdateStaffDto,
+} from './dto/staff.dto'
+
+/** 下发给前端的员工行。 */
+export interface StaffView {
+  id: string
+  accountId: string
+  /** 店内昵称（`Staff.name`），可与账号名不同。 */
+  name: string
+  /** 登录手机号（`StaffAccount.phone`）。查不到账号时是空串——账号被物理删过才会这样。 */
+  phone: string
+  status: string
+  isOwner: boolean
+  roleIds: string[]
+  /** 与 `roleIds` 一一对应的角色名；角色被删掉的那些不出现在这里。 */
+  roleNames: string[]
+  dataScope: string
+  joinedAt: string
+  createdAt: string
+  updatedAt: string
+}
+
+/** 生成一张邀请之后回给前端的东西。 */
+export interface StaffInviteView {
+  id: string
+  /** 邀请令牌。**它本身就是凭证**——拿到链接的人就能加入这家店。 */
+  token: string
+  /** 前端应当把它拼成完整链接发给被邀请人。 */
+  acceptPath: string
+  phone: string | null
+  roleIds: string[]
+  expiresAt: string
+  createdAt: string
+}
+
+/** 转让店主的结果。 */
+export interface TransferOwnerResult {
+  /** 新店主的 `Staff.id`。 */
+  newOwnerStaffId: string
+  /** 原店主的 `Staff.id`（也就是调用方自己）。 */
+  previousOwnerStaffId: string
+  /** 原店主被降到哪个角色上；本店没有可降的内置角色时是 `null`（角色保持原样）。 */
+  demotedToRoleId: string | null
+}
+
+/** 邀请令牌的字节数。24 字节 base64url = 32 个字符，够抗猜。 */
+const INVITE_TOKEN_BYTES = 24
+
+/** 邀请默认有效期（小时）。 */
+const DEFAULT_INVITE_HOURS = 72
+
+/**
+ * 转让店主之后，原店主降到哪个角色上。
+ *
+ * 按顺序找本店第一个存在的：`manager`（店长）→ `staff`（普通员工）。两个都没有就
+ * **保持原样**而不是清空——清空 `roleIds` 会让原店主瞬间失去一切权限，
+ * 包括「把店转回来」的能力，那是一条不可逆的死路。
+ *
+ * 这两个 code 来自 `@taizan/prisma-base` 的 `BASE_ROLE_PRESETS`，开通租户时
+ * （`@taizan/provision`）按模板实例化进每家店，所以正常情况下一定找得到。
+ */
+const DEMOTE_ROLE_CODES: readonly string[] = ['manager', 'staff']
+
+function toView(row: Staff, phone: string, roleNames: string[]): StaffView {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    name: row.name,
+    phone,
+    status: row.status,
+    isOwner: row.isOwner,
+    roleIds: toStringArray(row.roleIds),
+    roleNames,
+    dataScope: row.dataScope,
+    joinedAt: row.joinedAt.toISOString(),
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  }
+}
+
+/** `Staff.roleIds` / `Role.permissionCodes` 是 Json 列，读出来可能是任何东西。 */
+function toStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : []
+}
+
+@Injectable()
+export class AdminStaffService {
+  constructor(
+    @Inject(PrismaService) private readonly prisma: AppPrismaService,
+    // raw-reason: 登录/鉴权跨租户找账号——`StaffAccount` 是**平台域**表（一号多店的载体，
+    // 手机号全局唯一，没有 tenantId 列）。这里只按「先由 prisma.tenant 查出的 accountId
+    // 集合」反查账号，或按手机号找候选账号，一个 tenantId 都不写。
+    @Inject(RawPrismaService) private readonly raw: RawPrismaService<AppPrismaClient>,
+    @Inject(RolePermissionsService) private readonly roleCache: RolePermissionsService,
+    @Inject(MEMBERSHIP_PROVIDER) private readonly memberships: MembershipProvider,
+  ) {}
+
+  /**
+   * 员工列表（分页 + 关键字）。
+   *
+   * 关键字同时匹配店内昵称与登录手机号，而手机号在平台域表上，所以这里是两步：
+   * 先把候选 `accountId` 查出来，再把它当成一个普通的 `in` 条件交给 `prisma.tenant`。
+   * 反过来做（先拉全店员工再在内存里过滤）在员工多的店里会把整张表读进内存。
+   */
+  async list(query: ListStaffQueryDto): Promise<PageResult<StaffView>> {
+    const { page, pageSize } = normalizePage(query)
+    const keyword = query.keyword?.trim()
+
+    const where: Prisma.StaffWhereInput = {
+      ...(query.status ? { status: query.status } : {}),
+      ...(keyword ? { OR: await this.keywordConditions(keyword) } : {}),
+    }
+
+    const [rows, total] = await Promise.all([
+      this.prisma.tenant.staff.findMany({
+        where,
+        // 店主永远排第一：那是这一页最常被找的人。
+        orderBy: [{ isOwner: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.tenant.staff.count({ where }),
+    ])
+
+    return { items: await this.decorate(rows), total, page, pageSize }
+  }
+
+  /**
+   * 生成一张邀请。
+   *
+   * **不在这里扣 `STAFF` 配额**：邀请只是一张纸，人没来之前不占名额。
+   * 扣在 `POST /api/public/invites/:token/accept`（真的多了一个员工的那一刻）。
+   * 反过来做的话，发了 10 张没人用的邀请就把配额占死了，而释放它需要一个
+   * 「撤销邀请」的动作——那是又一条要维护的路径。
+   */
+  async createInvite(
+    principal: AuthPrincipal,
+    dto: CreateStaffInviteDto,
+  ): Promise<StaffInviteView> {
+    await this.assertRolesAssignable(principal, dto.roleIds)
+
+    const hours = dto.expiresInHours ?? DEFAULT_INVITE_HOURS
+    const expiresAt = new Date(Date.now() + hours * 60 * 60 * 1000)
+    const token = randomBytes(INVITE_TOKEN_BYTES).toString('base64url')
+
+    const row = await this.prisma.tenant.staffInvite.create({
+      data: autoTenantData<Prisma.StaffInviteCreateInput>({
+        phone: dto.phone ?? null,
+        token,
+        roleIds: dto.roleIds,
+        expiresAt,
+        usedAt: null,
+        usedBy: null,
+      }),
+    })
+
+    return {
+      id: row.id,
+      token: row.token,
+      acceptPath: `/api/public/invites/${row.token}`,
+      phone: row.phone,
+      roleIds: toStringArray(row.roleIds),
+      expiresAt: row.expiresAt.toISOString(),
+      createdAt: row.createdAt.toISOString(),
+    }
+  }
+
+  /**
+   * 改员工：店内昵称与角色。
+   *
+   * @throws `BizException` 1240300 员工不存在或不属于本店；1040000 想改店主的角色，
+   *   或想授予一个店主角色（`ASSIGNABLE_ROLE_RULE`）
+   */
+  async update(principal: AuthPrincipal, id: string, dto: UpdateStaffDto): Promise<StaffView> {
+    const tenantId = requireTenant(principal)
+    const target = await this.requireStaff(id)
+
+    if (dto.roleIds !== undefined) {
+      if (target.isOwner) {
+        throw new BizException(
+          ErrorCode.BAD_REQUEST,
+          '店主的权限恒为全量，配角色没有意义；要换人请走「转让店铺」',
+        )
+      }
+      await this.assertRolesAssignable(principal, dto.roleIds)
+    }
+
+    const row = await this.prisma.tenant.staff.update({
+      where: { id },
+      data: {
+        ...(dto.name !== undefined ? { name: dto.name } : {}),
+        ...(dto.roleIds !== undefined ? { roleIds: dto.roleIds } : {}),
+      },
+    })
+
+    // 顺序无所谓，但**两个都得调**：角色缓存管「这个角色有哪些权限点」，
+    // 成员关系缓存管「这个人挂着哪些角色」。只清一个的表现是「改了一半」。
+    this.roleCache.invalidateRoles(tenantId)
+    this.memberships.invalidate(row.accountId, tenantId)
+
+    return (await this.decorate([row]))[0] as StaffView
+  }
+
+  /**
+   * 停用 / 启用。
+   *
+   * 停用之后**必须** `memberships.invalidate`：`GlobalAuthGuard` 每请求现查成员关系，
+   * status ≠ ACTIVE 直接 401。不清缓存的话那个人还能再用 30 秒——而「把人停了他还在改单」
+   * 正是这个按钮存在的理由。
+   *
+   * @throws `BizException` 1040000 停用自己 / 停用店主；1240300 员工不属于本店
+   */
+  async setStatus(
+    principal: AuthPrincipal,
+    id: string,
+    status: 'ACTIVE' | 'DISABLED',
+  ): Promise<StaffView> {
+    const tenantId = requireTenant(principal)
+    const target = await this.requireStaff(id)
+
+    if (status === 'DISABLED') {
+      if (target.id === principal.id) {
+        throw new BizException(ErrorCode.BAD_REQUEST, '不能停用自己')
+      }
+      if (target.isOwner) {
+        throw new BizException(ErrorCode.BAD_REQUEST, '不能停用店主；店主只能通过「转让店铺」换人')
+      }
+    }
+
+    const row = await this.prisma.tenant.staff.update({ where: { id }, data: { status } })
+    this.memberships.invalidate(row.accountId, tenantId)
+    return (await this.decorate([row]))[0] as StaffView
+  }
+
+  /**
+   * 转让店主。
+   *
+   * ## 为什么这条路由要在服务层再查一次 `isOwner`
+   *
+   * `@RequirePermission('staff:transfer-owner')` 挡不住店主自己把这个权限点配给别人
+   * ——角色配置页上它就是一个可勾选项。而「谁能把店送人」这件事不该由角色配置决定，
+   * 它只能是当下的那个店主。所以权限点是第一道（能不能看见这个按钮），
+   * `principal.isOwner` 是第二道（真的按下去时）。
+   *
+   * ## 原店主降级到哪
+   *
+   * 见 {@link DEMOTE_ROLE_CODES}。**不清空 `roleIds`**——那会让原店主瞬间失去一切，
+   * 包括把店转回来的能力。
+   *
+   * @throws `BizException` 1340300 调用方不是店主；1040000 转给自己 / 转给非在职员工
+   */
+  async transferOwner(
+    principal: AuthPrincipal,
+    dto: TransferOwnerDto,
+  ): Promise<TransferOwnerResult> {
+    const tenantId = requireTenant(principal)
+    if (principal.isOwner !== true) {
+      throw new BizException(ErrorCode.RBAC_FORBIDDEN, '只有店主本人可以转让店铺')
+    }
+    if (dto.staffId === principal.id) {
+      throw new BizException(ErrorCode.BAD_REQUEST, '不能把店转让给自己')
+    }
+
+    const target = await this.requireStaff(dto.staffId)
+    if (target.status !== 'ACTIVE') {
+      throw new BizException(ErrorCode.BAD_REQUEST, '只能转让给在职员工')
+    }
+    const self = await this.requireStaff(principal.id)
+
+    const demoteRole = await this.findDemoteRole()
+
+    // 一个事务：不能出现「有两个店主」或者「一个店主都没有」的中间态。
+    await this.prisma.$transaction(async (tx) => {
+      await tx.staff.update({ where: { id: target.id }, data: { isOwner: true } })
+      await tx.staff.update({
+        where: { id: self.id },
+        data: {
+          isOwner: false,
+          ...(demoteRole === null ? {} : { roleIds: [demoteRole.id] }),
+        },
+      })
+    })
+
+    // 双方都要清：新店主要立刻拿到全量权限，原店主要立刻失去。
+    this.roleCache.invalidateRoles(tenantId)
+    this.memberships.invalidate(target.accountId, tenantId)
+    this.memberships.invalidate(self.accountId, tenantId)
+
+    return {
+      newOwnerStaffId: target.id,
+      previousOwnerStaffId: self.id,
+      demotedToRoleId: demoteRole?.id ?? null,
+    }
+  }
+
+  // ── 内部 ──────────────────────────────────────────────────────────────
+
+  /** 关键字的 OR 条件：店内昵称 或 登录手机号。 */
+  private async keywordConditions(keyword: string): Promise<Prisma.StaffWhereInput[]> {
+    // raw-reason: 登录/鉴权跨租户找账号——手机号存在平台域表 `StaffAccount` 上，
+    // 本查询只按手机号找候选账号 id，不带也不需要 tenantId；随后那个 id 集合会被
+    // 交给 prisma.tenant 去与本店的成员关系求交集，隔离由后一步保证。
+    const accounts = await this.raw.client.staffAccount.findMany({
+      where: { phone: { contains: keyword } },
+      select: { id: true },
+      // 上限是防手滑：搜一个 `1` 会匹配到全平台的号码。超过这个数的话，
+      // 与本店求交之后剩下的也不会是一个有用的结果集。
+      take: 500,
+    })
+    return [
+      { name: { contains: keyword } },
+      ...(accounts.length > 0 ? [{ accountId: { in: accounts.map((a) => a.id) } }] : []),
+    ]
+  }
+
+  /** 给一批 `Staff` 行补上手机号与角色名。 */
+  private async decorate(rows: readonly Staff[]): Promise<StaffView[]> {
+    if (rows.length === 0) return []
+
+    const accountIds = [...new Set(rows.map((r) => r.accountId))]
+    const roleIds = [...new Set(rows.flatMap((r) => toStringArray(r.roleIds)))]
+
+    const [accounts, roles] = await Promise.all([
+      // raw-reason: 登录/鉴权跨租户找账号——按上一步由 prisma.tenant 算出的 accountId
+      // 集合反查平台域表 `StaffAccount`，取手机号。隔离由「id 集合的来源」保证。
+      this.raw.client.staffAccount.findMany({
+        where: { id: { in: accountIds } },
+        select: { id: true, phone: true },
+      }),
+      roleIds.length === 0
+        ? Promise.resolve([])
+        : this.prisma.tenant.role.findMany({
+            where: { id: { in: roleIds } },
+            select: { id: true, name: true },
+          }),
+    ])
+
+    const phoneOf = new Map(accounts.map((a) => [a.id, a.phone] as const))
+    const nameOf = new Map(roles.map((r) => [r.id, r.name] as const))
+
+    return rows.map((row) =>
+      toView(
+        row,
+        phoneOf.get(row.accountId) ?? '',
+        toStringArray(row.roleIds)
+          .map((id) => nameOf.get(id))
+          .filter((name): name is string => name !== undefined),
+      ),
+    )
+  }
+
+  /**
+   * 这批角色能不能被当前操作者授予。
+   *
+   * 两层：① 角色必须真的存在于本店（`prisma.tenant` 查不到 = 不是本店的，或已删）；
+   * ② `canAssignRole`（`@taizan/rbac-core` 的纯函数）——店主角色永远不可授予，
+   * 无论操作者是不是店主。判定不写在这里，这里只负责把画像喂给它。
+   */
+  private async assertRolesAssignable(
+    principal: AuthPrincipal,
+    roleIds: readonly string[],
+  ): Promise<void> {
+    if (roleIds.length === 0) return
+
+    const unique = [...new Set(roleIds)]
+    const roles = await this.prisma.tenant.role.findMany({
+      where: { id: { in: unique } },
+      select: { id: true, code: true, permissionCodes: true },
+    })
+    if (roles.length !== unique.length) {
+      const found = new Set(roles.map((r) => r.id))
+      throw new BizException(
+        ErrorCode.BAD_REQUEST,
+        `这些角色不存在或不属于本店：${unique.filter((id) => !found.has(id)).join(', ')}`,
+      )
+    }
+
+    for (const role of roles) {
+      const isOwnerRole =
+        role.code === OWNER_ROLE_CODE || toStringArray(role.permissionCodes).includes('*')
+      if (
+        !canAssignRole(
+          { isOwner: principal.isOwner === true, side: 'ADMIN' },
+          { isOwnerRole, side: 'ADMIN' },
+        )
+      ) {
+        throw new BizException(ErrorCode.BAD_REQUEST, ASSIGNABLE_ROLE_RULE.message, {
+          rule: ASSIGNABLE_ROLE_RULE.code,
+          roleId: role.id,
+        })
+      }
+    }
+  }
+
+  /** 找一个可以把原店主降过去的内置角色。见 {@link DEMOTE_ROLE_CODES}。 */
+  private async findDemoteRole(): Promise<{ id: string } | null> {
+    for (const code of DEMOTE_ROLE_CODES) {
+      const role = await this.prisma.tenant.role.findFirst({
+        where: { code },
+        select: { id: true },
+      })
+      if (role) return role
+    }
+    return null
+  }
+
+  /**
+   * 拿一条属于本店的员工，否则 1240300。
+   *
+   * 与 `GoodsService.requireOwned` 同一个取舍：**不区分「不存在」与「是别人家的」**，
+   * 区分了就等于提供一个跨店的员工 id 存在性探测器。
+   */
+  private async requireStaff(id: string): Promise<Staff> {
+    const row = await this.prisma.tenant.staff.findFirst({ where: { id } })
+    if (!row) {
+      throw new BizException(ErrorCode.CROSS_TENANT_FORBIDDEN, '员工不存在，或不属于当前店铺')
+    }
+    return row
+  }
+}
+
+/** staff token 一定有 `tenantId`（守卫已经查过），走到这里没有说明装配出了问题。 */
+function requireTenant(principal: AuthPrincipal): string {
+  const tenantId = principal.tenantId
+  if (tenantId === undefined) {
+    throw new BizException(ErrorCode.UNAUTHENTICATED, '登录状态已失效，请重新登录')
+  }
+  return tenantId
+}

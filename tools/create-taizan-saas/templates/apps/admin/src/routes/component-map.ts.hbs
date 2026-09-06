@@ -1,0 +1,27 @@
+import { lazy } from 'react'
+import { defineComponentMap } from '@taizan/admin-ui'
+
+/**
+ * `componentKey → 页面组件` 的映射表（蓝图 §4.4）。
+ *
+ * 全部 8 个 key 都已经在 `apps/api/src/registry/menus.ts` 的 `ADMIN_MENUS` 里注册好了
+ * （`example-{{domainSlug}}/{{domainSlug}}.menus.ts` 的 `{{DomainPascal}}List`，加上 T1-9 的工作台/员工/角色/账单/
+ * 审计/公告/个人设置七个框架页面），路由统一走 `buildRoutes(session.menus, componentMap)`
+ * 生成——`src/App.tsx` 没有静态路由这条分支了。
+ *
+ * 这份映射表与后端菜单注册表的差距（有没有、对不对得上）由
+ * `component-map.spec.ts`（本目录）与 `apps/api/test/arch/menu-route-map.spec.ts`
+ * （蓝图 §8 spec 7，静态解析本文件的 key）双向对账，不是「没人管」。
+ */
+export const componentMap = defineComponentMap({
+// @taizan-example-start
+  {{DomainPascal}}List: lazy(() => import('../pages/{{domainSlug}}/{{DomainPascal}}ListPage')),
+// @taizan-example-end
+  Dashboard: lazy(() => import('../pages/dashboard/DashboardPage')),
+  StaffList: lazy(() => import('../pages/staff/StaffListPage')),
+  RoleList: lazy(() => import('../pages/roles/RoleListPage')),
+  BillingCenter: lazy(() => import('../pages/billing/BillingCenterPage')),
+  AuditList: lazy(() => import('../pages/audit/AuditListPage')),
+  AnnouncementList: lazy(() => import('../pages/announcements/AnnouncementListPage')),
+  ProfileSettings: lazy(() => import('../pages/profile/ProfileSettingsPage')),
+})

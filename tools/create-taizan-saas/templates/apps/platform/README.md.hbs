@@ -1,0 +1,142 @@
+# {{scope}}/platform
+
+平台超管后台（T3-4）：独立 Vite 应用，装配 `@taizan/admin-ui` 的壳子/权限/CRUD 层。
+身份是 **platform**（`POST /api/platform/auth/login`，用户名 + 口令，无选店），
+覆盖租户开通/续期/冻结/注销、套餐配额三态编辑、订单与收入、管理员与角色预设、
+公告、平台审计、看板（含到期租户明细）、死信查看/重放、cron 运行记录。
+
+## 本地跑
+
+```bash
+pnpm dev:infra                                     # 根目录，起 MySQL(3307)/Redis(6380)
+pnpm -F {{scope}}/api prisma:generate && pnpm -F {{scope}}/api seed
+pnpm -F {{scope}}/api dev                            # 3000，seed 出 admin/admin123
+pnpm -F {{scope}}/platform dev                       # 5175，/api 代理到 3000
+```
+
+```bash
+pnpm -F {{scope}}/platform lint
+pnpm -F {{scope}}/platform typecheck
+pnpm -F {{scope}}/platform test        # vitest：component-map.spec.ts（spec 7 + 3 条哨兵）
+pnpm -F {{scope}}/platform build
+pnpm -F {{scope}}/platform e2e         # 需要真实后端，见 e2e/platform.spec.ts 头部注释
+```
+
+## 页面清单
+
+| 路径 | componentKey | 说明 |
+|---|---|---|
+| `/dashboard` | `PlatformDashboard` | 汇总卡片（租户状态分布/近 7 天新增/7 天内到期数/近 6 月收入）+ 即将到期租户明细（服务端 `GET /api/platform/dashboard/expiring` 分页/按天数过滤，见下） |
+| `/admins` | `PlatformAdminList` | 管理员 CRUD、改密、启停 |
+| `/tenants` | `PlatformTenantList` | 列表、开通（含 `attachExistingAccount` 开关）、续期、改套餐、冻结/恢复、重置店主密码、注销（二次确认输入 slug） |
+| `/tenants/:tenantId` | 无（不进菜单，列表页「详情」下钻） | 租户 overview + 该租户审计列表 |
+| `/plans` | `PlatformPlanList` | 套餐 CRUD + 上/下架/归档/排序，配额与功能白名单三态编辑 |
+| `/orders` | `PlatformOrderList` | 列表/详情（读走 `/api/platform/orders`）+ 代下单/标记已付/退款（写走 `/api/platform/plan-orders`） |
+| `/role-presets` | `PlatformRolePresetList` | 角色预设 CRUD（`builtin` 禁改/删） |
+| `/announcements` | `PlatformAnnouncementList` | 公告 CRUD + 发布/下线 + 已读统计 |
+| `/audit-logs` | `PlatformAuditLogList` | 平台审计日志（只读） |
+| `/jobs/dead-letter` | `PlatformJobDeadLetter` | 死信查看/重放（真实接口）+ Tab 二「Cron 运行记录」（`PlatformCronRuns`，只读，按 `key` 筛，见下） |
+| `/login` | — | 用户名 + 口令登录（复用 `admin-ui` 的 `<LoginPage identifierField="username">`） |
+
+## 与 `apps/admin` 的关键差异（为什么没直接复用 admin-ui 的现成件）
+
+1. **登录**：平台侧是用户名登录、没有选店。`@taizan/admin-ui` 的 `<LoginPage>`/
+   `createSessionStore()` 现在都把这两点做成了配置项（`identifierField`/`endpoints`/
+   `storageKey`），所以 `src/pages/PlatformLoginPage.tsx` 只是一份 `<LoginPage
+   config=\{{ identifierField: 'username', ... }}>` 配置，`src/session.ts` 也只是一份
+   `createSessionStore({ identifierField: 'username', endpoints: { login, bootstrap } })`
+   配置——两处都不再手写请求/状态逻辑（历史上曾经各自本地重写过一份，见两个文件内的
+   注释）。
+2. **`GET /api/platform/auth/bootstrap` 已落地**（`apps/api/.../auth/
+   platform-auth.service.ts` 的 `bootstrap()`）：一次性下发身份/权限/已裁剪菜单，
+   `src/session.ts` 不再需要任何静态兜底菜单。`permissions` 目前恒为字面量 `'*'`——
+   `PlatformAdmin.roleIds` 还没有真正参与鉴权判定（`platform.permissions.ts` 原话：
+   「`@RequirePermission` 目前没有挂在任何 T1-7 控制器方法上」），`App.tsx` 因此把
+   `buildRoutes()` 的 `permissionOf` 覆盖成 `() => undefined`，避免拿一份对不上的
+   `'*'` 去做精确匹配产生假 403。菜单本身已经在服务端按（此刻恒为全量的）权限集合
+   裁剪过。
+
+## 配额/功能三态怎么表达
+
+- 配额（`quotas: Record<QuotaKind, number|null>`）：`不限`=`null`、`禁止`=`0`、
+  `限额`=正整数、`默认`=这个 key **整个不出现**在提交对象里（新建时等价于不限，
+  修改时是"不动这个维度原来的值"）。`PlatformPlanList.tsx` 的 `QuotaFieldsEditor`
+  就是这四个单选项，不是拿"输入框留空"去暗示某个状态。
+- 功能白名单（`features: string[] | null`）：`不限`=`null`（全部可用）、
+  `禁止`=`[]`（一个都不给）、`默认`=不传这个字段（新建=全部可用，修改=不动）、
+  `白名单`=非空数组。`FeatureEditor` 同理。
+
+## 需要后端补的接口/字段清单
+
+1. **MFA 登录强制校验**：`platform-mfa.service.ts`/`platform-mfa.controller.ts`
+   已经落地「开关位」这一半——`POST /api/platform/admins/me/mfa/{enable,verify}`
+   真的能生成/校验一枚 TOTP，`PlatformAdmin` 也真的有 `mfaSecretEnc`/`keyId` 两列。
+   但 `platform-auth.service.ts#login()` 完全不看这两列（该方法内有一段明确的
+   TODO 注释）——`mfaSecretEnc` 非空的账号登录时依然只需要口令，不需要 `totp`。
+   前端也还没有调用这两个接口的页面（无自助开启 MFA 的入口）。这一项**没有**在
+   本轮收尾里做：登录流程的强制校验属于后端鉴权逻辑，前端在校验逻辑补上之前加
+   任何 TOTP 输入框都没有意义（同上，见 `PlatformLoginPage.tsx` 注释）。
+2. **平台侧权限展开占位**：`bootstrap()` 下发的 `permissions` 恒为字面量 `'*'`
+   （`platform-auth.service.ts` 文档注释——`PlatformAdmin.roleIds` 还没有真正参与
+   任何鉴权判定）。`App.tsx` 因此把 `buildRoutes()` 的 `permissionOf` 覆盖成
+   `() => undefined`，等平台侧角色/权限体系定下来，后端换成按 `roleIds` 展开
+   `RolePreset.permissionCodes` 的真实结果之后，这个覆盖要删掉。
+3. **`registry/menus.ts` 补 `PlatformCronRuns` 菜单项**：`GET /api/platform/jobs/
+   cron-runs` 已经是真实接口（`platform-job.service.ts#listCronRuns()`），前端
+   `src/pages/PlatformCronRuns.tsx`/`src/api/cronRun.ts` 也已经写好，但目前只是
+   挂在 `PlatformJobDeadLetter.tsx` 的第二个 Tab 里手动 import 渲染，**没有**注册
+   进 `component-map.ts`/独立菜单——新增一级菜单节点要改 `apps/api/src/registry/
+   menus.ts`，不在本轮允许改动范围（`apps/admin/**`/`apps/platform/**`）之内。
+   建议追加：
+   ```ts
+   {
+     key: 'platform-job-cron-run',
+     title: 'Cron 运行记录',
+     icon: 'ScheduleOutlined',
+     type: 'MENU',
+     side: 'PLATFORM',
+     path: '/jobs/cron-runs',
+     componentKey: 'PlatformCronRuns',
+     sort: 81,
+   }
+   ```
+   （紧跟在同文件「T3-4：队列死信查看/重放」那一条后面，`sort: 81` 排在死信队列
+   `sort: 80` 之后）。菜单落地后前端要做两件事：`component-map.ts` 里加
+   `PlatformCronRuns: lazy(() => import('../pages/PlatformCronRuns'))`，以及把
+   `PlatformJobDeadLetter.tsx` 里手动内嵌的 Tab 改回独立路由（或两者并存）。
+   同时 `src/routes/__fixtures__/platform-menus.json` 要跟着手抄一份（spec 7）。
+4. **`RolePresetView.side` 是宽泛 `string`**：`PlatformRolePresetList.tsx` 回填表单时
+   需要一次类型断言（后端 view 层没有把它收窄到 `'ADMIN'|'PLATFORM'` 字面量）。
+
+## 已知未覆盖点
+
+- **验收里「冻结租户后商家端立刻 401」与实际后端行为不符**（两层出入，e2e 联调实测确认）：
+  1. 读了 `packages/nest-billing/src/billing-gate.guard.ts` 确认，商家后台的计费闸门
+     只拦**写**方法（`GET`/`HEAD`/`OPTIONS` 一律放行——到期/冻结是「只读」不是
+     「断网」），冻结（`SUSPENDED`）命中的是 `1440301`（`PLAN_READONLY`），不是 401。
+  2. `1440301`/`403` 这些都是**信封语义**（`httpSemantic(code)`，供客户端分流用），
+     `apps/api` 的全局异常处理从不用它设置真实 HTTP 状态码——`grep httpSemantic
+     apps/api/src` 一处引用都没有，联调时实测冻结后写请求的**真实 HTTP 状态码是
+     200**，403 只存在于响应体的信封 `code` 字段里。
+  e2e 因此判的是响应体 `code === 1440301`，不判 `response.status()`，也不会去验证
+  一个当前实现产生不了的 401（见 `e2e/platform.spec.ts` 该步骤的注 1/注 2）。
+- 平台管理员的「删除」动作没有做（后端只给启停，删除会让审计 `actorId` 悬空），
+  `PlatformAdminList` 因此没有删除按钮。
+- MFA 后端已经有 `enable`/`verify` 两个真实接口和存储列，但登录流程不强制校验、
+  前端也没有自助开启入口（见上「需要后端补」第 1 条）——现状是「能力已具备、
+  尚未接通」，不是完全没有。
+- `PlatformTenantDetail` 是列表页下钻，刻意不进菜单（服务端也不该有对应节点）。
+  `PlatformJobDeadLetter` **有**服务端菜单节点（`registry/menus.ts` 的
+  `platform-job-dead-letter`），在侧边栏里；它的第二个 Tab `PlatformCronRuns`
+  还没有独立菜单节点（见上「需要后端补」第 3 条），只能从死信队列页切 Tab 到达。
+- e2e 六条串成一条 `test()`（共用两次登录）而不是六个独立 `test()`：`login`
+  限流档位是同一 IP 5 分钟内 10 次，本机常有其它联调进程同时打这个后端，拆开跑
+  很容易互相顶到限流（见 `e2e/platform.spec.ts` 头部注释）。
+- **本机联调期间这条 e2e 不是 100% 稳定**：在同一台机器、同一个共享开发后端上连续
+  跑了二十多轮排查各种 UI 交互坑（antd 按钮自动加空格、Radio.Button 原生 input 视觉
+  隐藏、InputNumber 不是 `type="number"`、`textColumn` 的省略号截断、Modal.success
+  中文 locale 下按钮是「知道了」不是 OK……这些坑本身都已经修掉），修完之后最近三次
+  连续运行里两次全绿、一次在"开通租户"这一步的创建请求本身没有成功回包（很可能是
+  别的进程同时在打这个后端造成的瞬时性抖动，不是这条用例或页面的逻辑问题）。
+  贴的通过输出来自其中一次全绿的运行；生产 CI 环境下后端不与其它进程共享，预期会
+  更稳。

@@ -1,0 +1,14 @@
+import { createSessionStore, secureStore } from '@taizan/app-ui'
+
+/** C 端会员登录态（蓝图 §5.4）。 */
+export interface ClientSessionData {
+  memberId: string
+  nickname: string | null
+  tenantId: string
+}
+
+/** 按 App 分开存一份，不与商家端共用同一个 key——两边的登录态形状本来就不一样。 */
+export const sessionStore = createSessionStore<ClientSessionData>(
+  '{{projectSlug}}_client_session',
+  secureStore,
+)

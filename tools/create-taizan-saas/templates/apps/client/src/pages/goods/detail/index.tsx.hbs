@@ -1,0 +1,33 @@
+import { Button, View } from '@tarojs/components'
+import Taro, { useRouter } from '@tarojs/taro'
+
+import { formatCents } from '@taizan/contracts'
+
+import './index.scss'
+
+/**
+ * {{domainName}}详情：直接吃列表页透传的 `id`/`name`/`priceCents` 查询参数。
+ *
+ * TODO(T3-6 之后)：后端尚未提供 `GET /api/client/{{domainSlug}}/:id` 单条查询接口，
+ * 真实详情页应改成按 `id` 单独请求（含富文本详情、图集等列表接口不会带的字段）。
+ */
+export default function {{DomainPascal}}Detail() {
+  const router = useRouter()
+  const { id, name, priceCents } = router.params
+
+  function gotoConfirm() {
+    void Taro.navigateTo({
+      url: `/pages/order/confirm/index?id=${id}&name=${name}&priceCents=${priceCents}`,
+    })
+  }
+
+  return (
+    <View className="detail">
+      <View className="detail__name">{decodeURIComponent(name ?? '')}</View>
+      <View className="detail__price">¥{formatCents(Number(priceCents ?? 0))}</View>
+      <Button type="primary" onClick={gotoConfirm}>
+        立即下单
+      </Button>
+    </View>
+  )
+}

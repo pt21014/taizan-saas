@@ -1,0 +1,19 @@
+/**
+ * 蓝图 §7 扩展点③ **注册权限点**：模块内定义，`src/registry/permissions.ts` 汇总。
+ *
+ * 权限点定义在模块目录里而不是集中在注册表文件里，是为了「删掉一个模块 = 删一个目录」。
+ * 集中定义的话，删模块时总会留下几个没人再引用的死权限，而死权限在角色配置页上
+ * 看起来和活的一模一样。
+ *
+ * @packageDocumentation
+ */
+
+import { definePermissions } from '@taizan/contracts'
+
+/** {{domainName}}模块的权限点。 */
+export const {{DOMAIN_UPPER}}_PERMISSIONS = definePermissions({
+  '{{domainSlug}}:list': { module: '{{domainName}}', name: '查看{{domainName}}', type: 'API' },
+  '{{domainSlug}}:write': { module: '{{domainName}}', name: '新增/编辑{{domainName}}', type: 'API' },
+  '{{domainSlug}}:delete': { module: '{{domainName}}', name: '删除{{domainName}}', type: 'API' },
+  '{{domainSlug}}:export': { module: '{{domainName}}', name: '导出{{domainName}}', type: 'BUTTON' },
+})

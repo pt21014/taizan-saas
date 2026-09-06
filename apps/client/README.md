@@ -1,0 +1,79 @@
+# @taizan/client
+
+C 端小程序 + H5（Taro 4.0.9 + React 18）。装配 `@taizan/client-core`：request 适配、
+tenantSlug 解析、member 登录态、支付/分享/登录/选图四个跨端适配、打烊页与店铺不可用页。
+
+## 本地开发
+
+```bash
+# H5
+pnpm -F @taizan/client dev:h5
+# 微信小程序（用微信开发者工具打开 dist/weapp 目录）
+pnpm -F @taizan/client dev:weapp
+```
+
+默认 `config/dev.ts` 把 `/api` 反代到 `http://localhost:3000`（即本地起的 `apps/api`），
+可以用环境变量 `TARO_APP_DEV_PROXY_TARGET` 覆盖代理目标。
+
+## baseURL 从哪来
+
+`src/config.ts` 读取 `process.env.TARO_APP_API_BASE`；本仓库**不在代码里写死任何域名**
+（反面教材见 knowledge `apps/client/src/api/request.ts` 硬编码的 `apiknow.taizan.vip`）。
+需要联到某个环境时，在对应的 `.env.development` / `.env.production`（或部署环境变量）里设置：
+
+```
+TARO_APP_API_BASE=https://api.example.com
+TARO_APP_H5_BASE_DOMAIN=example.com
+```
+
+`TARO_APP_H5_BASE_DOMAIN` 只在 H5 用子域名判店铺时需要（见下）。
+
+## slug 怎么传（tenantSlug 三种来源）
+
+C 端在用户登录之前就要先「知道是哪家店」，`@taizan/client-core` 的 `resolveTenantSlug()`
+按下面的顺序解析，解析结果会持久化到本地 storage 供之后兜底：
+
+| 端 | 来源 1（优先） | 来源 2 | 兜底 |
+|---|---|---|---|
+| H5 | 路径 `/s/:slug/...` | 子域名（需配 `TARO_APP_H5_BASE_DOMAIN`），如 `demo.example.com` → `demo` | 上一次持久化的 slug |
+| 小程序 | 启动参数 `query.slug`（分享卡片/自定义链接） | 小程序码 `scene` 字段（`slug=xxx` 或纯 slug 两种形状都兼容） | 上一次持久化的 slug |
+
+三种来源都解析不出来时，`app.tsx` 会直接跳到店铺不可用页（`1240400`），不会带着空 slug
+发一堆注定失败的请求。已登录之后，`token` 里的 tenantId 优先级高于这里解析出的
+slug（`X-Tenant-Slug` 只在未登录/token 校验不通过时生效，见后端
+`TokenTenantResolver` 排在解析链首位）。
+
+## 登录
+
+- **手机号 dev 登录**（联调用）：对应后端 `POST /api/client/auth/login-dev`，需要后端
+  `CLIENT_DEV_LOGIN=1` 且非生产环境才会真的签发 token。
+- **微信一键登录**：只在小程序端展示，`Taro.login()` 换 code 后交给后端换 token
+  （`POST /api/client/auth/login-wechat`）。**该后端接口截至本任务（T3-6）尚未实现**，
+  点击会失败并给出提示；接口就绪后 `@taizan/client-core/session.ts` 不需要改动。
+
+## 下单 / 支付
+
+`pages/order/confirm` 走 `@taizan/client-core` 的 `pay()` 适配层，小程序用
+`Taro.requestPayment`，H5 在微信内置浏览器走 `WeixinJSBridge` JSAPI 支付、普通浏览器
+降级提示「请在微信中打开」。**后端 C 端下单接口尚未实现**（`@taizan/nest-payment` +
+`@taizan/wechatpay` 已就绪，见 T2-3，只是还没接到一个 `/api/client/orders` 之类的路由），
+当前用假的支付调起参数（`mockRequestOrder()`，见该页面源码内 TODO 注释）走通「点击 →
+`pay()` → 拿到结果」这条链路，接口就绪后只需替换 `mockRequestOrder()`。
+
+## 真机调试
+
+- **微信开发者工具**：`pnpm -F @taizan/client dev:weapp` 后用开发者工具打开
+  `apps/client/dist/weapp` 目录；`project.config.json` 里的 `appid` 是占位符
+  `touristappid`（游客模式），正式发布前换成真实小程序 appid。
+- **真机预览**：开发者工具里点「预览」，扫码即可在真机上打开——注意真机上小程序的
+  `request` 合法域名需要在小程序后台配置（`TARO_APP_API_BASE` 指向的域名必须在白名单里）,
+  本地开发用的 `localhost` 域名只能在开发者工具里勾选「不校验合法域名」跑通，不能在真机上用。
+- **H5 真机**：`pnpm -F @taizan/client dev:h5` 起本地 devServer 后，手机和电脑连同一个
+  局域网，用电脑局域网 IP（而不是 `localhost`）访问即可。
+
+## 已知未覆盖点
+
+- 小程序端未做真机验证（本任务只跑通 `build:weapp` 产出 dist，未接入真实 appid 用开发者
+  工具/真机打开）。
+- 商品详情页目前直接吃列表页透传的查询参数，未接单条查询接口（后端未提供）。
+- 下单接口是 mock（见上）。

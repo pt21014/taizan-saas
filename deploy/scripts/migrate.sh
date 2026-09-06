@@ -1,0 +1,100 @@
+#!/bin/bash
+# 生产库迁移：先 `prisma migrate diff` 出一份「即将执行哪些 SQL」的预览，
+# 打印出来给人看一眼，再跑真正的 `prisma migrate deploy`。预览步骤失败（通常是
+# 连不上库、连接串不对）就立刻停，绝不能"看不清就跑深浅未知的 DDL"。
+#
+# 跟 deploy/checks/billing-check.sh 那种「纯只读、故意不用 set -e」的脚本刚好相反：
+# 这份脚本本身就是要改数据库结构的，任何一步出岔子都必须立即停止，不能带着
+# 半途而废的状态往下走，所以老老实实 `set -euo pipefail`。
+#
+# 用法（在服务器上、发布目录 apps/api 下跑，或指定 --cwd）：
+#   bash deploy/scripts/migrate.sh
+#   bash deploy/scripts/migrate.sh --cwd /www/wwwroot/taizan-saas/current/apps/api
+#   bash deploy/scripts/migrate.sh --skip-preview     # 跳过预览，直接 deploy（不推荐，仅供脚本化调用）
+#   bash deploy/scripts/migrate.sh --help
+set -euo pipefail
+
+API_DIR="."
+SKIP_PREVIEW=0
+
+usage() {
+  cat <<'USAGE'
+用法：bash deploy/scripts/migrate.sh [选项]
+
+  对 apps/api 的数据库跑迁移：先 `prisma migrate diff` 预览将要执行的 SQL，
+  预览失败（通常是连不上库）立刻停；预览成功后打印出来，再跑
+  `prisma migrate deploy` 真正应用。
+
+选项：
+  --cwd <目录>     apps/api 所在目录（能找到 prisma.config.ts 的那一层），默认当前目录
+  --skip-preview   跳过预览直接 deploy（给已经在别处看过预览的自动化调用用，人工操作不建议加）
+  -h, --help       显示本帮助
+
+前置：DATABASE_URL 必须已经在环境变量或 .env 里可用（跟 apps/api 启动时读的是同一份）。
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cwd) API_DIR="${2:?--cwd 后面要跟目录路径}"; shift 2 ;;
+    --skip-preview) SKIP_PREVIEW=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "❌ 认不出的参数：$1（--help 看用法）" >&2; exit 2 ;;
+  esac
+done
+
+cd "$API_DIR"
+[ -f prisma.config.ts ] || {
+  echo "❌ $API_DIR 下没有 prisma.config.ts，这里不是 apps/api 目录。" >&2
+  echo "   用 --cwd 指到正确目录，比如 apps/api 或发布目录下的 apps/api。" >&2
+  exit 2
+}
+
+PRISMA() {
+  if command -v pnpm >/dev/null 2>&1 && [ -f package.json ] && grep -q '"prisma"' package.json 2>/dev/null; then
+    pnpm exec prisma "$@"
+  else
+    npx --yes prisma "$@"
+  fi
+}
+
+if [ "$SKIP_PREVIEW" != "1" ]; then
+  echo "=========== 1. 预览：即将执行的 SQL ==========="
+  # `--from-url` 当前数据库的**实际**结构，`--to-schema-datamodel` 是 schema 目录
+  # 描述的**目标**结构（= 全部 migrations 应用完之后应该长成的样子），两者的差
+  # 约等于 `migrate deploy` 接下来会做的事。
+  #
+  # 这里刻意**不用** `--from-schema-datasource ... --to-migrations ...`（对着
+  # migrations 目录一条条重放）——那个写法要求传 `--shadow-database-url`：
+  # Prisma 会在那个地址上建一个空库、把全部迁移从头重放一遍来算出「最终形态」。
+  # 生产环境的数据库账号通常没有建库权限（DBA 只给了业务库的 DML/DDL，没给
+  # `CREATE DATABASE`），逼着专门为了「预览」这一步申请一个额外的建库权限，
+  # 得不偿失；直接拿目标 schema 当「to」不需要任何额外权限，效果上是同一件事：
+  # 假设 migrations 目录本来就和 schema 一致（`taizan:schema-check` 保证了这一点），
+  # "当前库 → 目标 schema 的差" 就是 "当前库 → 应用完全部待跑迁移之后" 的差。
+  #
+  # 这一步只读（diff 不会改库），失败通常是连接串不对或者库连不上——
+  # 这种情况必须停在这里，不能带着"不知道会发生什么"往下跑 deploy。
+  if ! PRISMA migrate diff \
+      --from-url "${DATABASE_URL:?没有 DATABASE_URL：跟应用启动时读的是同一个环境变量，这里也要有}" \
+      --to-schema-datamodel prisma/schema \
+      --script >/tmp/taizan-migrate-preview.sql 2>/tmp/taizan-migrate-preview.err; then
+    echo "❌ 预览失败，停在这里，不会执行 migrate deploy。" >&2
+    echo "   常见原因：DATABASE_URL 不对 / 连不上库 / migrations 目录跟 schema 对不上。" >&2
+    cat /tmp/taizan-migrate-preview.err >&2
+    exit 1
+  fi
+  echo "── 以下是即将执行的 SQL（没有内容 = 数据库已经是最新，deploy 会是空操作） ──"
+  cat /tmp/taizan-migrate-preview.sql
+  echo "───────────────────────────────────────────────────────────────────"
+  rm -f /tmp/taizan-migrate-preview.sql /tmp/taizan-migrate-preview.err
+else
+  echo "（--skip-preview：跳过预览）"
+fi
+
+echo ""
+echo "=========== 2. 应用迁移（prisma migrate deploy） ==========="
+PRISMA migrate deploy
+
+echo ""
+echo "✅ 迁移完成。"

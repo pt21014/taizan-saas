@@ -1,0 +1,27 @@
+import { expect, test } from '@playwright/test'
+import { ACCOUNTS, API_BASE, login, readStoredToken } from './fixtures'
+
+/**
+ * 用例②：受限员工登录 → 无「新增」按钮；导出 URL 显示 403。
+ *
+ * 「导出 URL 显示 403」按 `apps/api` 的错误信封（蓝图 §4.9）落地：业务错误一律
+ * `HTTP 200 + 信封 code`，`GET /api/admin/goods/export` 权限不够时返回
+ * `code: 1340300`（`httpSemantic(1340300) === 403`），不是裸的 HTTP 403 状态码——
+ * 断言信封 code 才是这条路由真实的失败判据，直接断言 `res.status() === 403` 会一直失败。
+ */
+test('受限员工看不到新增按钮，直接打导出接口拿到 403 语义的错误码', async ({ page, request }) => {
+  await login(page, ACCOUNTS.viewerA.phone, ACCOUNTS.viewerA.password)
+
+  await page.goto('/goods')
+  await expect(page.getByRole('button', { name: '新增商品' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '导出' })).toHaveCount(0)
+
+  // 直接读刚才登录留在 localStorage 里的 token，不再单独打一次登录接口
+  // （`login` 档限流按客户端维度计数、不分成功失败，见 `fixtures.ts` 的注释）。
+  const token = await readStoredToken(page)
+  const res = await request.get(`${API_BASE}/api/admin/goods/export`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  const body = (await res.json()) as { code: number; message: string }
+  expect(body.code).toBe(1340300)
+})

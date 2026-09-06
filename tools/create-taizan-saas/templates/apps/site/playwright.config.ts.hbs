@@ -1,0 +1,38 @@
+import { defineConfig, devices } from '@playwright/test'
+
+/**
+ * e2e 需要**真实后端**（蓝图 §3.2「不 mock 网络层」）：
+ *
+ * ```bash
+ * pnpm dev:infra
+ * pnpm -F {{scope}}/api prisma:migrate
+ * pnpm -F {{scope}}/api seed
+ * pnpm -F {{scope}}/api dev
+ * ```
+ *
+ * 起好后端后再跑 `pnpm -F {{scope}}/site e2e`——这里的 `webServer` 只负责拉起
+ * `apps/site` 自己（`vite dev`），不负责拉起后端，也不 mock 它。价格页那条用例
+ * 断言的是 `pnpm -F {{scope}}/api seed` 灌进去的套餐档位，后端没起、没 seed 会直接红。
+ */
+export default defineConfig({
+  testDir: './e2e',
+  timeout: 30_000,
+  expect: { timeout: 5_000 },
+  fullyParallel: false,
+  // 串行跑：四条用例共用同一个真实后端，`signup` 档限流是「同 IP 一天 3 次」，
+  // 并行开多个 worker 相当于同时从同一个 IP 打这个后端，容易互相踩到限流与页面加载竞争。
+  workers: 1,
+  retries: 0,
+  reporter: [['list']],
+  use: {
+    baseURL: 'http://localhost:{{sitePort}}',
+    trace: 'retain-on-failure',
+  },
+  webServer: {
+    command: 'pnpm dev',
+    url: 'http://localhost:{{sitePort}}',
+    reuseExistingServer: true,
+    timeout: 30_000,
+  },
+  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+})

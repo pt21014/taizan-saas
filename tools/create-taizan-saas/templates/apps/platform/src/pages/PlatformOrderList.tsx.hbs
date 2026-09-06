@@ -1,0 +1,199 @@
+import { useEffect, useState } from 'react'
+import { Descriptions, Form, Input, InputNumber, Modal, Select, Space, Typography } from 'antd'
+import {
+  CrudDrawerForm,
+  CrudTable,
+  dateTimeColumn,
+  moneyColumn,
+  statusTagColumn,
+  textColumn,
+  useCrudForm,
+  useCrudTable,
+} from '@taizan/admin-ui'
+import { usePlanApi } from '../api/plan'
+import {
+  PLAN_ORDER_STATUSES,
+  PLAN_ORDER_STATUS_TAGS,
+  useOrderApi,
+  type CreatePlanOrderInput,
+  type PlanOrderView,
+} from '../api/order'
+
+export default function PlatformOrderList() {
+  const api = useOrderApi()
+  const [detail, setDetail] = useState<PlanOrderView | null>(null)
+  const [refundTarget, setRefundTarget] = useState<PlanOrderView | null>(null)
+  const [refundReason, setRefundReason] = useState('')
+
+  const table = useCrudTable<PlanOrderView>({
+    list: api.list,
+    rowKey: 'id',
+    syncUrl: true,
+    searchSchema: [
+      { name: 'tenantId', label: '租户 ID' },
+      {
+        name: 'status',
+        label: '状态',
+        type: 'select',
+        options: PLAN_ORDER_STATUSES.map((s) => ({
+          label: PLAN_ORDER_STATUS_TAGS[s]?.text ?? s,
+          value: s,
+        })),
+      },
+    ],
+  })
+
+  const form = useCrudForm<CreatePlanOrderInput>({
+    create: api.create,
+    onSuccess: table.refresh,
+    successMessage: { create: '已下单（PENDING，不影响权益，需要「标记已付」才会履约）' },
+  })
+
+  const markPaid = async (row: PlanOrderView) => {
+    await api.markPaid(row.id)
+    table.refresh()
+  }
+
+  return (
+    <>
+      <CrudTable
+        table={table}
+        title="订单"
+        create=\{{ label: '代下单', onClick: () => form.openForm() }}
+        columns={[
+          textColumn<PlanOrderView>({
+            title: '订单号',
+            dataIndex: 'outTradeNo',
+            copyable: true,
+            width: 200,
+          }),
+          textColumn<PlanOrderView>({
+            title: '租户 ID',
+            dataIndex: 'tenantId',
+            copyable: true,
+            width: 200,
+          }),
+          moneyColumn<PlanOrderView>({ title: '金额', dataIndex: 'amountCents' }),
+          { title: '周期数', dataIndex: 'periods', key: 'periods', width: 80 },
+          statusTagColumn<PlanOrderView>({
+            title: '状态',
+            dataIndex: 'status',
+            map: PLAN_ORDER_STATUS_TAGS,
+          }),
+          dateTimeColumn<PlanOrderView>({ title: '创建时间', dataIndex: 'createdAt' }),
+        ]}
+        actionsWidth={220}
+        actions={[
+          { key: 'detail', label: '详情', onClick: (r) => setDetail(r) },
+          {
+            key: 'markPaid',
+            label: '标记已付',
+            hidden: (r) => r.status !== 'PENDING',
+            confirm: '确认线下已收到这笔款项？标记后立即履约（延长套餐到期日）。',
+            onClick: markPaid,
+          },
+          {
+            key: 'refund',
+            label: '退款',
+            danger: true,
+            hidden: (r) => r.status !== 'FULFILLED' && r.status !== 'PAID',
+            onClick: (r) => {
+              setRefundTarget(r)
+              setRefundReason('')
+            },
+          },
+        ]}
+      />
+
+      <CrudDrawerForm form={form} title="订单" width={480}>
+        <Form.Item name="tenantId" label="租户 ID" rules={[{ required: true }]}>
+          <Input placeholder="Tenant.id" />
+        </Form.Item>
+        <PlanSelect />
+        <Form.Item name="periods" label="计费周期数" rules={[{ required: true }]} initialValue={1}>
+          <InputNumber min={1} max={60} style=\{{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item name="channel" label="收款渠道" initialValue="OFFLINE">
+          <Select
+            options={[
+              { label: '线下（默认，后续手工标记已付）', value: 'OFFLINE' },
+              { label: '微信支付', value: 'WECHAT' },
+            ]}
+          />
+        </Form.Item>
+      </CrudDrawerForm>
+
+      <Modal title="订单详情" open={detail !== null} onCancel={() => setDetail(null)} footer={null}>
+        {detail && (
+          <Descriptions column={1} size="small" bordered>
+            <Descriptions.Item label="订单号">{detail.outTradeNo}</Descriptions.Item>
+            <Descriptions.Item label="租户 ID">{detail.tenantId}</Descriptions.Item>
+            <Descriptions.Item label="套餐 ID">{detail.planId}</Descriptions.Item>
+            <Descriptions.Item label="类型">{detail.type}</Descriptions.Item>
+            <Descriptions.Item label="周期数">{detail.periods}</Descriptions.Item>
+            <Descriptions.Item label="状态">
+              {PLAN_ORDER_STATUS_TAGS[detail.status]?.text ?? detail.status}
+            </Descriptions.Item>
+            <Descriptions.Item label="支付渠道">{detail.payChannel ?? '—'}</Descriptions.Item>
+            <Descriptions.Item label="第三方交易号">
+              {detail.transactionId ?? '—'}
+            </Descriptions.Item>
+            <Descriptions.Item label="支付时间">{detail.paidAt ?? '—'}</Descriptions.Item>
+            <Descriptions.Item label="履约时间">{detail.fulfilledAt ?? '—'}</Descriptions.Item>
+            <Descriptions.Item label="到期日（履约前 → 后）">
+              {detail.expireBeforeAt ?? '（新开）'} → {detail.expireAfterAt ?? '—'}
+            </Descriptions.Item>
+          </Descriptions>
+        )}
+      </Modal>
+
+      <Modal
+        title="发起退款"
+        open={refundTarget !== null}
+        onCancel={() => setRefundTarget(null)}
+        onOk={() => {
+          if (!refundTarget || refundReason.trim().length < 2) return
+          void api.refund(refundTarget.id, refundReason.trim()).then(() => {
+            table.refresh()
+            setRefundTarget(null)
+          })
+        }}
+        okButtonProps=\{{ disabled: refundReason.trim().length < 2 }}
+        okText="确认退款"
+        okType="danger"
+        cancelText="取消"
+      >
+        <Typography.Paragraph type="secondary">
+          退款会把到期日回退到履约前的时间点，续过费的场景需要人工核实。
+        </Typography.Paragraph>
+        <Space direction="vertical" style=\{{ width: '100%' }}>
+          <Typography.Text>退款原因（至少 2 个字，会写入审计）</Typography.Text>
+          <Input.TextArea
+            value={refundReason}
+            onChange={(e) => setRefundReason(e.target.value)}
+            rows={3}
+          />
+        </Space>
+      </Modal>
+    </>
+  )
+}
+
+/** 单独拆一下：`Form.Item` 需要能拿到 `usePlanApi()` 的下拉选项，避免每次渲染重新拉列表。 */
+function PlanSelect() {
+  const planApi = usePlanApi()
+  const [options, setOptions] = useState<{ label: string; value: string }[]>([])
+  useEffect(() => {
+    planApi
+      .list({ page: 1, pageSize: 100, status: 'ENABLED' })
+      .then((res) =>
+        setOptions(res.items.map((p) => ({ label: `${p.name}（${p.code}）`, value: p.id }))),
+      )
+      .catch(() => undefined)
+  }, [])
+  return (
+    <Form.Item name="planId" label="套餐" rules={[{ required: true }]}>
+      <Select options={options} placeholder="选择套餐" />
+    </Form.Item>
+  )
+}

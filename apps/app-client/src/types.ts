@@ -1,0 +1,24 @@
+/**
+ * 与 `apps/api` 对应接口的响应形状手动对齐（详见各接口文件头注释里的路径）。
+ * 不跨 app 直接 import 服务端类型——那是服务端实现细节，且 app 不该拿到 Nest 装饰器。
+ */
+
+/** `POST /api/client/auth/login-dev` 的响应（`apps/api/src/modules/client/auth/client-auth.service.ts`）。 */
+export interface ClientLoginResult {
+  access: string
+  refresh: string
+  expiresIn: number
+  member: { id: string; phone: string | null; nickname: string | null }
+  tenantId: string
+}
+
+/** `GET /api/client/goods` 单条（`apps/api/src/modules/example-goods/dto/goods.dto.ts`）。 */
+export interface GoodsView {
+  id: string
+  name: string
+  priceCents: number
+  stock: number
+  status: 'DRAFT' | 'ON_SHELF' | 'OFF_SHELF'
+  createdAt: string
+  updatedAt: string
+}

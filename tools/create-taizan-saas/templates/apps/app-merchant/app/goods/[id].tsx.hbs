@@ -1,0 +1,82 @@
+import {
+  Card,
+  ErrorState,
+  SkeletonList,
+  colors,
+  formatWithTrace,
+  spacing,
+  textVariants,
+} from '@taizan/app-ui'
+import { ApiError } from '@taizan/contracts'
+import { useLocalSearchParams } from 'expo-router'
+import { useCallback, useEffect, useState } from 'react'
+import { Text, View } from 'react-native'
+
+import { api } from '../../src/api'
+import type { {{DomainPascal}}View } from '../../src/types'
+
+/** `GET /api/admin/{{domainSlug}}/:id`：商家端有真的详情接口（C 端目前没有）。 */
+export default function {{DomainPascal}}DetailScreen() {
+  const { id } = useLocalSearchParams<{ id: string }>()
+  const [{{domainSlug}}, set{{DomainPascal}}] = useState<{{DomainPascal}}View | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(() => {
+    if (!id) return
+    setLoading(true)
+    setError(null)
+    api
+      .get<{{DomainPascal}}View>(`/admin/{{domainSlug}}/${id}`)
+      .then(set{{DomainPascal}})
+      .catch((e: unknown) => setError(e instanceof ApiError ? formatWithTrace(e) : '加载失败'))
+      .finally(() => setLoading(false))
+  }, [id])
+
+  useEffect(() => load(), [load])
+
+  if (loading) {
+    return <SkeletonList rows={3} />
+  }
+  if (error || !{{domainSlug}}) {
+    return <ErrorState message={error ?? '{{domainName}}不存在'} onRetry={load} />
+  }
+
+  return (
+    <View style=\{{ flex: 1, backgroundColor: colors.bgBase, padding: spacing.lg }}>
+      <Card padded>
+        <Text style=\{{ fontSize: textVariants.title.fontSize, fontWeight: '700' }}>
+          { {{domainSlug}}.name}
+        </Text>
+        <Text
+          style=\{{
+            fontSize: textVariants.body.fontSize,
+            color: colors.error,
+            fontWeight: '700',
+            marginTop: spacing.sm,
+          }}
+        >
+          ¥{({{domainSlug}}.priceCents / 100).toFixed(2)}
+        </Text>
+        <Text
+          style=\{{
+            fontSize: textVariants.sub.fontSize,
+            color: colors.gray[500] ?? '#999',
+            marginTop: spacing.xs,
+          }}
+        >
+          库存 { {{domainSlug}}.stock} · 状态 { {{domainSlug}}.status}
+        </Text>
+        <Text
+          style=\{{
+            fontSize: textVariants.micro.fontSize,
+            color: colors.gray[400] ?? '#aaa',
+            marginTop: spacing.lg,
+          }}
+        >
+          创建于 { {{domainSlug}}.createdAt}
+        </Text>
+      </Card>
+    </View>
+  )
+}

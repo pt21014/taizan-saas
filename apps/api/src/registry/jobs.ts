@@ -1,0 +1,71 @@
+/**
+ * 五张注册表之五：**队列任务**（蓝图 §4.7、§7 扩展点⑦）。
+ *
+ * ## 这张表不是执行层的真源
+ *
+ * 队列的真源是**处理器类上的 `@JobHandler({ name })`**——`ProcessorFactory` 用
+ * `DiscoveryService` 扫出它们并起 worker，不看这个文件。这里这份清单是给**人**和
+ * **平台后台**用的：死信重放页要能把 `goods.sync` 显示成「商品同步」而不是一串英文，
+ * 运维要能一眼看全「这个应用一共有哪些后台任务」。
+ *
+ * 两者对不上（注册了却没有处理器、有处理器却没注册）这里只兜住一半：name 一律引用
+ * 处理器文件里导出的常量，所以拼错是编译错误而不是运行时静默失配。
+ * 完整的双向比对要等平台后台的死信页落地（T1-7），那时可以直接拿
+ * `ProcessorFactory.discovered` 对账。
+ *
+ * ## 约定
+ *
+ * 任务名带模块前缀（`goods.sync`），死信落 `JobDeadLetter` 并可在平台后台重放；
+ * cron 一律 `@LeaderCron`（裸 `@Cron` 会在 4 个 PM2 实例上各跑一遍，这是 knowledge
+ * 线上真实发生过的故障，由 `cluster-safe.spec.ts`（spec 12）看着）。
+ *
+ * @packageDocumentation
+ */
+
+import { GOODS_SYNC_JOB_NAME } from '../modules/example-goods/goods-sync.handler'
+
+/** 一个队列任务的注册项。 */
+export interface JobDef {
+  /** 任务名，`module.action` 形式，全局唯一，**必须与 `@JobHandler({ name })` 一致**。 */
+  name: string
+  /**
+   * 所属队列。
+   *
+   * `@taizan/nest-infra` 目前是「一个 name 一个队列」（`name` 即队列名），
+   * 所以这里恒等于 `name`。字段留着是因为将来若要把若干低频任务并到一个队列上
+   * （每个队列在 BullMQ 里都是一组常驻 key + 一条 worker 连接），改的是这里而不是调用点。
+   */
+  queue: string
+  /** 给平台后台「死信重放」页显示用的中文名。 */
+  title: string
+}
+
+/** 本应用注册的队列任务。 */
+export const JOBS: readonly JobDef[] = [
+  {
+    name: GOODS_SYNC_JOB_NAME,
+    queue: GOODS_SYNC_JOB_NAME,
+    title: '商品同步',
+  },
+]
+
+/**
+ * 加载期自检：任务名不重复。
+ *
+ * 重名的后果是两个处理器抢同一个队列，消息被随机分给其中一个——
+ * 表现为「有一半的任务好像没跑」。`JobRegistry.discover()` 那边也会就重名抛错，
+ * 但那是应用起来之后的事，而这份清单是人在写代码时看的，早一步炸更好。
+ */
+function assertNoDuplicateJobNames(): void {
+  const seen = new Set<string>()
+  for (const job of JOBS) {
+    if (seen.has(job.name)) {
+      throw new Error(
+        `[@taizan/api] 队列任务 "${job.name}" 被重复注册；一个任务名只能有一个处理器。`,
+      )
+    }
+    seen.add(job.name)
+  }
+}
+
+assertNoDuplicateJobNames()

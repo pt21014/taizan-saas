@@ -1,0 +1,695 @@
+/**
+ * **租户隔离 e2e** —— T0-8 的收口证明，跑在 `deploy/docker/docker-compose.dev.yml`
+ * 起的**真** MySQL + Redis 上。
+ *
+ * ```
+ * pnpm dev:infra
+ * pnpm -F {{scope}}/api prisma:migrate
+ * pnpm -F {{scope}}/api test:e2e
+ * ```
+ *
+ * ## 为什么必须连真库
+ *
+ * 隔离扩展的一半行为发生在 SQL 层：`AND` 包裹之后 `where` 长什么样、
+ * `findUnique` 补 `select.tenantId` 之后归属校验读到什么、软删改写的 `update`
+ * 有没有留在事务里。这些用替身客户端全都测不出来——替身怎么写，断言就怎么过。
+ *
+ * ## 为什么每次都新建两家店而不是用 seed 的 demo/demo-b
+ *
+ * 用例之间会互相写数据（建商品、删商品）。固定租户跑第二遍就带着上一遍的残留，
+ * 于是「A 只看得见 3 个商品」这条断言会莫名其妙地变成 6 个。每次跑用一对**新** slug，
+ * 测试就是可重复的，也不用写清库脚本。
+ *
+ * ## 用例清单（编号对应 T0-8 验收）
+ *
+ * ① 平台登录 ② 建租户 A/B ③ 两个店主登录 ④ 各自建商品 ⑤ 列表只见自己的
+ * ⑥ 拿别家 id 增删改查 → 1240300 ⑦ 请求头/参数携带别家 tenantId 不生效
+ * ⑧ 无 token → 1140100 ⑨ C 端会员隔离 + slug 头压不过 token
+ * ⑩ 软删：列表不见但库里 deletedAt 非空 ⑪ **事务内软删回滚**
+ * ⑫ `@Audit` 落 AuditLog 且 tenantId 正确 ⑬ Swagger 可访问
+ */
+
+import 'reflect-metadata'
+import 'dotenv/config'
+
+import type { INestApplication } from '@nestjs/common'
+import { Test } from '@nestjs/testing'
+import { PrismaClient } from '@prisma/client'
+import { ulid } from '@taizan/contracts'
+import { runWithContext, type RequestContext } from '@taizan/nest-core'
+import { seedBase } from '@taizan/prisma-base'
+import request from 'supertest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+
+import { AppModule } from '../src/bootstrap/app.module'
+import { configureApp } from '../src/bootstrap/configure-app'
+import { {{DomainPascal}}Service } from '../src/modules/example-{{domainSlug}}/{{domainSlug}}.service'
+import { findFirstUpsertDelegate } from '../src/seed-delegates'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 夹具
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 每次跑用一段唯一后缀，两家店互不干扰、重复跑也不打架。 */
+const RUN = ulid().slice(-8).toLowerCase()
+
+const SHOP_A = { slug: `e2e-a-${RUN}`, name: `E2E A ${RUN}`, phone: phoneFor(1) }
+const SHOP_B = { slug: `e2e-b-${RUN}`, name: `E2E B ${RUN}`, phone: phoneFor(2) }
+const MEMBER_PHONE = phoneFor(3)
+const OWNER_PASSWORD = 'e2e-password-123'
+
+/**
+ * 本文件的登录请求专用的「客户端 IP」（起法与 `plan-order.e2e-spec.ts` 一致）。
+ *
+ * `login` 档限流按**客户端 IP** 计（5 分钟 10 次），而 e2e 每个文件都从 `127.0.0.1`
+ * 打过来、又串行跑（`fileParallelism: false`），几个文件共用同一个桶。本文件一趟要登
+ * 5 次（平台 3 次 + 店主 2 次），和别的文件加起来就会超——后面的文件拿到 `1042900`
+ * 而不是它想断言的东西，失败信息看起来像「登录逻辑坏了」。
+ *
+ * `TRUSTED_PROXY_HOPS=1` + `X-Forwarded-For` 让本文件的登录落进自己的桶。
+ * 这不是绕过限流：限流本身由 `test/ratelimit.e2e-spec.ts` 专门验证。
+ */
+const LOGIN_IP = `10.97.${([...RUN].reduce((a, c) => (a + c.charCodeAt(0)) % 200, 11) + 1).toString()}.5`
+
+/** 本文件所有登录请求的统一起手式：一定带上 {@link LOGIN_IP}。 */
+function loginRequest(url: string) {
+  return request(http()).post(url).set('X-Forwarded-For', LOGIN_IP)
+}
+
+/** 造一个本次运行专用的手机号（全局唯一键，不能和 seed 的演示账号撞）。 */
+function phoneFor(n: number): string {
+  // 139 + 8 位：用运行后缀的数字化结果，保证同一次运行内稳定、不同运行间几乎不撞。
+  const digits = [...RUN]
+    .map((c) => c.charCodeAt(0) % 10)
+    .join('')
+    .slice(0, 7)
+  return `139${digits}${n}`
+}
+
+let app: INestApplication
+let prisma: PrismaClient
+
+/** supertest 的目标（`getHttpServer()` 回的是 `any`，这里收窄成 supertest 认的形状）。 */
+function http(): Parameters<typeof request>[0] {
+  return app.getHttpServer() as Parameters<typeof request>[0]
+}
+
+/** 成功响应的信封形状；`code` 不为 0 时直接把整个 body 打出来，省得反复加日志。 */
+function expectOk<T>(body: unknown): T {
+  const envelope = body as { code: number; message: string; data: T }
+  expect(envelope.code, `期望 code=0，实际：${JSON.stringify(envelope)}`).toBe(0)
+  return envelope.data
+}
+
+/** 取业务码。 */
+function codeOf(body: unknown): number {
+  return (body as { code: number }).code
+}
+
+interface Shop {
+  tenantId: string
+  slug: string
+  token: string
+  staffId: string
+}
+
+/** 平台超管 token。 */
+let platformToken = ''
+let shopA: Shop
+let shopB: Shop
+/** A 店的三个商品 id。 */
+let {{domainSlug}}A: string[] = []
+/** B 店的两个商品 id。 */
+let {{domainSlug}}B: string[] = []
+
+/** 用平台 token 开一家店，然后用店主账号登录，返回 staff token。 */
+async function createShopAndLogin(spec: {
+  slug: string
+  name: string
+  phone: string
+}): Promise<Shop> {
+  const created = await request(http())
+    .post('/api/platform/tenants')
+    .set('Authorization', `Bearer ${platformToken}`)
+    .send({
+      slug: spec.slug,
+      name: spec.name,
+      ownerPhone: spec.phone,
+      ownerPassword: OWNER_PASSWORD,
+      trialDays: 30,
+    })
+  const data = expectOk<{ tenant: { id: string; slug: string } }>(created.body)
+
+  const login = await loginRequest('/api/admin/auth/login').send({
+    phone: spec.phone,
+    password: OWNER_PASSWORD,
+    tenantId: data.tenant.id,
+  })
+  const session = expectOk<{ needChooseShop: boolean; access: string; staffId: string }>(login.body)
+  expect(session.needChooseShop).toBe(false)
+
+  return {
+    tenantId: data.tenant.id,
+    slug: data.tenant.slug,
+    token: session.access,
+    staffId: session.staffId,
+  }
+}
+
+/** 用某家店的 token 建一个商品，返回 id。 */
+async function create{{DomainPascal}}(shop: Shop, name: string, priceCents = 100): Promise<string> {
+  const res = await request(http())
+    .post('/api/admin/{{domainSlug}}')
+    .set('Authorization', `Bearer ${shop.token}`)
+    .send({ name, priceCents, stock: 5, status: 'ON_SHELF' })
+  return expectOk<{ {{domainSlug}}: { id: string } }>(res.body).{{domainSlug}}.id
+}
+
+/** 造一个带租户的执行上下文（给「直接调 service」的用例用）。 */
+function tenantContext(tenantId: string): RequestContext {
+  return {
+    traceId: ulid(),
+    tenantId,
+    ip: { client: '127.0.0.1', edge: '127.0.0.1' },
+    startedAt: Date.now(),
+  }
+}
+
+beforeAll(async () => {
+  prisma = new PrismaClient()
+
+  // 保证平台管理员与套餐存在。`withDemoTenant: false`：本文件自己建两家店，
+  // 不依赖也不污染 `pnpm seed` 造的 demo / demo-b。seedBase 是幂等的，重复跑没事。
+  await seedBase(
+    {
+      platformAdmin: prisma.platformAdmin,
+      plan: prisma.plan,
+      tenant: prisma.tenant,
+      staffAccount: prisma.staffAccount,
+      staff: findFirstUpsertDelegate(prisma.staff),
+      role: findFirstUpsertDelegate(prisma.role),
+      rolePreset: prisma.rolePreset,
+    },
+    { withDemoTenant: false },
+  )
+
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
+  app = moduleRef.createNestApplication({ logger: false })
+  // 与 `main.ts` 调的是同一段配置——否则这套 e2e 测的是另一个 app。
+  configureApp(app)
+  await app.init()
+})
+
+afterAll(async () => {
+  await app?.close()
+  await prisma?.$disconnect()
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 用例
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('① 平台登录', () => {
+  it('用户名 + 口令登录成功，拿到 platform token', async () => {
+    const res = await loginRequest('/api/platform/auth/login')
+      .send({ username: 'admin', password: 'admin123' })
+      .expect(201)
+    const data = expectOk<{ access: string; admin: { username: string } }>(res.body)
+    expect(data.admin.username).toBe('admin')
+    platformToken = data.access
+  })
+
+  it('口令不对 → 1140100，且文案不区分「用户名不存在」与「口令错」', async () => {
+    const res = await loginRequest('/api/platform/auth/login').send({
+      username: 'admin',
+      password: 'wrong-password',
+    })
+    expect(codeOf(res.body)).toBe(1140100)
+
+    const missing = await loginRequest('/api/platform/auth/login').send({
+      username: 'no-such-admin',
+      password: 'whatever',
+    })
+    // 两条文案必须一样——不一样就是一个用户名枚举器。
+    expect((missing.body as { message: string }).message).toBe(
+      (res.body as { message: string }).message,
+    )
+  })
+
+  it('platform token 打 /api/admin → 1140102（凭证类型不符，不是 1240400）', async () => {
+    const res = await request(http())
+      .get('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${platformToken}`)
+    expect(codeOf(res.body)).toBe(1140102)
+  })
+})
+
+describe('② 建租户 A、B', () => {
+  it('平台后台开出两家店', async () => {
+    shopA = await createShopAndLogin(SHOP_A)
+    shopB = await createShopAndLogin(SHOP_B)
+    expect(shopA.tenantId).not.toBe(shopB.tenantId)
+  })
+
+  it('slug 重复被拒（全局唯一且不可改）', async () => {
+    const res = await request(http())
+      .post('/api/platform/tenants')
+      .set('Authorization', `Bearer ${platformToken}`)
+      .send({ slug: SHOP_A.slug, name: '想抢 slug 的店', ownerPhone: phoneFor(9) })
+    expect(codeOf(res.body)).toBe(1040000)
+  })
+
+  it('无 token 打平台接口 → 1140100（平台面也默认拒绝）', async () => {
+    const res = await request(http()).get('/api/platform/tenants')
+    expect(codeOf(res.body)).toBe(1140100)
+  })
+})
+
+describe('③ 两个店主各自登录', () => {
+  it('两张 token 绑定不同的店', async () => {
+    expect(shopA.token).not.toBe(shopB.token)
+    expect(shopA.staffId).not.toBe(shopB.staffId)
+  })
+
+  it('bootstrap 回来的当前店与 token 一致，且店主拿到全部权限点', async () => {
+    const res = await request(http())
+      .get('/api/admin/auth/bootstrap')
+      .set('Authorization', `Bearer ${shopA.token}`)
+      .expect(200)
+    const data = expectOk<{
+      identity: { isOwner: boolean }
+      tenant: { id: string; slug: string }
+      shops: { tenantId: string }[]
+      permissions: string[]
+      menus: { key: string }[]
+    }>(res.body)
+
+    expect(data.tenant.id).toBe(shopA.tenantId)
+    expect(data.tenant.slug).toBe(SHOP_A.slug)
+    expect(data.identity.isOwner).toBe(true)
+    // 店主 = 全部已注册权限点（`expandRoles({ ownerAll: true })`）。
+    expect(data.permissions).toContain('{{domainSlug}}:list')
+    expect(data.permissions).toContain('{{domainSlug}}:delete')
+    // 菜单已按权限 ∩ 套餐裁剪；店主什么都看得到。
+    expect(data.menus.map((m) => m.key)).toContain('{{domainSlug}}')
+    // 一号多店的切换列表里**只有自己名下的店**，绝不该出现 B 店。
+    expect(data.shops.map((s) => s.tenantId)).toEqual([shopA.tenantId])
+  })
+})
+
+describe('④⑤ 各自建商品，列表只见自己的', () => {
+  it('A 建 3 个，B 建 2 个', async () => {
+    {{domainSlug}}A = [
+      await create{{DomainPascal}}(shopA, 'A-可乐', 300),
+      await create{{DomainPascal}}(shopA, 'A-雪碧', 300),
+      await create{{DomainPascal}}(shopA, 'A-咖啡', 1500),
+    ]
+    {{domainSlug}}B = [await create{{DomainPascal}}(shopB, 'B-可乐', 400), await create{{DomainPascal}}(shopB, 'B-茶', 800)]
+    expect(new Set([...{{domainSlug}}A, ...{{domainSlug}}B]).size).toBe(5)
+  })
+
+  it('两家店可以有同名商品（唯一索引是 [tenantId, name, deletedAt]）', async () => {
+    const id = await create{{DomainPascal}}(shopB, 'A-可乐', 999)
+    {{domainSlug}}B.push(id)
+    expect(id).toBeTruthy()
+  })
+
+  it('同一家店内不允许重名', async () => {
+    const res = await request(http())
+      .post('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${shopA.token}`)
+      .send({ name: 'A-可乐', priceCents: 100 })
+    expect(codeOf(res.body)).toBe(1040000)
+  })
+
+  it('⑤ A 的 token 列出商品：只有 A 的 3 个', async () => {
+    const res = await request(http())
+      .get('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${shopA.token}`)
+      .expect(200)
+    const page = expectOk<{ items: { id: string; name: string }[]; total: number }>(res.body)
+    expect(page.total).toBe(3)
+    expect(page.items.map((i) => i.id).sort()).toEqual([...{{domainSlug}}A].sort())
+    expect(page.items.every((i) => i.name.startsWith('A-'))).toBe(true)
+  })
+
+  it('⑤ B 的 token 列出商品：只有 B 的 3 个', async () => {
+    const res = await request(http())
+      .get('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${shopB.token}`)
+      .expect(200)
+    const page = expectOk<{ items: { id: string }[]; total: number }>(res.body)
+    expect(page.total).toBe(3)
+    expect(page.items.map((i) => i.id).sort()).toEqual([...{{domainSlug}}B].sort())
+  })
+
+  it('响应里不含 tenantId（那是服务端的实现细节）', async () => {
+    const res = await request(http())
+      .get('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${shopA.token}`)
+    expect(JSON.stringify(res.body)).not.toContain(shopA.tenantId)
+  })
+})
+
+describe('⑥ 拿别家的商品 id 增删改查 → 1240300', () => {
+  /**
+   * 为什么统一是 1240300 而不是「GET 404 / DELETE 403」：
+   *
+   * `@taizan/tenant-scope` 对两类操作的处理天然不同——`findUnique` 走
+   * `checkResultOwner` 且 `throwWhenForeign: false`（返回 `null`，看起来像「不存在」），
+   * `update`/`delete` 走 `verifyOwnerThenExecute`（探针发现归属不符，抛 `FOREIGN_RESULT`）。
+   *
+   * `{{DomainPascal}}Service.requireOwned` 主动把读路径也收敛成 1240300：
+   * 不区分「不存在」与「是别人的」**正是安全上想要的**——区分了就等于提供一个
+   * 「这个 id 在不在别人家」的存在性探测器。前端也只需要处理一个码。
+   */
+  const foreign = (): string => {{domainSlug}}B[0] as string
+
+  it('GET 别家的商品 → 1240300', async () => {
+    const res = await request(http())
+      .get(`/api/admin/{{domainSlug}}/${foreign()}`)
+      .set('Authorization', `Bearer ${shopA.token}`)
+    expect(codeOf(res.body)).toBe(1240300)
+  })
+
+  it('PUT 别家的商品 → 1240300，且**没有改到那条记录**', async () => {
+    const before = await prisma.{{domainSlug}}.findUnique({ where: { id: foreign() } })
+    const res = await request(http())
+      .put(`/api/admin/{{domainSlug}}/${foreign()}`)
+      .set('Authorization', `Bearer ${shopA.token}`)
+      .send({ priceCents: 1 })
+    expect(codeOf(res.body)).toBe(1240300)
+
+    const after = await prisma.{{domainSlug}}.findUnique({ where: { id: foreign() } })
+    expect(after?.priceCents).toBe(before?.priceCents)
+  })
+
+  it('DELETE 别家的商品 → 1240300，且**没有软删掉那条记录**', async () => {
+    const res = await request(http())
+      .delete(`/api/admin/{{domainSlug}}/${foreign()}`)
+      .set('Authorization', `Bearer ${shopA.token}`)
+    expect(codeOf(res.body)).toBe(1240300)
+
+    const row = await prisma.{{domainSlug}}.findUnique({ where: { id: foreign() } })
+    expect(row?.deletedAt).toBeNull()
+  })
+
+  it('不存在的 id 也是 1240300（不给存在性探测器）', async () => {
+    const res = await request(http())
+      .get(`/api/admin/{{domainSlug}}/${ulid()}`)
+      .set('Authorization', `Bearer ${shopA.token}`)
+    expect(codeOf(res.body)).toBe(1240300)
+  })
+})
+
+describe('⑦ 请求里携带别家的 tenantId 不改变任何结果', () => {
+  it('query / body / 自定义头里塞 B 的 tenantId，A 仍然只看得见自己的 3 个', async () => {
+    const res = await request(http())
+      .get(`/api/admin/{{domainSlug}}?tenantId=${shopB.tenantId}&tenant_id=${shopB.tenantId}`)
+      .set('Authorization', `Bearer ${shopA.token}`)
+      .set('X-Tenant-Id', shopB.tenantId)
+      .set('X-Tenant-Slug', SHOP_B.slug)
+      .expect(200)
+    const page = expectOk<{ items: { id: string }[]; total: number }>(res.body)
+    expect(page.total).toBe(3)
+    expect(page.items.map((i) => i.id).sort()).toEqual([...{{domainSlug}}A].sort())
+  })
+
+  it('建商品时在 body 里塞 tenantId 也不会落到别家（多余字段被 DTO 丢掉）', async () => {
+    const res = await request(http())
+      .post('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${shopA.token}`)
+      .send({ name: `A-越权尝试-${RUN}`, priceCents: 100, tenantId: shopB.tenantId })
+    const created = expectOk<{ {{domainSlug}}: { id: string } }>(res.body)
+    {{domainSlug}}A.push(created.{{domainSlug}}.id)
+
+    const row = await prisma.{{domainSlug}}.findUnique({ where: { id: created.{{domainSlug}}.id } })
+    expect(row?.tenantId).toBe(shopA.tenantId)
+  })
+
+  it('X-Tenant-Slug 在 /api/admin 下完全不作数（那条前缀只认 token）', async () => {
+    const res = await request(http()).get('/api/admin/{{domainSlug}}').set('X-Tenant-Slug', SHOP_A.slug)
+    // 没 token 就是没登录，不管头里写了哪家店。
+    expect(codeOf(res.body)).toBe(1140100)
+  })
+})
+
+describe('⑧ 无 token / 坏 token 访问 /api/admin → 1140100', () => {
+  /**
+   * 这条就是 T0-8 里 nest-auth 那处修复的验收。
+   *
+   * 修之前：租户中间件跑在守卫**之前**，`/api/admin/*` 没 token 时三条解析策略全不适用，
+   * 中间件失败关闭抛 `1240400`（租户不存在）——前端于是提示「店铺不存在」而不是跳登录页。
+   *
+   * 修之后：`/api/admin` 进 `TENANT_TOKEN_ONLY_PREFIXES`，中间件只跑 token 策略且
+   * 解析不到时留空放行，由 `GlobalAuthGuard` 给出准确的 `1140100`。
+   */
+  it.each([
+    ['无 Authorization 头', undefined],
+    ['伪造的 token', 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJraW5kIjoic3RhZmYifQ.forged'],
+    ['不带 Bearer 前缀', 'some-raw-token'],
+  ])('%s → 1140100', async (_label, authorization) => {
+    const req = request(http()).get('/api/admin/{{domainSlug}}')
+    if (authorization) req.set('Authorization', authorization)
+    const res = await req
+    expect(codeOf(res.body)).toBe(1140100)
+    expect(codeOf(res.body)).not.toBe(1240400)
+  })
+
+  it('/api/client 仍然失败关闭：没线索就是 1240400', async () => {
+    const res = await request(http()).get('/api/client/{{domainSlug}}')
+    // C 端在登录前本来就靠 slug 选店，解析不出来就是真的「这家店不存在」。
+    expect(codeOf(res.body)).toBe(1240400)
+  })
+
+  it('/api/public 免登录免租户，照常 200', async () => {
+    const res = await request(http()).get('/api/public/health-echo').expect(200)
+    const data = expectOk<{ tenantId: string | null; identityKind: string | null }>(res.body)
+    expect(data.tenantId).toBeNull()
+    expect(data.identityKind).toBeNull()
+  })
+})
+
+describe('⑨ C 端会员的隔离', () => {
+  let memberToken = ''
+
+  it('会员在 A 店登录（X-Tenant-Slug 选店）', async () => {
+    const res = await request(http())
+      .post('/api/client/auth/login-dev')
+      .set('X-Tenant-Slug', SHOP_A.slug)
+      .send({ phone: MEMBER_PHONE })
+      .expect(201)
+    const data = expectOk<{ access: string; tenantId: string }>(res.body)
+    expect(data.tenantId).toBe(shopA.tenantId)
+    memberToken = data.access
+  })
+
+  it('会员只看得到 A 店已上架的商品', async () => {
+    const res = await request(http())
+      .get('/api/client/{{domainSlug}}')
+      .set('Authorization', `Bearer ${memberToken}`)
+      .set('X-Tenant-Slug', SHOP_A.slug)
+      .expect(200)
+    const page = expectOk<{ items: { name: string }[] }>(res.body)
+    expect(page.items.length).toBeGreaterThan(0)
+    expect(page.items.every((i) => i.name.startsWith('A-'))).toBe(true)
+  })
+
+  it('把 slug 头换成 B 店也不生效——token 里的租户压过请求头', async () => {
+    const res = await request(http())
+      .get('/api/client/{{domainSlug}}')
+      .set('Authorization', `Bearer ${memberToken}`)
+      .set('X-Tenant-Slug', SHOP_B.slug)
+      .expect(200)
+    const page = expectOk<{ items: { name: string }[] }>(res.body)
+    // TokenTenantResolver 排在解析链首位，它一命中，SlugHeaderResolver 根本不会被调用。
+    expect(page.items.every((i) => i.name.startsWith('A-'))).toBe(true)
+  })
+
+  it('member token 打商家后台 → 1140102', async () => {
+    const res = await request(http())
+      .get('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${memberToken}`)
+    expect(codeOf(res.body)).toBe(1140102)
+  })
+
+  it('staff token 打 C 端 → 1140102', async () => {
+    const res = await request(http())
+      .get('/api/client/{{domainSlug}}')
+      .set('Authorization', `Bearer ${shopA.token}`)
+    expect(codeOf(res.body)).toBe(1140102)
+  })
+})
+
+describe('⑩ 软删：列表不见，但库里那行还在', () => {
+  let victim = ''
+
+  it('DELETE 之后列表少一个', async () => {
+    victim = await create{{DomainPascal}}(shopA, `A-待删-${RUN}`)
+    const before = expectOk<{ total: number }>(
+      (await request(http()).get('/api/admin/{{domainSlug}}').set('Authorization', `Bearer ${shopA.token}`))
+        .body,
+    ).total
+
+    await request(http())
+      .delete(`/api/admin/{{domainSlug}}/${victim}`)
+      .set('Authorization', `Bearer ${shopA.token}`)
+      .expect(200)
+
+    const after = expectOk<{ total: number }>(
+      (await request(http()).get('/api/admin/{{domainSlug}}').set('Authorization', `Bearer ${shopA.token}`))
+        .body,
+    ).total
+    expect(after).toBe(before - 1)
+  })
+
+  it('库里那行还在，deletedAt 非空（软删是软的，不是物理删）', async () => {
+    // 用**未叠加任何扩展**的原始客户端查——`prisma.tenant` 会把软删的过滤掉，
+    // 那样这条断言就永远看不到证据。
+    const row = await prisma.{{domainSlug}}.findUnique({ where: { id: victim } })
+    expect(row, '记录被物理删除了！软删扩展没接上写路径').not.toBeNull()
+    expect(row?.deletedAt).not.toBeNull()
+    expect(row?.tenantId).toBe(shopA.tenantId)
+  })
+
+  it('软删之后可以重新建一个同名商品（唯一索引带 deletedAt 的用处）', async () => {
+    const again = await create{{DomainPascal}}(shopA, `A-待删-${RUN}`)
+    {{domainSlug}}A.push(again)
+    expect(again).not.toBe(victim)
+  })
+})
+
+describe('⑪ 事务内软删：回滚必须把软删一起回滚', () => {
+  /**
+   * ## T0-6 标注的隐患，这条用例专门验它
+   *
+   * 软删扩展**改不了操作名**（Prisma 的 query 扩展没这个能力），所以 `delete` 分支
+   * 不调 `query()`，而是拿「本扩展被 `$extends` 到的那个客户端」重新发一次 `update`
+   * （`defineClientBoundQueryExtension`）。
+   *
+   * 隐患在于那个客户端引用是**在 `$extends` 时捕获的**。如果 Prisma 在
+   * `$transaction()` 里不重新构造扩展（而是复用同一个闭包），那么事务内 `delete`
+   * 改写出来的 `update` 会发到**事务外**的连接上——于是事务回滚了，软删却留下了。
+   * 那是一种最难查的数据不一致：业务逻辑失败了，可商品已经不见了。
+   *
+   * 断言方式：在一个 `$transaction` 里删商品，然后**故意抛错**让事务回滚，
+   * 最后用原始客户端确认那一行的 `deletedAt` 仍然是 `null`。
+   */
+  it('事务里删了商品然后抛错 → 商品未被软删', async () => {
+    const id = await create{{DomainPascal}}(shopA, `A-事务-${RUN}`)
+    {{domainSlug}}A.push(id)
+
+    const {{domainSlug}} = app.get({{DomainPascal}}Service)
+    const boom = new Error('故意抛错，让事务回滚')
+
+    await expect(
+      runWithContext(tenantContext(shopA.tenantId), async () =>
+        {{domainSlug}}.removeInTransaction(id, async () => {
+          throw boom
+        }),
+      ),
+    ).rejects.toThrow('故意抛错')
+
+    const row = await prisma.{{domainSlug}}.findUnique({ where: { id } })
+    expect(
+      row?.deletedAt,
+      '事务回滚了但商品仍然被软删——说明软删改写出来的 update 脱离了事务，' +
+        '需要改 @taizan/nest-prisma 的 createSoftDeleteExtension（用 Prisma.getExtensionContext 拿当前上下文）',
+    ).toBeNull()
+  })
+
+  it('同一条路径不抛错时，事务提交，软删生效（证明上一条不是「压根没删」）', async () => {
+    const id = await create{{DomainPascal}}(shopA, `A-事务提交-${RUN}`)
+
+    const {{domainSlug}} = app.get({{DomainPascal}}Service)
+    await runWithContext(tenantContext(shopA.tenantId), async () =>
+      {{domainSlug}}.removeInTransaction(id, async () => {
+        // 什么都不做，事务正常提交。
+      }),
+    )
+
+    const row = await prisma.{{domainSlug}}.findUnique({ where: { id } })
+    expect(row?.deletedAt).not.toBeNull()
+  })
+})
+
+describe('⑫ @Audit 落 AuditLog，且 tenantId 正确', () => {
+  it('create 与 delete 各留下一条记录，tenantId 是操作者自己的店', async () => {
+    const name = `A-审计-${RUN}`
+    const id = await create{{DomainPascal}}(shopA, name)
+    await request(http())
+      .delete(`/api/admin/{{domainSlug}}/${id}`)
+      .set('Authorization', `Bearer ${shopA.token}`)
+      .expect(200)
+
+    // 审计是**旁路**写入（拦截器在响应返回后才写），给它一点时间落库。
+    await waitFor(async () => (await countAudit(id, '{{domainSlug}}.delete')) > 0)
+
+    const created = await prisma.auditLog.findMany({
+      where: { tenantId: shopA.tenantId, action: '{{domainSlug}}.create' },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    })
+    expect(created.length).toBeGreaterThan(0)
+    expect(created.every((r) => r.tenantId === shopA.tenantId)).toBe(true)
+    expect(created[0]?.actorType).toBe('STAFF')
+    expect(created[0]?.traceId).toBeTruthy()
+
+    const deleted = await prisma.auditLog.findMany({
+      where: { tenantId: shopA.tenantId, action: '{{domainSlug}}.delete', targetId: id },
+    })
+    expect(deleted.length).toBe(1)
+    expect(deleted[0]?.targetType).toBe('{{DomainPascal}}')
+    expect(deleted[0]?.result).toBe('SUCCESS')
+  })
+
+  it('B 店的审计记录里一条 A 店的都没有', async () => {
+    const crossed = await prisma.auditLog.count({
+      where: { tenantId: shopB.tenantId, targetId: { in: {{domainSlug}}A } },
+    })
+    expect(crossed).toBe(0)
+  })
+
+  it('平台建租户写的是 PlatformAuditLog，不是租户域的 AuditLog', async () => {
+    const platform = await prisma.platformAuditLog.findMany({
+      where: { action: 'tenant.create' },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+    })
+    expect(platform.length).toBeGreaterThan(0)
+    expect(platform[0]?.actorType).toBe('PLATFORM_ADMIN')
+  })
+})
+
+describe('⑬ Swagger 在 dev 可访问', () => {
+  it('GET /docs 返回 200', async () => {
+    await request(http()).get('/docs').expect(200)
+  })
+
+  it('OpenAPI JSON 里能看到三个命名空间的路由', async () => {
+    const res = await request(http()).get('/docs-json').expect(200)
+    const paths = Object.keys((res.body as { paths: Record<string, unknown> }).paths)
+    expect(paths).toContain('/api/admin/{{domainSlug}}')
+    expect(paths).toContain('/api/platform/tenants')
+    expect(paths).toContain('/api/client/{{domainSlug}}')
+    expect(paths).toContain('/api/public/health-echo')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 小工具
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function countAudit(targetId: string, action: string): Promise<number> {
+  return prisma.auditLog.count({ where: { targetId, action } })
+}
+
+/** 轮询等待一个条件成立（审计是旁路写入，不保证在响应返回时已经落库）。 */
+async function waitFor(check: () => Promise<boolean>, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (await check()) return
+    if (Date.now() > deadline) throw new Error(`等待超时（${timeoutMs}ms）`)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+}

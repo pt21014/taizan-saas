@@ -1,0 +1,242 @@
+/**
+ * 商家侧的「平台公告」（T1-9，读 + 标记已读）。
+ *
+ * ## 方向：平台 → 商家
+ *
+ * 这一屏读的是平台发布的公告（`Announcement`，`06-ops.prisma`），商家是**读者**。
+ * 与 `modules/platform/announcement/`（平台运营写公告）是同一张表的两侧，
+ * 判定「谁看得见」的规则只在这里实现一次。
+ *
+ * ## 为什么全程 raw
+ *
+ * `Announcement` / `AnnouncementRead` 都是【平台域】表：公告不属于任何单个租户
+ * （`audience = ALL_TENANT` 时它属于所有租户），已读回执要跨租户统计。它们没有
+ * `tenantId` 列，走 `prisma.tenant` 会被隔离扩展当成未登记模型直接抛
+ * `MODEL_NOT_REGISTERED`。
+ *
+ * 隔离由**代码逻辑**保证而不是由 where 保证：可见性判定 {@link isVisibleTo} 是一个
+ * 纯函数，输入是 `(公告, 本店 tenantId, 本店 planCode)`，而后两个都来自 token 与
+ * `PlatformGateway`，不来自请求参数。
+ *
+ * ## 可见性为什么在内存里判，不在 SQL 里判
+ *
+ * `audience = PLAN` / `TENANT_IDS` 时，目标集合存在 `audienceRefs` 这个 **Json 列**里。
+ * MySQL 上按 Json 数组元素过滤要 `array_contains`，而那个写法在 Prisma 的 TS 类型上
+ * 很脆（`Json` 过滤器的类型随版本变），写错了不会报错、只会**静默漏掉**一批公告——
+ * 而漏掉的表现是「平台发了通知，商家说没收到」。
+ *
+ * 所以这里改成：SQL 只负责「已发布 + 在有效期内」这两个能索引的条件（`@@index([status, publishAt])`），
+ * 拉回来之后在内存里按 audience 过滤再分页。代价是要读一批不属于本店的行，
+ * 上限由 {@link CANDIDATE_LIMIT} 卡住。公告是**运营手写**的东西，一个平台一年撑死几百条，
+ * 这个代价可以接受；真到了那个量级，正确的解法是给 `Announcement` 加一张
+ * 展开后的收件人表，而不是把 Json 过滤写进这里。
+ *
+ * @packageDocumentation
+ */
+
+import { Inject, Injectable } from '@nestjs/common'
+import { ErrorCode, normalizePage, ulid, type PageResult } from '@taizan/contracts'
+import type { AuthPrincipal } from '@taizan/nest-auth'
+import { PLATFORM_GATEWAY, type PlatformGateway } from '@taizan/nest-billing'
+import { BizException } from '@taizan/nest-core'
+import { RawPrismaService } from '@taizan/nest-prisma'
+import type { Announcement } from '@prisma/client'
+
+import type { AppPrismaClient } from '../../../common/prisma.types'
+import type { ListAnnouncementQueryDto } from './dto/announcement.dto'
+
+/** 下发给商家的一条公告。 */
+export interface AnnouncementView {
+  id: string
+  title: string
+  contentHtml: string
+  /** `INFO` / `WARNING` / `CRITICAL`，前端据它决定气泡 / 横幅 / 强弹窗。 */
+  level: string
+  audience: string
+  publishAt: string
+  expireAt: string | null
+  /** 当前这个员工读没读过。 */
+  read: boolean
+  /** 读过的时间；没读过是 `null`。 */
+  readAt: string | null
+}
+
+/**
+ * 一次最多把多少条候选公告读进内存。
+ *
+ * 超过这个数说明平台上积压的**在期公告**已经不是「运营手写的几条通知」了，
+ * 那时该给 `Announcement` 加收件人展开表，而不是把这个数字调大。
+ */
+const CANDIDATE_LIMIT = 500
+
+/** 读者身份。商家侧固定是 `STAFF`（`ActorType` 枚举，`05-audit.prisma`）。 */
+const READER_TYPE = 'STAFF'
+
+function toStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : []
+}
+
+/**
+ * 这条公告对「这家店」可不可见。**纯函数**，可以单独推理与测试。
+ *
+ * - `ALL_TENANT`：所有租户；
+ * - `PLAN`：`audienceRefs` 里列了 `Plan.code`，本店当前套餐命中才可见
+ *   （没挂套餐的店 `planCode` 是 `null`，一律不命中）；
+ * - `TENANT_IDS`：`audienceRefs` 里列了 `Tenant.id`；
+ * - `C_END`：给会员看的，商家后台一律不显示。
+ *
+ * 认不出的 audience 值一律**不可见**——失败关闭。放行的方向意味着某天加了一档新受众，
+ * 所有存量商家会先看到本来不该给他们的公告。
+ */
+export function isVisibleTo(
+  announcement: Pick<Announcement, 'audience' | 'audienceRefs'>,
+  tenantId: string,
+  planCode: string | null,
+): boolean {
+  const refs = toStringArray(announcement.audienceRefs)
+  switch (announcement.audience) {
+    case 'ALL_TENANT':
+      return true
+    case 'PLAN':
+      return planCode !== null && refs.includes(planCode)
+    case 'TENANT_IDS':
+      return refs.includes(tenantId)
+    default:
+      return false
+  }
+}
+
+@Injectable()
+export class AdminAnnouncementService {
+  constructor(
+    // raw-reason: 公告是平台域表——`Announcement` / `AnnouncementRead` 没有 tenantId 列
+    // （公告不属于任何单个租户，已读回执要跨租户统计），走 prisma.tenant 会被隔离扩展
+    // 当成未登记模型直接抛。可见性由 isVisibleTo() 这个纯函数按 token 里的 tenantId 判。
+    @Inject(RawPrismaService) private readonly raw: RawPrismaService<AppPrismaClient>,
+    @Inject(PLATFORM_GATEWAY) private readonly gateway: PlatformGateway,
+  ) {}
+
+  /** 本店可见的公告，附本人已读状态。 */
+  async list(
+    principal: AuthPrincipal,
+    query: ListAnnouncementQueryDto,
+  ): Promise<PageResult<AnnouncementView>> {
+    const tenantId = requireTenant(principal)
+    const { page, pageSize } = normalizePage(query)
+    const now = new Date()
+
+    const view = await this.gateway.getTenant(tenantId)
+    const planCode = view?.planCode ?? null
+
+    // raw-reason: 公告是平台域表——只按「已发布 + 在有效期内」筛，这两条走
+    // @@index([status, publishAt])；audience 的判定在内存里做，理由见文件头。
+    const candidates = await this.raw.client.announcement.findMany({
+      where: {
+        status: 'PUBLISHED',
+        publishAt: { lte: now },
+        OR: [{ expireAt: null }, { expireAt: { gt: now } }],
+      },
+      orderBy: [{ publishAt: 'desc' }, { id: 'desc' }],
+      take: CANDIDATE_LIMIT,
+    })
+
+    const visible = candidates.filter((row) => isVisibleTo(row, tenantId, planCode))
+    const readAtOf = await this.readsOf(
+      principal.id,
+      visible.map((row) => row.id),
+    )
+
+    const filtered = query.unreadOnly ? visible.filter((row) => !readAtOf.has(row.id)) : visible
+    const items = filtered
+      .slice((page - 1) * pageSize, page * pageSize)
+      .map((row) => toView(row, readAtOf.get(row.id) ?? null))
+
+    return { items, total: filtered.length, page, pageSize }
+  }
+
+  /**
+   * 标记已读。
+   *
+   * 幂等：`AnnouncementRead` 上有 `@@unique([announcementId, readerType, readerId])`，
+   * 重复调用走 `update` 分支、不动 `readAt`——**第一次读的时间才是有意义的那个**，
+   * 每次点开都刷新它的话，「这条公告发出去 3 天了还有人没看」这种统计就永远是假的。
+   *
+   * @throws `BizException` 1940400 公告不存在 / 不可见 / 已过期
+   */
+  async markRead(principal: AuthPrincipal, announcementId: string): Promise<{ readAt: string }> {
+    const tenantId = requireTenant(principal)
+    const view = await this.gateway.getTenant(tenantId)
+
+    // raw-reason: 公告是平台域表——按 id 取公告，无租户维度。
+    const row = await this.raw.client.announcement.findUnique({ where: { id: announcementId } })
+    // 「不可见」与「不存在」回同一个码：区分开就等于提供一个「平台给别家店发了什么」的
+    // 存在性探测器。同 `{{DomainPascal}}Service.requireOwned` 的取舍。
+    if (!row || row.status !== 'PUBLISHED' || !isVisibleTo(row, tenantId, view?.planCode ?? null)) {
+      throw new BizException(ErrorCode.ANNOUNCEMENT_NOT_FOUND, '公告不存在或已下线')
+    }
+
+    const readAt = new Date()
+    // raw-reason: 公告是平台域表——已读回执 AnnouncementRead 同样没有 tenantId 列。
+    const saved = await this.raw.client.announcementRead.upsert({
+      where: {
+        announcementId_readerType_readerId: {
+          announcementId,
+          readerType: READER_TYPE,
+          readerId: principal.id,
+        },
+      },
+      create: {
+        id: ulid(),
+        announcementId,
+        readerType: READER_TYPE,
+        readerId: principal.id,
+        readAt,
+      },
+      // 已经读过就什么都不改。见方法头。
+      update: {},
+    })
+    return { readAt: saved.readAt.toISOString() }
+  }
+
+  /** 这个人对这批公告的已读时间。 */
+  private async readsOf(
+    readerId: string,
+    announcementIds: readonly string[],
+  ): Promise<Map<string, Date>> {
+    if (announcementIds.length === 0) return new Map()
+    // raw-reason: 公告是平台域表——已读回执按 (readerType, readerId) 查，无租户维度。
+    const rows = await this.raw.client.announcementRead.findMany({
+      where: {
+        readerType: READER_TYPE,
+        readerId,
+        announcementId: { in: [...announcementIds] },
+      },
+      select: { announcementId: true, readAt: true },
+    })
+    return new Map(rows.map((r) => [r.announcementId, r.readAt] as const))
+  }
+}
+
+function toView(row: Announcement, readAt: Date | null): AnnouncementView {
+  return {
+    id: row.id,
+    title: row.title,
+    contentHtml: row.contentHtml,
+    level: row.level,
+    audience: row.audience,
+    publishAt: row.publishAt.toISOString(),
+    expireAt: row.expireAt?.toISOString() ?? null,
+    read: readAt !== null,
+    readAt: readAt?.toISOString() ?? null,
+  }
+}
+
+function requireTenant(principal: AuthPrincipal): string {
+  const tenantId = principal.tenantId
+  if (tenantId === undefined) {
+    throw new BizException(ErrorCode.UNAUTHENTICATED, '登录状态已失效，请重新登录')
+  }
+  return tenantId
+}

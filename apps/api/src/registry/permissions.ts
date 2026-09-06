@@ -1,0 +1,129 @@
+/**
+ * 五张注册表之一：**权限点**（蓝图 §4.4、§7 扩展点③）。
+ *
+ * 权限点「代码即真源」：这里是全应用权限点的汇总，DB 里的 `Permission` 表只是一份
+ * 供后台勾选用的镜像，由同步命令覆盖写（T1-2）。反过来做（DB 为真源）意味着
+ * 「哪个接口需要什么权限」这件事在代码里查不到，review 也看不出来。
+ *
+ * 汇总而不是集中定义：每个业务模块把自己的权限点写在模块目录里（`goods.permissions.ts`），
+ * 这里只把它们拼起来。删掉一个模块 = 删一个目录 + 删这里一行。
+ *
+ * @packageDocumentation
+ */
+
+import {
+  definePermissions,
+  FRAMEWORK_PERMISSION_CODES,
+  type PermissionDef,
+} from '@taizan/contracts'
+import { permissionCodesOf } from '@taizan/rbac-core'
+
+import { ANNOUNCEMENT_PERMISSIONS } from '../modules/admin/announcement/announcement.permissions'
+import { AUDIT_PERMISSIONS } from '../modules/admin/audit/audit.permissions'
+import { PROFILE_PERMISSIONS } from '../modules/admin/profile/profile.permissions'
+import { ROLE_PERMISSIONS } from '../modules/admin/role/role.permissions'
+import { STAFF_PERMISSIONS } from '../modules/admin/staff/staff.permissions'
+import { GOODS_PERMISSIONS } from '../modules/example-goods/goods.permissions'
+import { PLATFORM_PERMISSIONS } from '../modules/platform/platform.permissions'
+
+/**
+ * `/api/admin/billing` 的权限点（T1-9 收口）。
+ *
+ * 定义在这里而不是 `admin/billing/*.permissions.ts`——账单模块是续费白名单模块、
+ * 删不掉（见 `registry/menus.ts` 的说明），与「工作台/账单」两条框架菜单直接写在
+ * 注册表文件而不是各回各的模块目录，是同一个判据。
+ *
+ * 两档而不是一档：「看得到套餐/账单」与「花钱下单/续费」是完全不同量级的授权——
+ * 前者店里任何人都不是秘密，后者是真金白银。拆开之后 `manager` 模板才能只给前者。
+ */
+const BILLING_PERMISSIONS = definePermissions({
+  'billing:view': { module: '账单', name: '查看当前套餐 / 账单 / 配额用量', type: 'API' },
+  'billing:order': { module: '账单', name: '自助下单 / 续费', type: 'API' },
+})
+
+/**
+ * 全应用权限点表。
+ *
+ * 用对象展开而不是 `definePermissions({...GOODS_PERMISSIONS})`：各模块已经在自己那边
+ * 校验过 code 格式了，这里再跑一遍只是重复；而 code 撞名会被下面的断言抓住。
+ */
+export const PERMISSIONS: Readonly<Record<string, PermissionDef>> = Object.freeze({
+  ...GOODS_PERMISSIONS,
+  ...PLATFORM_PERMISSIONS,
+  // ── T1-9 商家侧框架权限点 ────────────────────────────────────────────
+  // 每一批都定义在自己的模块目录里（`modules/admin/<模块>/<模块>.permissions.ts`），
+  // 与业务模块同一套写法——「删掉一个目录 = 删掉一整块能力」对框架页与业务页一视同仁。
+  ...STAFF_PERMISSIONS,
+  ...ROLE_PERMISSIONS,
+  ...AUDIT_PERMISSIONS,
+  ...ANNOUNCEMENT_PERMISSIONS,
+  ...PROFILE_PERMISSIONS,
+  ...BILLING_PERMISSIONS,
+})
+
+/** 全部权限点 code。`expandRoles({ allCodes })` 与通配展开都要它。 */
+export const ALL_PERMISSION_CODES: readonly string[] = permissionCodesOf(PERMISSIONS)
+
+/**
+ * 汇总时撞名检查。
+ *
+ * 两个模块各自定义了同名 code 时，对象展开会**静默**让后写的赢——而两边的
+ * `module` / `name` / `type` 可能完全不同，后台角色配置页会显示成另一个模块的东西。
+ * 所以在模块加载期就炸。
+ */
+function assertNoDuplicateCodes(): void {
+  const sources: Array<readonly [string, Readonly<Record<string, PermissionDef>>]> = [
+    ['example-goods', GOODS_PERMISSIONS],
+    ['platform', PLATFORM_PERMISSIONS],
+    ['admin/staff', STAFF_PERMISSIONS],
+    ['admin/role', ROLE_PERMISSIONS],
+    ['admin/audit', AUDIT_PERMISSIONS],
+    ['admin/announcement', ANNOUNCEMENT_PERMISSIONS],
+    ['admin/profile', PROFILE_PERMISSIONS],
+    ['admin/billing', BILLING_PERMISSIONS],
+  ]
+  const seen = new Map<string, string>()
+  for (const [owner, table] of sources) {
+    for (const code of Object.keys(table)) {
+      const previous = seen.get(code)
+      if (previous !== undefined) {
+        throw new Error(
+          `[@taizan/api] 权限点 "${code}" 被 ${previous} 与 ${owner} 重复定义；` +
+            '同一个 code 只能有一个归属模块。',
+        )
+      }
+      seen.set(code, owner)
+    }
+  }
+}
+
+assertNoDuplicateCodes()
+
+/**
+ * 框架自带权限点 ↔ 本应用注册表，反方向对账。
+ *
+ * `@taizan/contracts` 的 `FRAMEWORK_PERMISSION_CODES` 是「框架自带权限点有哪些」的
+ * 单一真源，`@taizan/prisma-base` 的内置角色模板（`manager` / `staff`）靠它给出
+ * 合理默认（见 `role-presets.ts` 的说明）。这份清单本身不校验任何东西——它只是一份
+ * code 字符串，真正的注册发生在这里（本文件）与各 `*.permissions.ts`。
+ *
+ * 两边一旦脱节：`FRAMEWORK_PERMISSION_CODES` 里有一条这里没注册，`prisma-base` 的
+ * 角色模板会引用一个本应用根本不认识的 code——不是**这个**应用的 spec 6 会红
+ * （那份清单不在它扫描范围内），而是**所有**引用这份契约的下游应用都会在自己的
+ * spec 6 上无声地长出一条从模板继承来的死引用。放在装配期而不是等 spec 6，
+ * 是因为这条错误的根因根本不在「本应用有没有声明权限」，等 spec 6 报出来只会
+ * 让人去查错方向。
+ */
+function assertFrameworkCodesRegistered(): void {
+  const missing = FRAMEWORK_PERMISSION_CODES.filter((code) => !(code in PERMISSIONS))
+  if (missing.length > 0) {
+    throw new Error(
+      '[@taizan/api] `@taizan/contracts` 的 FRAMEWORK_PERMISSION_CODES 里，以下 code ' +
+        `本应用的权限点注册表里没有：${missing.join(', ')}。` +
+        '框架内置角色模板（manager/staff）会引用这些 code，漏注册的后果是模板挂着一个' +
+        '死权限——先在各自的 *.permissions.ts 里补上，再回来看这条断言。',
+    )
+  }
+}
+
+assertFrameworkCodesRegistered()

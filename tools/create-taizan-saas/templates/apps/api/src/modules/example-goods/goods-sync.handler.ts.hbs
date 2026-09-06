@@ -1,0 +1,90 @@
+/**
+ * 蓝图 §7 扩展点⑦ **注册队列任务**：模块内定义处理器，`src/registry/jobs.ts` 汇总。
+ *
+ * ## 这个 handler 故意什么业务都不做
+ *
+ * 它只打一条日志、记一份「最近一次执行」的快照。示例模块要证明的是**接线**这件事：
+ *
+ * 1. `@JobHandler({ name })` 被 `ProcessorFactory` 扫到并起了 worker；
+ * 2. 入队方的 `traceId` 变成了执行时的 `parentTraceId`（链路串得回去）；
+ * 3. 信封里的 `originTenantId` 变成了执行时的租户上下文——**这一条最要紧**：
+ *    漏了它，处理器里用 `prisma.tenant` 会直接抛「无租户上下文」（这算好的），
+ *    万一处理器改用了 `prisma.raw`，那就是跨租户写数据。
+ *
+ * 真实业务处理器在这三件事之上才开始写自己的逻辑。往这里塞真的同步逻辑，
+ * 会让「队列没跑」和「同步逻辑有 bug」两种故障混在一起，示例就不再是示例。
+ *
+ * ## 失败语义
+ *
+ * `JobProcessor` 的契约是「**抛异常 = 这次尝试失败**」。不要在 `process()` 里
+ * `try/catch` 然后吞掉——吞掉就等于告诉队列「成功了」，重试与死信全部失效，
+ * 而失败的任务会安静地消失。
+ *
+ * @packageDocumentation
+ */
+
+import { Inject, Injectable } from '@nestjs/common'
+import { JobHandler, type JobEnvelope, type JobProcessor } from '@taizan/nest-infra'
+import { AppLogger, currentContext } from '@taizan/nest-core'
+
+/** `{{domainSlug}}.sync` 的任务名。入队方与注册表都引用这个常量，不各写一遍字符串。 */
+export const {{DOMAIN_UPPER}}_SYNC_JOB_NAME = '{{domainSlug}}.sync'
+
+/** `{{domainSlug}}.sync` 的消息体。 */
+export interface {{DomainPascal}}SyncPayload {
+  /** 要同步的{{domainName}} id。 */
+  {{domainSlug}}Id: string
+  /** 触发原因，只用于日志（`create` / `update` / `manual`）。 */
+  reason: string
+}
+
+/** 一次执行的快照，见 {@link {{DomainPascal}}SyncHandler.lastRun}。 */
+export interface {{DomainPascal}}SyncRun {
+  {{domainSlug}}Id: string
+  reason: string
+  /** 本次执行自己的 traceId（`runInFreshContext` 新开的）。 */
+  traceId: string | undefined
+  /** 入队方的 traceId。链路靠它串回「用户点了哪个按钮」。 */
+  parentTraceId: string | undefined
+  /** 从信封恢复出来的租户上下文。 */
+  tenantId: string | undefined
+  at: number
+}
+
+@Injectable()
+@JobHandler({ name: {{DOMAIN_UPPER}}_SYNC_JOB_NAME, attempts: 3 })
+export class {{DomainPascal}}SyncHandler implements JobProcessor<{{DomainPascal}}SyncPayload> {
+  /**
+   * 最近一次执行的快照，没跑过时是 `null`。
+   *
+   * 存在的理由是**可观测**：队列执行发生在请求之外，出问题时唯一的线索就是日志，
+   * 而日志在测试里抓起来很别扭。留一个只读快照，e2e 才能断言「handler 真的被执行了、
+   * 而且 traceId 链是对的」，将来 `/health` 也能顺手把它显示出来。
+   *
+   * 是一个可空对象而不是数组/Map：**不累积**，所以它不是进程内状态，
+   * 多实例下也没有「各存各的」的问题（`cluster-safe.spec.ts` 只盯长驻容器）。
+   */
+  lastRun: {{DomainPascal}}SyncRun | null = null
+
+  constructor(@Inject(AppLogger) private readonly logger: AppLogger) {}
+
+  async process(envelope: JobEnvelope<{{DomainPascal}}SyncPayload>): Promise<void> {
+    const ctx = currentContext()
+    const { {{domainSlug}}Id, reason } = envelope.data
+
+    this.lastRun = {
+      {{domainSlug}}Id,
+      reason,
+      traceId: ctx?.traceId,
+      parentTraceId: ctx?.parentTraceId,
+      tenantId: ctx?.tenantId,
+      at: Date.now(),
+    }
+
+    this.logger.log(
+      `已同步{{domainName}} ${ {{domainSlug}}Id}（原因 ${reason}，租户 ${ctx?.tenantId ?? '无'}，` +
+        `入队方 traceId ${ctx?.parentTraceId ?? '无'}）`,
+      '{{DomainPascal}}Sync',
+    )
+  }
+}

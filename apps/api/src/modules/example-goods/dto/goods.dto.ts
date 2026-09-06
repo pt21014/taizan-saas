@@ -1,0 +1,118 @@
+/**
+ * 商品接口的 DTO。
+ *
+ * ## 两层校验，各管一件事
+ *
+ * - **DTO（这里）只挡形状**：类型对不对、必填有没有、字符串长度有没有离谱到该直接 400。
+ * - **业务规则在 `goods.rules.ts`**：价格上限、库存非负、名字归一化——那些是纯函数，
+ *   有 37 条单测，不依赖 HTTP 也不依赖装饰器。
+ *
+ * 分层的理由很实际：DTO 校验依赖 class-validator + 显式 `Validate(Dto)` 管道，
+ * 而规则函数在队列任务、导入脚本、seed 里同样要用。规则只写在 DTO 上，
+ * 那些非 HTTP 入口就完全没有校验。
+ *
+ * `@ApiProperty` 一律**显式写 `type`**：没有 `emitDecoratorMetadata`，Swagger 推断不出来。
+ *
+ * @packageDocumentation
+ */
+
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger'
+import { Type } from 'class-transformer'
+import { IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator'
+
+import { GOODS_STATUSES, type GoodsStatusLike } from '../goods.rules'
+
+/** 新建商品。 */
+export class CreateGoodsDto {
+  @ApiProperty({ type: String, description: '商品名', example: '可乐 330ml' })
+  @IsString({ message: '商品名必须是字符串' })
+  @MaxLength(200, { message: '商品名过长' })
+  name!: string
+
+  @ApiProperty({ type: Number, description: '售价，单位分', example: 350 })
+  // JSON body 里数字本来就是 number；`@Type` 是为了兼容前端把它当字符串传的情况。
+  @Type(() => Number)
+  @IsInt({ message: '价格必须是整数（单位：分）' })
+  @Min(0, { message: '价格不能为负' })
+  priceCents!: number
+
+  @ApiPropertyOptional({ type: Number, description: '库存件数', default: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: '库存必须是整数' })
+  @Min(0, { message: '库存不能为负' })
+  stock?: number
+
+  @ApiPropertyOptional({ enum: GOODS_STATUSES, description: '上下架状态', default: 'DRAFT' })
+  @IsOptional()
+  @IsIn(GOODS_STATUSES as readonly string[], {
+    message: `状态只能是 ${GOODS_STATUSES.join(' / ')}`,
+  })
+  status?: GoodsStatusLike
+}
+
+/** 修改商品：全部可选，只改传了的字段。 */
+export class UpdateGoodsDto {
+  @ApiPropertyOptional({ type: String, description: '商品名' })
+  @IsOptional()
+  @IsString({ message: '商品名必须是字符串' })
+  @MaxLength(200, { message: '商品名过长' })
+  name?: string
+
+  @ApiPropertyOptional({ type: Number, description: '售价，单位分' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: '价格必须是整数（单位：分）' })
+  @Min(0, { message: '价格不能为负' })
+  priceCents?: number
+
+  @ApiPropertyOptional({ type: Number, description: '库存件数' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: '库存必须是整数' })
+  @Min(0, { message: '库存不能为负' })
+  stock?: number
+
+  @ApiPropertyOptional({ enum: GOODS_STATUSES, description: '上下架状态' })
+  @IsOptional()
+  @IsIn(GOODS_STATUSES as readonly string[], {
+    message: `状态只能是 ${GOODS_STATUSES.join(' / ')}`,
+  })
+  status?: GoodsStatusLike
+}
+
+/** 商品列表查询。 */
+export class ListGoodsQueryDto {
+  @ApiPropertyOptional({ type: Number, description: '页码，从 1 开始', default: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: 'page 必须是整数' })
+  @Min(1, { message: 'page 从 1 开始' })
+  page?: number
+
+  @ApiPropertyOptional({ type: Number, description: '每页条数，上限 200', default: 20 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt({ message: 'pageSize 必须是整数' })
+  @Min(1, { message: 'pageSize 至少为 1' })
+  @Max(200, { message: 'pageSize 上限 200' })
+  pageSize?: number
+
+  @ApiPropertyOptional({ enum: GOODS_STATUSES, description: '按状态筛选' })
+  @IsOptional()
+  @IsIn(GOODS_STATUSES as readonly string[], {
+    message: `状态只能是 ${GOODS_STATUSES.join(' / ')}`,
+  })
+  status?: GoodsStatusLike
+}
+
+/** 下发给前端的商品。**刻意不含 `tenantId`**——那是服务端的实现细节，前端不需要也不该看到。 */
+export class GoodsView {
+  @ApiProperty({ type: String }) id!: string
+  @ApiProperty({ type: String }) name!: string
+  @ApiProperty({ type: Number }) priceCents!: number
+  @ApiProperty({ type: Number }) stock!: number
+  @ApiProperty({ enum: GOODS_STATUSES }) status!: GoodsStatusLike
+  @ApiProperty({ type: String, format: 'date-time' }) createdAt!: string
+  @ApiProperty({ type: String, format: 'date-time' }) updatedAt!: string
+}

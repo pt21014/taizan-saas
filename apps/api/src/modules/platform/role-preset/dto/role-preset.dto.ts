@@ -1,0 +1,83 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger'
+import { Type } from 'class-transformer'
+import {
+  IsArray,
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  Max,
+  MaxLength,
+  Min,
+  MinLength,
+} from 'class-validator'
+
+/** `RolePreset.side` 全集，与 `04-rbac.prisma` 的 `MenuSide` 一一对应。 */
+export const ROLE_PRESET_SIDES = ['ADMIN', 'PLATFORM'] as const
+
+/** 新建角色预设。 */
+export class CreateRolePresetDto {
+  @ApiProperty({ type: String, description: 'kebab-case，同一侧内唯一', example: 'cashier' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(60)
+  code!: string
+
+  @ApiProperty({ type: String, description: '展示名' })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(60)
+  name!: string
+
+  @ApiProperty({ enum: ROLE_PRESET_SIDES })
+  @IsIn(ROLE_PRESET_SIDES as readonly string[])
+  side!: (typeof ROLE_PRESET_SIDES)[number]
+
+  @ApiProperty({
+    type: [String],
+    description: '权限点 code 数组，允许通配（"goods:*"、"*"）',
+    example: ['order:list', 'order:write'],
+  })
+  @IsArray()
+  @IsString({ each: true })
+  permissionCodes!: string[]
+}
+
+/** 修改角色预设（builtin 禁止修改）。 */
+export class UpdateRolePresetDto {
+  @ApiPropertyOptional({ type: String })
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(60)
+  name?: string
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  permissionCodes?: string[]
+}
+
+/** 角色预设列表查询。 */
+export class ListRolePresetQueryDto {
+  @ApiPropertyOptional({ type: Number, default: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number
+
+  @ApiPropertyOptional({ type: Number, default: 20 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  pageSize?: number
+
+  @ApiPropertyOptional({ enum: ROLE_PRESET_SIDES })
+  @IsOptional()
+  @IsIn(ROLE_PRESET_SIDES as readonly string[])
+  side?: (typeof ROLE_PRESET_SIDES)[number]
+}

@@ -1,0 +1,71 @@
+{
+  "name": "@taizan/nest-infra",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "description": "集群安全的基础设施层：Redis 薄封装、分布式锁（Lua 释放 + watchdog 续期）、@LeaderCron（多实例只跑一个）、BullMQ 队列与死信重放、幂等、租户前缀缓存、事务发件箱。根治「4 实例并发跑 cron」。",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js",
+      "require": "./dist/testing/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run && node scripts/check-dist-identity.mjs",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@taizan/contracts": "workspace:*",
+    "@taizan/nest-core": "workspace:*",
+    "@taizan/nest-prisma": "workspace:*",
+    "cron-parser": "^5.4.0",
+    "zod": "^3.24.1"
+  },
+  "peerDependencies": {
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "bullmq": "^5.34.6",
+    "ioredis": "^5.4.1",
+    "reflect-metadata": "^0.2.2",
+    "@nestjs/testing": "^11.0.0"
+  },
+  "devDependencies": {
+    "@nestjs/common": "^11.0.1",
+    "@nestjs/core": "^11.0.1",
+    "@nestjs/testing": "^11.0.1",
+    "@taizan/eslint-config": "workspace:*",
+    "@taizan/tsconfig": "workspace:*",
+    "@types/node": "^22.10.2",
+    "bullmq": "^5.34.6",
+    "eslint": "^9.17.0",
+    "ioredis": "^5.4.1",
+    "ioredis-mock": "^8.9.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@nestjs/testing": {
+      "optional": true
+    }
+  }
+}

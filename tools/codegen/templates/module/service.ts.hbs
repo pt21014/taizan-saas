@@ -1,0 +1,236 @@
+/**
+ * `{{Pascal}}` 的数据层。
+ *
+ * ## 三条不可协商的写法
+ *
+ * 1. **一律走 `prisma.tenant.*`**，绝不写 `tenantId:` 过滤条件。租户条件由
+ *    `@taizan/nest-prisma` 的隔离扩展用 `AND` 包裹注入，调用方覆盖不掉。
+ *    手写一遍的后果不是「多写一行」，是「某天有人漏写而测试全绿」。
+ * 2. **不属于本店 = 1240300（不存在）**，不是 403。回 403 等于告诉对方
+ *    「这个 id 存在，只是不属于你」——那本身就是一次跨租户信息泄漏。
+ * 3. **`id` 与 `tenantId` 都不手写**：ULID 由扩展生成，租户由上下文注入。
+ *    `autoTenantData<T>()` 只是类型标注，让「手写 tenantId」变成编译错误。
+ *
+ * @packageDocumentation
+ */
+
+import { Inject, Injectable } from '@nestjs/common'
+import { ErrorCode, normalizePage, type PageResult } from '@taizan/contracts'
+import { BizException, currentContext } from '@taizan/nest-core'
+import { QueueService } from '@taizan/nest-infra'
+import { PrismaService } from '@taizan/nest-prisma'
+import { mergeScopeWhere } from '@taizan/rbac-core'
+import type { {{Pascal}}, Prisma } from '@prisma/client'
+
+import { autoTenantData } from '../../common/prisma.types'
+import type { AppPrismaService } from '../../common/prisma.types'
+import { {{CONST}}_SYNC_JOB_NAME, type {{Pascal}}SyncPayload } from './{{slug}}-sync.handler'
+import type { Create{{Pascal}}Dto, List{{Pascal}}QueryDto, Update{{Pascal}}Dto, {{Pascal}}View } from './dto/{{slug}}.dto'
+import {
+  normalize{{Pascal}}Name,
+  validate{{Pascal}}Input,
+  validate{{Pascal}}Patch,
+  warnActiveWithoutPrice,
+  type {{Pascal}}StatusLike,
+  type RuleViolation,
+} from './{{slug}}.rules'
+
+/** 写操作成功时一并回给前端的「不阻塞的提示」。 */
+export interface {{Pascal}}MutationResult {
+  {{camel}}: {{Pascal}}View
+  /** 例如「已启用但金额为 0」。没有提示时是 `null`。 */
+  warning: string | null
+}
+
+function toView(row: {{Pascal}}): {{Pascal}}View {
+  return {
+    id: row.id,
+    name: row.name,
+    priceCents: row.priceCents,
+    status: row.status as {{Pascal}}StatusLike,
+    remark: row.remark,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  }
+}
+
+function rejectViolations(violations: readonly RuleViolation[]): void {
+  if (violations.length === 0) return
+  throw new BizException(ErrorCode.BAD_REQUEST, violations.map((v) => v.message).join('；'), {
+    violations,
+  })
+}
+
+@Injectable()
+export class {{Pascal}}Service {
+  constructor(
+    @Inject(PrismaService) private readonly prisma: AppPrismaService,
+    @Inject(QueueService) private readonly queue: QueueService,
+  ) {}
+
+  /**
+   * 分页列表。软删的行由软删扩展自动过滤，这里不写 `deletedAt`。
+   *
+   * @param scope - `DataScopeInterceptor` 算好的数据范围片段。
+   *   **`null` 与 `{}` 不是一回事**：`null` = 不加条件（`ALL` 范围），
+   *   `{}` = 一个空对象条件。所以必须走 `mergeScopeWhere`，不能用对象展开。
+   */
+  async list(
+    query: List{{Pascal}}QueryDto,
+    scope: Record<string, unknown> | null = null,
+  ): Promise<PageResult<{{Pascal}}View>> {
+    const { page, pageSize } = normalizePage(query)
+    const where = mergeScopeWhere(query.status ? { status: query.status } : {}, scope)
+
+    const [rows, total] = await Promise.all([
+      this.prisma.tenant.{{camel}}.findMany({
+        where,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.prisma.tenant.{{camel}}.count({ where }),
+    ])
+
+    return { items: rows.map(toView), total, page, pageSize }
+  }
+
+  /**
+   * 导出：不分页，但**同样受数据范围约束**。
+   *
+   * 「导出」最容易漏掉数据范围——列表加了收窄、导出忘了加，于是一个只能看自己那几条的
+   * 员工点一下导出就拿到了全店数据。所以它和 `list` 用同一个 `scope` 入参。
+   */
+  async exportAll(scope: Record<string, unknown> | null = null): Promise<{{Pascal}}View[]> {
+    const rows = await this.prisma.tenant.{{camel}}.findMany({
+      where: mergeScopeWhere({}, scope),
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    })
+    return rows.map(toView)
+  }
+
+  /** 取一条。不属于本店（或不存在）→ 1240300，理由见文件头。 */
+  async get(id: string): Promise<{{Pascal}}View> {
+    return toView(await this.requireOwned(id))
+  }
+
+  /** 新建。 */
+  async create(dto: Create{{Pascal}}Dto): Promise<{{Pascal}}MutationResult> {
+    // 校验的是**生效之后**的输入，不是原始 DTO：可选字段的默认值只能有一处真源，
+    // 就是下面这两个 `??`。把 `undefined` 喂给规则函数会被判成「必填没填」。
+    const effective = { ...dto, priceCents: dto.priceCents ?? 0, status: dto.status ?? 'DRAFT' }
+    rejectViolations(validate{{Pascal}}Input(effective))
+    const name = normalize{{Pascal}}Name(dto.name)
+    await this.assertNameAvailable(name)
+
+    const row = await this.prisma.tenant.{{camel}}.create({
+      // `autoTenantData` 只是类型标注：`id`（ULID）与 `tenantId` 由扩展在运行时填。
+      // 在这里手写 tenantId 会直接编译不过——这是那条约定的编译期形态。
+      data: autoTenantData<Prisma.{{Pascal}}CreateInput>({
+        name,
+        priceCents: effective.priceCents,
+        status: effective.status,
+        remark: dto.remark ?? null,
+        // 数据范围的归属列。取自请求上下文而不是入参：让调用方传 `createdBy`
+        // 等于让它可以伪造成别人建的，那样 `SELF` 范围就形同虚设。
+        createdBy: currentContext()?.identity?.id ?? null,
+      }),
+    })
+
+    // 入队在**写库成功之后**：事务里入队的话，事务回滚了消息还在，
+    // worker 会去同步一条不存在的记录。
+    await this.enqueueSync(row.id, 'create')
+
+    return { {{camel}}: toView(row), warning: warnActiveWithoutPrice(effective) }
+  }
+
+  /** 修改。 */
+  async update(id: string, dto: Update{{Pascal}}Dto): Promise<{{Pascal}}MutationResult> {
+    const current = await this.requireOwned(id)
+    rejectViolations(validate{{Pascal}}Patch(dto))
+
+    const name = dto.name === undefined ? undefined : normalize{{Pascal}}Name(dto.name)
+    if (name !== undefined && name !== current.name) await this.assertNameAvailable(name, id)
+
+    const row = await this.prisma.tenant.{{camel}}.update({
+      where: { id },
+      data: {
+        ...(name === undefined ? {} : { name }),
+        ...(dto.priceCents === undefined ? {} : { priceCents: dto.priceCents }),
+        ...(dto.status === undefined ? {} : { status: dto.status }),
+        ...(dto.remark === undefined ? {} : { remark: dto.remark }),
+      },
+    })
+
+    await this.enqueueSync(row.id, 'update')
+
+    return {
+      {{camel}}: toView(row),
+      warning: warnActiveWithoutPrice({
+        status: dto.status ?? current.status,
+        priceCents: dto.priceCents ?? current.priceCents,
+      }),
+    }
+  }
+
+  /** 软删。`delete` 被软删扩展改写成写 `deletedAt`，这里不手写。 */
+  async remove(id: string): Promise<void> {
+    await this.requireOwned(id)
+    await this.prisma.tenant.{{camel}}.delete({ where: { id } })
+  }
+
+  /**
+   * 取一条并确认属于本店。
+   *
+   * 走 `prisma.tenant`（租户句柄）而不是 `findUnique({ where: { id } })` 的裸查询：
+   * 隔离扩展会把租户条件 AND 进去，所以「别家店的 id」在这里表现为查不到。
+   */
+  private async requireOwned(id: string): Promise<{{Pascal}}> {
+    const row = await this.prisma.tenant.{{camel}}.findFirst({ where: { id } })
+    // 1240300（CROSS_TENANT_FORBIDDEN）而不是 404：错误码要能把「跨租户」这件事
+    // 单独统计出来，而**给外部看到的语义仍然是「不存在」**——文案里不区分
+    // 「没这条」与「不是你的」，否则回答本身就泄漏了别家店有没有这个 id。
+    if (!row) {
+      throw new BizException(ErrorCode.CROSS_TENANT_FORBIDDEN, '{{name}}不存在，或不属于当前店铺')
+    }
+    return row
+  }
+
+  /**
+   * 活跃行重名检查。
+   *
+   * 为什么应用层还要查一遍：`@@unique([tenantId, name, deletedAt])` 在 MySQL 里对
+   * **活跃行**（`deletedAt IS NULL`）不构成硬唯一——NULL 之间互不相等。
+   * 唯一索引只挡「同名 + 同一删除时刻」，活跃唯一性只能这样兜。
+   *
+   * 代价是有并发窗口：两个请求同时通过检查，两条同名活跃行都能落库。
+   * 这在后台管理场景可以接受（同一个人不会同时点两次「保存」）；
+   * 要真正杜绝，得给活跃行加一个生成列做唯一索引，那是 schema 层的事。
+   */
+  private async assertNameAvailable(name: string, excludeId?: string): Promise<void> {
+    const existing = await this.prisma.tenant.{{camel}}.findFirst({
+      where: { name },
+      select: { id: true },
+    })
+    if (existing && existing.id !== excludeId) {
+      throw new BizException(ErrorCode.BAD_REQUEST, '已存在同名{{name}}：' + name)
+    }
+  }
+
+  /**
+   * 入队一条同步任务（扩展点⑦的调用侧）。
+   *
+   * `tenantId` **必须显式传**——`QueueService.add` 刻意不从上下文自动取，
+   * 因为「忘了传」和「这就是个平台级任务」必须区分得开。不传的后果是 worker 里
+   * 没有租户上下文，处理器一用 `prisma.tenant` 就抛。
+   *
+   * 入队失败不让整个写操作失败：记录已经建好了，因为一条同步消息没发出去就回 500，
+   * 前端会重试，于是又多一条同名记录。这里只吞掉异常，留给 `QueueService` 自己的日志。
+   */
+  private async enqueueSync(id: string, reason: string): Promise<void> {
+    const tenantId = currentContext()?.tenantId
+    if (tenantId === undefined) return
+    const payload: {{Pascal}}SyncPayload = { {{camel}}Id: id, reason }
+    await this.queue.add({{CONST}}_SYNC_JOB_NAME, payload, { tenantId }).catch(() => undefined)
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "name": "@taizan/client-core",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "description": "Taro 四端（H5 + 微信小程序，App 侧另见 @taizan/app-ui）C 端基座：复用 @taizan/contracts 的 createEnvelopeClient 写一份 ≤40 行的 Taro.request 传输适配、tenantSlug 解析（H5 路径/子域名，小程序启动参数）、member 登录态、pay/share/login/media 四个跨端适配、打烊页与店铺不可用页的路由常量。",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@tarojs/taro": "^4.0.9",
+    "react": "^18.0.0"
+  },
+  "dependencies": {
+    "@taizan/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@tarojs/taro": "~4.0.9",
+    "@taizan/eslint-config": "workspace:*",
+    "@taizan/tsconfig": "workspace:*",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.18",
+    "eslint": "^9.17.0",
+    "react": "^18.3.1",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

@@ -1,0 +1,39 @@
+/**
+ * 与 `apps/api` 对应接口的响应形状手动对齐（详见各接口文件头注释里的路径）。
+ * `BootstrapResponse` 直接从 `@taizan/contracts` 取（协议包本来就导出它），
+ * 这里只补协议包没有的、admin-auth 私有的登录响应形状。
+ */
+
+/** `POST /api/admin/auth/{login,switch}` 的响应（`admin-auth.service.ts` 的 `AdminLoginResult`）。 */
+export type AdminLoginResult =
+  | {
+      needChooseShop: false
+      access: string
+      refresh: string
+      expiresIn: number
+      staffId: string
+      tenantId: string
+      shops: ShopChoice[]
+    }
+  | {
+      needChooseShop: true
+      shops: ShopChoice[]
+    }
+
+export interface ShopChoice {
+  tenantId: string
+  name: string
+  slug: string
+  isOwner: boolean
+}
+
+/** `/api/admin/{{domainSlug}}` 单条（`apps/api/src/modules/example-{{domainSlug}}/dto/{{domainSlug}}.dto.ts`）。 */
+export interface {{DomainPascal}}View {
+  id: string
+  name: string
+  priceCents: number
+  stock: number
+  status: 'DRAFT' | 'ON_SHELF' | 'OFF_SHELF'
+  createdAt: string
+  updatedAt: string
+}

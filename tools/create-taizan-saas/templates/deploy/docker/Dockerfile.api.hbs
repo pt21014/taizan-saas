@@ -1,0 +1,153 @@
+# syntax=docker/dockerfile:1.7
+# ─────────────────────────────────────────────────────────────────────────────
+# {{scope}}/api 的生产镜像。四段：pruner → deps → builder → deploy-prep → runtime。
+#
+# 为什么不是「装全仓依赖再 COPY dist」这么简单：这是一个 turborepo，
+# {{scope}}/api 依赖十几个 workspace 包（nest-core / nest-auth / prisma-base / …），
+# 如果直接把整个仓库塞进镜像，devDependencies、其余 app（admin/platform/site/client/
+# app-*）、每个包的 src 与测试全部会被一起打进去——镜像大且每次改一行 admin 代码
+# 都会让 api 镜像的依赖层缓存失效。
+#
+# 用 `turbo prune {{scope}}/api --docker` 先把「api 及其依赖闭包」从整仓里摘出来，
+# 摘出来的东西分两半：
+#   out/json/  只有 package.json（+ 裁剪过的 lockfile）—— 用来跑 install，
+#              这一层只在依赖关系变化时失效，改业务代码不会打脏它。
+#   out/full/  上面那些包的完整源码 —— 用来跑 build。
+# 这是官方文档给 pnpm + turborepo 的标准 Docker 配方，不是本仓自己发明的。
+#
+# ## 为什么最后还要一步 `pnpm deploy`，而不是手动 COPY node_modules
+#
+# 踩过的坑：pnpm 是 isolated node_modules（`.npmrc` 里 `shamefully-hoist=false`），
+# `apps/api` 自己的直接依赖（`@nestjs/common`、`@taizan/nest-core`……）不在仓库根
+# `node_modules/` 下，而是 `apps/api/node_modules/<pkg>` 里的**符号链接**，
+# 分别指向仓库根 `node_modules/.pnpm/<pkg>@<hash>/...`（普通 npm 依赖）或者
+# `packages/<pkg>`（workspace 内部依赖，直接链到源码目录）。这些链接的目标是
+# **绝对路径**、而且以这一次构建所在的 `/repo` 为基准——如果只手动 `COPY` 根
+# `node_modules` 到运行时镜像的 `/app` 目录，会漏掉 `apps/api/node_modules` 这一整层
+# 直接依赖，镜像能 build 成功（COPY 只检查路径存在），但一 `docker run` 就在
+# `require('@nestjs/common')` 这类语句上直接 `MODULE_NOT_FOUND`——这个坑非常隐蔽，
+# 因为它只在真正跑起来那一刻才暴露，`docker build` 阶段完全看不出来。
+#
+# `pnpm --filter={{scope}}/api deploy --prod --legacy <dir>` 是 pnpm 官方给「拿一个
+# workspace 包单独部署」这个场景准备的命令：把这个包和它全部依赖（含 workspace
+# 内部依赖）**真实复制**（不是符号链接）成一份自包含目录，可以整份搬到任何地方
+# 独立运行。用它换掉手写的 COPY 组合，一次性解决符号链接失效的问题。
+#
+# 构建：
+#   docker build -f deploy/docker/Dockerfile.api -t {{projectName}}-api:local .
+#   docker run --rm {{projectName}}-api:local node -e "console.log('ok')"   # 只验证镜像能跑 node，不需要数据库
+#   docker run --rm -e DATABASE_URL=... -e REDIS_URL=... -e JWT_SECRET_PLATFORM=... \
+#     -e JWT_SECRET_STAFF=... -e JWT_SECRET_MEMBER=... -e CRYPTO_KEYS=... -e CRYPTO_KEY_CURRENT=... \
+#     -p {{apiPort}}:{{apiPort}} {{projectName}}-api:local     # 真正启动，完整 env 清单见 apps/api/.env.example
+# ─────────────────────────────────────────────────────────────────────────────
+
+ARG NODE_VERSION=22-alpine
+ARG PNPM_VERSION=11.1.2
+# prisma generate 只要求 DATABASE_URL **存在**（schema 里 `url = env("DATABASE_URL")`），
+# 不需要真的连得上——构建阶段没有数据库，这里给一个占位值即可，运行时会被真实值覆盖。
+ARG BUILD_DATABASE_URL=mysql://build:build@build-placeholder:3306/build
+
+# ── 阶段 1：pruner ───────────────────────────────────────────────────────────
+# 只需要 turbo 这一个全局 CLI，不需要装整仓依赖，所以单独一层、用 npm 装（比 corepack
+# 走 pnpm 快，而且这一层只产出静态文件，不影响运行时）。
+FROM node:${NODE_VERSION} AS pruner
+WORKDIR /repo
+RUN npm install -g turbo@2.10.12
+# .dockerignore 已经把 node_modules / dist / .git 挡在外面，这里可以直接 COPY .
+COPY . .
+RUN turbo prune {{scope}}/api --docker
+
+# 仓库根 pnpm-workspace.yaml 的 allowBuilds 里，`msgpackr-extract` 那一行是一句
+# 没填完的占位（`msgpackr-extract: set this to true or false`，字面量字符串不是
+# 布尔值）。日常在完整仓库里跑 `pnpm install` 时 node_modules 已经装好、直接短路成
+# "Already up to date"，不会触发这一行；但 Docker 里每次都是**全新安装**，
+# pnpm 11 对没有明确 allow/deny 的构建脚本会直接把 install 判失败
+# （`ERR_PNPM_IGNORED_BUILDS`）。这不是这份 Dockerfile 引入的问题，是仓库那一行
+# 本来就没写完；根配置不在本任务改动范围内，这里只改 pruner 产出的**两份临时副本**
+# （out/json 给 deps 阶段用，out/full 给 builder 阶段用），不动仓库里的原文件。
+RUN sed -i 's/^\(\s*msgpackr-extract:\).*/\1 true/' out/json/pnpm-workspace.yaml out/full/pnpm-workspace.yaml
+
+# ── 阶段 2：deps —— 只按裁剪后的 package.json 装依赖 ─────────────────────────
+FROM node:${NODE_VERSION} AS deps
+ARG PNPM_VERSION
+RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+WORKDIR /repo
+COPY --from=pruner /repo/out/json/ .
+COPY --from=pruner /repo/out/pnpm-lock.yaml ./pnpm-lock.yaml
+# --frozen-lockfile：镜像构建绝不允许「顺手」改动依赖树；lockfile 对不上就该在这里炸，
+# 而不是让线上装出一份和本地/CI 不一样的 node_modules。
+# `--mount=type=cache` 把 pnpm 的内容寻址 store 缓存到 BuildKit 缓存卷里，跨镜像、
+# 跨这台机器上历次构建复用——即使这一层因为业务代码变化重新跑，包也大多命中缓存，
+# 不用每次都从 registry 重新下载（实测这台机器到 npmjs.org 的连接会话不稳定，
+# 增大重试次数 + 复用缓存后构建才稳定得下来）。
+RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
+    pnpm config set fetch-retries 5 && \
+    pnpm config set fetch-retry-mintimeout 20000 && \
+    pnpm config set fetch-retry-maxtimeout 180000 && \
+    pnpm install --frozen-lockfile
+
+# ── 阶段 3：builder —— 生成 Prisma Client + 编译全部 workspace 依赖 + api ────
+FROM deps AS builder
+ARG BUILD_DATABASE_URL
+ENV DATABASE_URL=${BUILD_DATABASE_URL}
+COPY --from=pruner /repo/out/full/ .
+COPY --from=pruner /repo/turbo.json ./turbo.json
+# @prisma/client 是「外置」依赖（见 apps/api/tsup.config.ts 的注释：它按路径找
+# .prisma/client 生成产物，打进 bundle 里会找不到），下游几个包（nest-prisma /
+# prisma-base）的类型声明也要靠它才能编译，所以必须在 build 之前生成好。
+# 这一份生成产物只服务于**这一阶段的编译**，不直接进最终镜像——下面 deploy-prep
+# 阶段会在一份全新复制出来的 node_modules 里重新 generate 一次，见那里的注释。
+RUN pnpm --filter={{scope}}/api exec prisma generate
+# `...` 是 turbo 的依赖闭包语法：先按 dependsOn:["^build"] 编译完 nest-core / nest-auth /
+# prisma-base 等全部上游包，最后才编译 {{scope}}/api 自己。
+RUN pnpm turbo run build --filter={{scope}}/api...
+
+# ── 阶段 4：deploy-prep —— 把 api 及其依赖拍平成一份自包含目录 ────────────────
+FROM builder AS deploy-prep
+ARG BUILD_DATABASE_URL
+# `--legacy`：pnpm 10 起默认要求 workspace 开 `inject-workspace-packages` 才让用
+# `deploy`；开那个选项意味着日常 `pnpm install` 也会把 workspace 内部依赖从符号
+# 链接换成硬拷贝，影响面是全仓开发体验，不该为了 Docker 这一个使用场景去动它。
+# `--legacy` 是官方保留的另一条路：仍然产出「真实复制、非符号链接」的自包含目录，
+# 只是实现方式退回到 pnpm 9 之前那一版，效果对我们来说完全够用。
+# `--prod`：不带 tsup/vitest/eslint 这些 devDependencies。
+RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
+    pnpm --filter={{scope}}/api deploy --prod --legacy /deployed
+
+# `pnpm deploy` 是从内容寻址 store 里**重新复制一份干净的** `@prisma/client`
+# （不含上一阶段已经 generate 过的引擎代码），所以这份自包含目录里目前还没有
+# `.prisma/client`，必须在这里重新 generate 一次。
+#
+# `prisma.config.ts` 依赖的 `prisma/config` 是 devDependency，`--prod` 部署出来的
+# 目录里没有它，留着这个文件反而会让 CLI 尝试加载配置文件时报错，所以直接删掉——
+# 用 `--schema` 参数直接指定 schema 目录，不依赖配置文件这条路径也一样能 generate。
+# CLI 本身找 `deploy-prep`（也就是 `builder`）阶段已经装好的那一份来跑，
+# 用 `require.resolve` 现场解析路径而不是硬编码版本号目录，避免升级 prisma 版本后
+# 这一行悄悄失效。
+RUN rm -f /deployed/prisma.config.ts && \
+    PRISMA_CLI=$(node -e "console.log(require.resolve('prisma/build/index.js',{paths:['/repo/apps/api']}))") && \
+    cd /deployed && DATABASE_URL=${BUILD_DATABASE_URL} node "$PRISMA_CLI" generate --schema=./prisma/schema
+
+# ── 阶段 5：runtime —— 只含 deploy-prep 拍平出来的那份自包含目录 ─────────────
+FROM node:${NODE_VERSION} AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+# 非 root 运行；alpine 基础镜像自带 node:node（uid/gid 1000）。
+RUN mkdir -p /app/logs && chown -R node:node /app
+USER node
+
+# `pnpm deploy` 默认按「打包发布」的规则决定拷哪些文件（类似 `npm pack`），
+# `src/`、`test/`、`README.md` 这些也会跟着进来——不影响运行（`main.js` 已经是
+# 编译产物，不会去 `require` 源码目录），只是让镜像多几百 KB，可以接受，
+# 换来的是不用在这里手写一份「哪些文件该拷」的清单、跟 pnpm 的规则对不齐。
+COPY --from=deploy-prep --chown=node:node /deployed/. .
+
+EXPOSE {{apiPort}}
+
+# /health 是 `@RawResponse()` 的裸 JSON，任一依赖 down 返回 503（见蓝图 §4.11）。
+# 用 Node 自带的 http 模块探测而不是装 curl/wget——runtime 镜像故意不装额外二进制，
+# 减小攻击面也减小体积。
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.API_PORT||{{apiPort}})+'/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+
+CMD ["node", "dist/main.js"]

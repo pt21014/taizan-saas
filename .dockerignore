@@ -1,0 +1,21 @@
+# 供 `deploy/docker/Dockerfile.{api,web}` 构建用。构建上下文是仓库根（`docker build -f
+# deploy/docker/Dockerfile.api .`），Dockerfile 里的 `pruner` 阶段要 `COPY . .` 再跑
+# `turbo prune`——如果不挡住 node_modules，会把每个 workspace 包的 node_modules（pnpm
+# 的内容寻址 store 硬链接）整份塞进构建上下文，慢且体积巨大，`turbo prune` 也用不上它们
+# （它只要 package.json + 源码，依赖由 Dockerfile 自己重新 `pnpm install`）。
+#
+# 这是本仓唯一为 Docker 构建新增的根级文件；其余部署产物都在 deploy/ 内。
+node_modules
+**/node_modules
+dist
+**/dist
+.turbo
+**/.turbo
+coverage
+**/coverage
+.git
+.env
+.env.*
+!.env.example
+*.log
+out

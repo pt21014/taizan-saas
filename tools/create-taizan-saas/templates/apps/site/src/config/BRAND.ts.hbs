@@ -1,0 +1,51 @@
+/**
+ * 品牌位单一真源（蓝图 §6「生成器模板变量」）。
+ *
+ * 本仓库是**参考应用**，不是生成器模板本身——`create-taizan-saas` 后续会把这里的取值
+ * 换成 `\{{productName}}`/`\{{domainName}}` 之类的 `.hbs` 占位符。集中放在这一个文件里，
+ * 是为了让那一步「找出所有品牌位」变成「替换这一个文件」，而不是满仓库 grep 字符串。
+ *
+ * 改品牌只改这一份：页脚、`<title>`、注册成功页的「去商家后台登录」按钮、
+ * 服务条款/隐私政策落款，全部从这里取，不允许任何页面自己再写一遍店名或电话。
+ */
+export interface Brand {
+  /** 产品全称。`<title>`、首页大标题、页脚用它。 */
+  productName: string
+  /** 简称，导航栏 logo 文字用它（比全称短，窄屏不换行）。 */
+  shortName: string
+  /** 一句话slogan。 */
+  slogan: string
+  /** 运营主体全称，服务条款/隐私政策落款、页脚版权行用它。 */
+  companyName: string
+  /**
+   * 商家后台地址。**必须是绝对 URL**（`apps/admin` 是与官网分开部署的另一个应用/子域名），
+   * 注册成功页「去商家后台登录」按钮的 `href` 从这里取。
+   *
+   * 本地联调默认指向 `apps/admin` 的 dev server（{{adminPort}}）；生产部署时用
+   * `VITE_ADMIN_URL` 覆盖（见 `.env.example` 与 README「与后端同域部署」一节）。
+   */
+  adminUrl: string
+  /** ICP 备案号；没备案完成前留空字符串，页脚会自动不渲染这一行而不是显示"undefined"。 */
+  icpNumber: string
+  /** ICP 备案查询链接，固定用工信部备案系统，不需要按项目改。 */
+  icpLink: string
+  /** 客服/合作咨询电话，页脚与「关于」页用它。 */
+  contactPhone: string
+  /** 客服邮箱。 */
+  contactEmail: string
+}
+
+export const BRAND: Brand = {
+  productName: '{{productName}}',
+  shortName: '{{productName}}',
+  slogan: '开店只填四项，试用当场生效',
+  companyName: '{{productName}}科技有限公司',
+  adminUrl: (import.meta.env.VITE_ADMIN_URL as string | undefined) || 'http://localhost:{{adminPort}}',
+  icpNumber: (import.meta.env.VITE_ICP_NUMBER as string | undefined) || '京ICP备00000000号-1',
+  icpLink: 'https://beian.miit.gov.cn',
+  contactPhone: '400-000-0000',
+  contactEmail: 'contact@{{rootDomain}}',
+}
+
+/** 拨号用的手机号形式（`tel:` 里不能带横杠以外的字符）。 */
+export const CONTACT_PHONE_PLAIN = BRAND.contactPhone.replace(/[^\d+]/g, '')

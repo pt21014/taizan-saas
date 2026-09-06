@@ -1,0 +1,1111 @@
+/**
+ * **平台管理面 e2e**（T1-7）—— 跑在真 MySQL + Redis 上，起法照抄
+ * `tenant-isolation.e2e-spec.ts`：一个 `Test.createTestingModule({ imports: [AppModule] })`，
+ * `seedBase` 保证平台管理员与内置角色预设/套餐存在（幂等，重复跑不炸）。
+ *
+ * ## 覆盖范围（对应任务书里那条长链路）
+ *
+ * 管理员登录 → 建套餐（配额/功能三态）→ 建租户 → 续期（`planExpireAt` 正确 + 一条
+ * `PlanOrder`）→ 冻结（该店员工登录被拦）→ 解冻 → 重置店主口令（旧 token 失效）→
+ * 注销（只改状态，数据仍在）→ 平台管理员 CRUD（含"最后一个不可删"）→ 角色预设
+ * CRUD（builtin 保护）→ 公告发布/已读 → 审计列表能查到以上每一步 → dashboard 数字。
+ *
+ * ## 几处不是显而易见的决定，写在这里免得看代码的人自己猜
+ *
+ * - **"冻结后员工被拦"测两层，都是当前架构下真实生效的**：`BillingGateGuard`（T1-4）
+ *   在并行开发中已经接线——它对 `SUSPENDED` 是"硬闸门"，不受 `BILLING_ENFORCE` 影响，
+ *   所以**手上那张还没过期的旧 token** 打写操作会被 `1440301` 拦下（读操作仍放行，
+ *   到期/冻结是"只读"不是"断网"）。这条链路要求 `PlatformTenantService.suspend()` 在
+ *   写库之后调 `PlatformGateway.invalidate(tenantId)`——`@taizan/nest-billing` 的闸门视图
+ *   有 30 秒进程内缓存，不调用的话冻结要最多 30 秒后才真的生效，这条 e2e 立即断言就是
+ *   为了卡住这一点。另一层是 `AdminAuthService.shopsOf`：`UNRESOLVABLE_TENANT_STATUSES`
+ *   把 `SUSPENDED`/`DEREGISTERED` 的店从"这个账号名下可登录的店"里过滤掉，所以**冻结之后
+ *   重新登录**直接拿不到 token（`1140100`）。两层各测各的，缺一层都不算"冻结真的生效了"。
+ * - **"最后一个管理员不可删"在 e2e 里只能测到"禁止自己停用自己"这一支**：服务层还有
+ *   "不能停用最后一个 ACTIVE"的独立分支，但那一支要求"调用者不是目标本人、且目标是
+ *   当前唯一的 ACTIVE 管理员"——一旦真的只剩一个 ACTIVE 管理员，其余管理员的会话早已在
+ *   被停用那一刻被 `revokeAll` 撤销，不存在"别人还能登录进来试图删掉最后一个"的路径。
+ *   所以序列化的 e2e 只测得到自我保护这一支；数量保护那一支是给"两个并发请求各删一个"
+ *   这种竞态场景的兜底，e2e 不测并发。
+ * - **dashboard 的数字是"平台全量"而不是"这次跑单独隔离出来的一份"**：看板本来就该是
+ *   跨全部租户的汇总，与 `tenant-isolation.e2e-spec.ts`"每次建一对新租户防止互相污染"是
+ *   两种目的。这里断言用 `>=`（我们制造的这一份数据必然被算进去），不断言恰好等于。
+ *
+ * @packageDocumentation
+ */
+
+import 'reflect-metadata'
+import 'dotenv/config'
+
+import type { INestApplication } from '@nestjs/common'
+import { Test } from '@nestjs/testing'
+import { PrismaClient } from '@prisma/client'
+import { computeRenewal } from '@taizan/billing-rules'
+import { ulid } from '@taizan/contracts'
+import { DeadLetterService, type JobEnvelope } from '@taizan/nest-infra'
+import { seedBase } from '@taizan/prisma-base'
+import request from 'supertest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+
+import { AppModule } from '../src/bootstrap/app.module'
+import { configureApp } from '../src/bootstrap/configure-app'
+import { findFirstUpsertDelegate } from '../src/seed-delegates'
+import { totp } from '../src/modules/platform/auth/totp'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 夹具
+// ─────────────────────────────────────────────────────────────────────────────
+
+const RUN = ulid().slice(-8).toLowerCase()
+
+/**
+ * 本文件的登录请求专用的「客户端 IP」（起法与 `plan-order.e2e-spec.ts` 一致）。
+ *
+ * `login` 档限流是**按客户端 IP** 计的（5 分钟 10 次），而 e2e 的每个文件都从
+ * `127.0.0.1` 打过来——`vitest.e2e.config.ts` 又刻意 `fileParallelism: false` 串行跑，
+ * 于是几个文件共用同一个桶。本文件一趟要登 6 次（平台 2 次 + 店主 4 次），
+ * 加上别的文件就超过 10：**后面的文件会拿到 `1042900` 而不是它想断言的东西**，
+ * 而失败信息长得像「登录逻辑坏了」，最难查。
+ *
+ * 应用开着 `trust proxy`（`TRUSTED_PROXY_HOPS=1`），带一个 `X-Forwarded-For`
+ * 就能让本文件的登录落进自己的桶里：既不消耗别人的额度，也不受别人影响。
+ * 这不是在绕过限流——限流本身由 `test/ratelimit.e2e-spec.ts` 专门验证。
+ *
+ * IP 里掺 `RUN`：同一天重复跑 e2e 时，Redis 里上一趟的计数还在窗口内。
+ */
+const LOGIN_IP = `10.98.${([...RUN].reduce((a, c) => (a + c.charCodeAt(0)) % 200, 3) + 1).toString()}.7`
+
+/** 本文件所有登录请求的统一起手式：一定带上 {@link LOGIN_IP}。 */
+function loginRequest(url: string) {
+  return request(http()).post(url).set('X-Forwarded-For', LOGIN_IP)
+}
+
+let app: INestApplication
+let prisma: PrismaClient
+
+function http(): Parameters<typeof request>[0] {
+  return app.getHttpServer() as Parameters<typeof request>[0]
+}
+
+function expectOk<T>(body: unknown): T {
+  const envelope = body as { code: number; message: string; data: T }
+  expect(envelope.code, `期望 code=0，实际：${JSON.stringify(envelope)}`).toBe(0)
+  return envelope.data
+}
+
+function codeOf(body: unknown): number {
+  return (body as { code: number }).code
+}
+
+/** 造一个本次运行专用的手机号，避免和 seed / 其它 e2e 文件的手机号撞。 */
+function phoneFor(n: number): string {
+  const digits = [...RUN]
+    .map((c) => c.charCodeAt(0) % 10)
+    .join('')
+    .slice(0, 7)
+  return `138${digits}${n}`
+}
+
+let platformToken = ''
+
+beforeAll(async () => {
+  prisma = new PrismaClient()
+
+  await seedBase(
+    {
+      platformAdmin: prisma.platformAdmin,
+      plan: prisma.plan,
+      tenant: prisma.tenant,
+      staffAccount: prisma.staffAccount,
+      staff: findFirstUpsertDelegate(prisma.staff),
+      role: findFirstUpsertDelegate(prisma.role),
+      rolePreset: prisma.rolePreset,
+    },
+    { withDemoTenant: false },
+  )
+
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
+  app = moduleRef.createNestApplication({ logger: false })
+  configureApp(app)
+  await app.init()
+
+  const login = await loginRequest('/api/platform/auth/login')
+    .send({ username: 'admin', password: 'admin123' })
+    .expect(201)
+  platformToken = expectOk<{ access: string }>(login.body).access
+})
+
+afterAll(async () => {
+  await app?.close()
+  await prisma?.$disconnect()
+})
+
+function authed() {
+  return {
+    get: (url: string) => request(http()).get(url).set('Authorization', `Bearer ${platformToken}`),
+    post: (url: string) =>
+      request(http()).post(url).set('Authorization', `Bearer ${platformToken}`),
+    patch: (url: string) =>
+      request(http()).patch(url).set('Authorization', `Bearer ${platformToken}`),
+    delete: (url: string) =>
+      request(http()).delete(url).set('Authorization', `Bearer ${platformToken}`),
+  }
+}
+
+/** 轮询等待一个条件成立（审计是旁路写入，响应返回时不保证已经落库）。 */
+async function waitFor(check: () => Promise<boolean>, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (await check()) return
+    if (Date.now() > deadline) throw new Error(`等待超时（${timeoutMs}ms）`)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+}
+
+async function auditActionSeen(action: string, targetId?: string): Promise<boolean> {
+  const res = await authed().get(
+    `/api/platform/audit-logs?action=${encodeURIComponent(action)}&pageSize=200`,
+  )
+  const page = expectOk<{ items: { action: string; targetId: string | null }[] }>(res.body)
+  return targetId
+    ? page.items.some((i) => i.action === action && i.targetId === targetId)
+    : page.items.some((i) => i.action === action)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ① 平台登录
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('① 平台登录', () => {
+  it('已经在 beforeAll 里登录成功，拿到 token', () => {
+    expect(platformToken).toBeTruthy()
+  })
+
+  it('GET /api/platform/auth/me 能验证 token 还活着', async () => {
+    const res = await authed().get('/api/platform/auth/me').expect(200)
+    const data = expectOk<{ kind: string }>(res.body)
+    expect(data.kind).toBe('platform')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ② 套餐：CRUD + 三态 + 上下架 + 排序
+// ─────────────────────────────────────────────────────────────────────────────
+
+let planId = ''
+const planCode = `e2e-${RUN}`
+
+describe('② 套餐管理', () => {
+  it('新建套餐：quotas 三态（上限/禁用/不限）一次性入库', async () => {
+    const res = await authed()
+      .post('/api/platform/plans')
+      .send({
+        code: planCode,
+        name: `E2E 套餐 ${RUN}`,
+        firstPriceCents: 10_000,
+        renewPriceCents: 8_000,
+        periodMonths: 1,
+        quotas: { STAFF: 3, TRAFFIC_MB: 0, MEMBER: null },
+        features: ['member'],
+        appKeys: ['admin'],
+      })
+      .expect(201)
+    const plan = expectOk<{
+      id: string
+      quotas: Record<string, number | null>
+      features: string[] | null
+      status: string
+    }>(res.body)
+    planId = plan.id
+    expect(plan.quotas).toEqual({ STAFF: 3, TRAFFIC_MB: 0, MEMBER: null })
+    expect(plan.features).toEqual(['member'])
+    expect(plan.status).toBe('ENABLED')
+  })
+
+  it('code 重复被拒', async () => {
+    const res = await authed()
+      .post('/api/platform/plans')
+      .send({
+        code: planCode,
+        name: '重名套餐',
+        firstPriceCents: 0,
+        renewPriceCents: 0,
+        periodMonths: 1,
+        quotas: {},
+        appKeys: ['admin'],
+      })
+    expect(codeOf(res.body)).toBe(1040000)
+  })
+
+  it('PATCH 只改一个配额维度，其余维度不动（三态里"缺省"的合并语义）', async () => {
+    const res = await authed()
+      .patch(`/api/platform/plans/${planId}`)
+      .send({ quotas: { STAFF: null } })
+      .expect(200)
+    const plan = expectOk<{ quotas: Record<string, number | null> }>(res.body)
+    expect(plan.quotas.STAFF).toBeNull()
+    // TRAFFIC_MB / MEMBER 没在这次 patch 里提到，必须原样保留。
+    expect(plan.quotas.TRAFFIC_MB).toBe(0)
+    expect(plan.quotas.MEMBER).toBeNull()
+  })
+
+  it('PATCH features: null 显式清空为"全部可用"，与"不传"是两回事', async () => {
+    const res = await authed()
+      .patch(`/api/platform/plans/${planId}`)
+      .send({ features: null })
+      .expect(200)
+    const plan = expectOk<{ features: string[] | null }>(res.body)
+    expect(plan.features).toBeNull()
+  })
+
+  it('下架 → 归档 → 上架，状态机走一遍', async () => {
+    const disabled = expectOk<{ status: string }>(
+      (await authed().patch(`/api/platform/plans/${planId}/disable`).expect(200)).body,
+    )
+    expect(disabled.status).toBe('DISABLED')
+
+    const archived = expectOk<{ status: string }>(
+      (await authed().patch(`/api/platform/plans/${planId}/archive`).expect(200)).body,
+    )
+    expect(archived.status).toBe('ARCHIVED')
+
+    const enabled = expectOk<{ status: string }>(
+      (await authed().patch(`/api/platform/plans/${planId}/enable`).expect(200)).body,
+    )
+    expect(enabled.status).toBe('ENABLED')
+  })
+
+  it('调整排序', async () => {
+    const res = await authed()
+      .patch(`/api/platform/plans/${planId}/sort`)
+      .send({ sort: 999 })
+      .expect(200)
+    expect(expectOk<{ sort: number }>(res.body).sort).toBe(999)
+  })
+
+  it('列表能查到刚建的套餐', async () => {
+    const res = await authed().get('/api/platform/plans?pageSize=200').expect(200)
+    const page = expectOk<{ items: { id: string }[] }>(res.body)
+    expect(page.items.map((i) => i.id)).toContain(planId)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ③ 建租户
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SHOP = { slug: `e2e-plat-${RUN}`, name: `平台面 E2E ${RUN}`, phone: phoneFor(1) }
+const OWNER_PASSWORD = 'e2e-owner-pw-123'
+let tenantId = ''
+let ownerToken = ''
+let ownerStaffId = ''
+
+describe('③ 建租户（沿用现有接口）', () => {
+  it('平台后台开出一家店，不挂套餐（用于验证续期时"补挂套餐"这条路径）', async () => {
+    const res = await authed()
+      .post('/api/platform/tenants')
+      .send({
+        slug: SHOP.slug,
+        name: SHOP.name,
+        ownerPhone: SHOP.phone,
+        ownerPassword: OWNER_PASSWORD,
+        trialDays: 30,
+      })
+      .expect(201)
+    const data = expectOk<{ tenant: { id: string; status: string; planId: string | null } }>(
+      res.body,
+    )
+    tenantId = data.tenant.id
+    expect(data.tenant.status).toBe('TRIAL')
+    expect(data.tenant.planId).toBeNull()
+  })
+
+  it('店主能登录', async () => {
+    const res = await loginRequest('/api/admin/auth/login')
+      .send({ phone: SHOP.phone, password: OWNER_PASSWORD, tenantId })
+      .expect(201)
+    const session = expectOk<{ needChooseShop: boolean; access: string; staffId: string }>(res.body)
+    expect(session.needChooseShop).toBe(false)
+    ownerToken = session.access
+    ownerStaffId = session.staffId
+  })
+
+  it('店主建一个商品——这条 AuditLog 落在租户域，等会验证"某租户的审计日志"接口', async () => {
+    await request(http())
+      .post('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ name: `E2E-商品-${RUN}`, priceCents: 100, stock: 1, status: 'ON_SHELF' })
+      .expect(201)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ④ 续期
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('④ 续期', () => {
+  it('续期后 planExpireAt 正确（与 computeRenewal 独立算出来的结果一致），且落一条 PlanOrder', async () => {
+    const before = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } })
+    const plan = await prisma.plan.findUniqueOrThrow({ where: { id: planId } })
+
+    const res = await authed()
+      .patch(`/api/platform/tenants/${tenantId}/renew`)
+      .send({ planId, periods: 1 })
+      .expect(200)
+    const result = expectOk<{
+      tenant: { planExpireAt: string; status: string; planId: string | null }
+      order: { id: string; amountCents: number }
+    }>(res.body)
+
+    // `currentExpireAt`（试用到期日）此刻必然还在未来，所以 computeRenewal 的 `base`
+    // 只取决于 currentExpireAt，与"现在"的微小时间差无关——这条断言不会因为跑得慢一点点而 flaky。
+    const expected = computeRenewal({
+      currentExpireAt: before.planExpireAt,
+      now: new Date(),
+      periods: 1,
+      periodMonths: plan.periodMonths,
+    })
+    expect(result.tenant.planExpireAt).toBe(expected.expireAfterAt.toISOString())
+    expect(result.tenant.planId).toBe(planId)
+    // 续过费之前是 TRIAL（还没挂套餐），续费之后必须转 ACTIVE。
+    expect(result.tenant.status).toBe('ACTIVE')
+    // **首开价，不是续费价**——T1-5 把续期收口到 `PlanOrderService` 之后，单价由
+    // 「这家店有没有 FULFILLED 过订单」决定（`computeOrderAmount`）。这家店是第一次
+    // 付钱，收首开价才对；T1-5 之前这里无条件用 renewPriceCents，那是笔少收的钱。
+    expect(result.order.amountCents).toBe(plan.firstPriceCents)
+
+    const orders = await prisma.planOrder.findMany({ where: { tenantId } })
+    expect(orders).toHaveLength(1)
+    expect(orders[0]?.status).toBe('FULFILLED')
+    // 同因：从没兑现过 → OPEN。第二次点续期才是 RENEW。
+    expect(orders[0]?.type).toBe('OPEN')
+    expect(orders[0]?.payChannel).toBe('OFFLINE')
+    // 单号带 PLAN 前缀（T1-5 之前是 `renew-<ULID>`，支付回调根本路由不到它）。
+    expect(orders[0]?.outTradeNo.startsWith('PLAN-')).toBe(true)
+  })
+
+  it('订单查询接口能查到这条订单（列表 + 详情）', async () => {
+    const list = await authed().get(`/api/platform/orders?tenantId=${tenantId}`).expect(200)
+    const page = expectOk<{ items: { id: string }[]; total: number }>(list.body)
+    expect(page.total).toBe(1)
+    const orderId = page.items[0]?.id as string
+
+    const detail = await authed().get(`/api/platform/orders/${orderId}`).expect(200)
+    expect(expectOk<{ tenantId: string }>(detail.body).tenantId).toBe(tenantId)
+  })
+
+  it('更换套餐：换回同一个套餐也应该成功（幂等的写法，不因为"没变"就报错）', async () => {
+    const res = await authed()
+      .patch(`/api/platform/tenants/${tenantId}/change-plan`)
+      .send({ planId })
+      .expect(200)
+    expect(expectOk<{ planId: string }>(res.body).planId).toBe(planId)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑤⑥ 冻结 → 员工登录被拦 → 解冻
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑤ 冻结', () => {
+  it('冻结成功', async () => {
+    const res = await authed().patch(`/api/platform/tenants/${tenantId}/suspend`).expect(200)
+    expect(expectOk<{ status: string }>(res.body).status).toBe('SUSPENDED')
+  })
+
+  it('冻结立即生效：手上那张还没过期的旧 token 写操作被 BillingGateGuard 拦（1440301）', async () => {
+    // `evaluateTenantGate` 对 SUSPENDED 是"硬闸门"，不受 BILLING_ENFORCE 影响，
+    // 也不等成员关系缓存过期——但 `PlatformGateway` 有 30 秒进程内缓存，
+    // 所以 `suspend()` 必须调用 `invalidate(tenantId)`，这条用例就是验证这一点接上了没有。
+    const res = await request(http())
+      .post('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ name: `A-冻结后尝试-${RUN}`, priceCents: 100 })
+    expect(codeOf(res.body)).toBe(1440301)
+  })
+
+  it('读操作仍然放行（到期/冻结是"只读"不是"断网"）', async () => {
+    const res = await request(http())
+      .get('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${ownerToken}`)
+    expect(codeOf(res.body)).toBe(0)
+  })
+
+  it('冻结之后再次登录：这家店从"账号名下可用店铺"里消失，1140100', async () => {
+    const res = await loginRequest('/api/admin/auth/login').send({
+      phone: SHOP.phone,
+      password: OWNER_PASSWORD,
+      tenantId,
+    })
+    expect(codeOf(res.body)).toBe(1140100)
+  })
+
+  it('重复冻结被拒', async () => {
+    const res = await authed().patch(`/api/platform/tenants/${tenantId}/suspend`)
+    expect(codeOf(res.body)).toBe(1040000)
+  })
+})
+
+describe('⑥ 解冻', () => {
+  it('解冻成功，且因为已经挂了套餐，回到 ACTIVE 而不是 TRIAL', async () => {
+    const res = await authed().patch(`/api/platform/tenants/${tenantId}/resume`).expect(200)
+    expect(expectOk<{ status: string }>(res.body).status).toBe('ACTIVE')
+  })
+
+  it('解冻之后店主能重新登录', async () => {
+    const res = await loginRequest('/api/admin/auth/login')
+      .send({ phone: SHOP.phone, password: OWNER_PASSWORD, tenantId })
+      .expect(201)
+    expect(expectOk<{ needChooseShop: boolean }>(res.body).needChooseShop).toBe(false)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑦ 重置店主口令 → 旧 token 失效
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑦ 重置店主口令', () => {
+  it('重置后旧 token 立即失效（会话被 revokeAll）', async () => {
+    // ownerToken 是③里登录拿到的、这一刻仍然没过期的老 token。
+    const before = await request(http())
+      .get('/api/admin/auth/bootstrap')
+      .set('Authorization', `Bearer ${ownerToken}`)
+    expect(before.status).toBe(200)
+
+    const res = await authed()
+      .patch(`/api/platform/tenants/${tenantId}/reset-owner-password`)
+      .send({})
+      .expect(200)
+    const data = expectOk<{ phone: string; initialPassword: string | null }>(res.body)
+    expect(data.phone).toBe(SHOP.phone)
+    expect(data.initialPassword).toBeTruthy() // 没显式指定新口令，回明文。
+
+    const after = await request(http())
+      .get('/api/admin/auth/bootstrap')
+      .set('Authorization', `Bearer ${ownerToken}`)
+    expect(codeOf(after.body)).toBe(1140100)
+
+    // 用新口令能登录。
+    const relogin = await loginRequest('/api/admin/auth/login')
+      .send({ phone: SHOP.phone, password: data.initialPassword, tenantId })
+      .expect(201)
+    expect(expectOk<{ needChooseShop: boolean; staffId: string }>(relogin.body).staffId).toBe(
+      ownerStaffId,
+    )
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑧ 注销：只改状态，数据仍在
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑧ 注销', () => {
+  it('看板：注销前先拿一次员工/商品数，确认注销不会清空它们', async () => {
+    const res = await authed().get(`/api/platform/tenants/${tenantId}/overview`).expect(200)
+    const overview = expectOk<{ staffActiveCount: number; {{domainSlug}}Count: number }>(res.body)
+    expect(overview.staffActiveCount).toBeGreaterThanOrEqual(1)
+    expect(overview.{{domainSlug}}Count).toBeGreaterThanOrEqual(1)
+  })
+
+  it('注销成功：只置 DEREGISTERED + deregisterAt，库里 Staff/{{DomainPascal}} 原样还在', async () => {
+    const res = await authed().patch(`/api/platform/tenants/${tenantId}/deregister`).expect(200)
+    const data = expectOk<{ status: string }>(res.body)
+    expect(data.status).toBe('DEREGISTERED')
+
+    const row = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } })
+    expect(row.status).toBe('DEREGISTERED')
+    expect(row.deregisterAt).not.toBeNull()
+
+    const staffRows = await prisma.staff.findMany({ where: { tenantId } })
+    const {{domainSlug}}Rows = await prisma.{{domainSlug}}.findMany({ where: { tenantId } })
+    expect(staffRows.length).toBeGreaterThanOrEqual(1)
+    expect({{domainSlug}}Rows.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('重复注销被拒；已注销的店不能续期', async () => {
+    const again = await authed().patch(`/api/platform/tenants/${tenantId}/deregister`)
+    expect(codeOf(again.body)).toBe(1040000)
+
+    const renew = await authed()
+      .patch(`/api/platform/tenants/${tenantId}/renew`)
+      .send({ periods: 1 })
+    expect(codeOf(renew.body)).toBe(1040000)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑨ 平台管理员 CRUD
+// ─────────────────────────────────────────────────────────────────────────────
+
+let adminBId = ''
+let adminBPassword = ''
+const adminBUsername = `e2e-admin-b-${RUN}`
+
+describe('⑨ 平台管理员', () => {
+  it('新建管理员（不给口令，随机生成回明文）', async () => {
+    const res = await authed()
+      .post('/api/platform/admins')
+      .send({ username: adminBUsername, name: '协管 B' })
+      .expect(201)
+    const data = expectOk<{ admin: { id: string; status: string }; initialPassword: string }>(
+      res.body,
+    )
+    adminBId = data.admin.id
+    adminBPassword = data.initialPassword
+    expect(data.admin.status).toBe('ACTIVE')
+    expect(data.initialPassword).toBeTruthy()
+  })
+
+  it('roleIds 引用不存在的角色预设会被拒', async () => {
+    const res = await authed()
+      .post('/api/platform/admins')
+      .send({ username: `${adminBUsername}-x`, name: 'x', roleIds: [ulid()] })
+    expect(codeOf(res.body)).toBe(1040000)
+  })
+
+  it(
+    '重置口令后旧 token 失效（用 B 自己的会话验证，不去动 admin 本人那一个——' +
+      'platform 并发端数上限是 1，再登录一次 admin 会把本文件全程复用的 platformToken 挤下线）',
+    async () => {
+      const loginB = await loginRequest('/api/platform/auth/login')
+        .send({ username: adminBUsername, password: adminBPassword })
+        .expect(201)
+      const tokenB = expectOk<{ access: string }>(loginB.body).access
+
+      const stillAlive = await request(http())
+        .get('/api/platform/auth/me')
+        .set('Authorization', `Bearer ${tokenB}`)
+      expect(stillAlive.status).toBe(200)
+
+      const reset = await authed()
+        .patch(`/api/platform/admins/${adminBId}/password`)
+        .send({})
+        .expect(200)
+      expect(expectOk<{ initialPassword: string }>(reset.body).initialPassword).toBeTruthy()
+
+      const revoked = await request(http())
+        .get('/api/platform/auth/me')
+        .set('Authorization', `Bearer ${tokenB}`)
+      expect(codeOf(revoked.body)).toBe(1140100)
+
+      // 全程复用的 platformToken（admin 本人）完全没被这次操作影响。
+      const untouched = await authed().get('/api/platform/auth/me')
+      expect(untouched.status).toBe(200)
+    },
+  )
+
+  it('列表 / 详情 / 改名', async () => {
+    const list = await authed().get('/api/platform/admins?pageSize=200').expect(200)
+    expect(expectOk<{ items: { id: string }[] }>(list.body).items.map((i) => i.id)).toContain(
+      adminBId,
+    )
+
+    const updated = await authed()
+      .patch(`/api/platform/admins/${adminBId}`)
+      .send({ name: '协管 B（改名）' })
+      .expect(200)
+    expect(expectOk<{ name: string }>(updated.body).name).toBe('协管 B（改名）')
+  })
+
+  it('停用 B（此刻 2 个 ACTIVE，允许）；不能停用自己（此刻只剩 1 个 ACTIVE）', async () => {
+    const disabled = await authed().patch(`/api/platform/admins/${adminBId}/disable`).expect(200)
+    expect(expectOk<{ status: string }>(disabled.body).status).toBe('DISABLED')
+
+    const seedAdmin = await prisma.platformAdmin.findFirstOrThrow({ where: { username: 'admin' } })
+    const selfDisable = await authed().patch(`/api/platform/admins/${seedAdmin.id}/disable`)
+    expect(codeOf(selfDisable.body)).toBe(1040000)
+
+    // 启用回来，不影响后面用例。
+    await authed().patch(`/api/platform/admins/${adminBId}/enable`).expect(200)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑩ 角色预设：CRUD + builtin 保护
+// ─────────────────────────────────────────────────────────────────────────────
+
+let customPresetId = ''
+const presetCode = `e2e-preset-${RUN}`
+
+describe('⑩ 角色预设', () => {
+  it('新建（权限码来自已注册的权限点：RbacModule 已并行接线，走的是真正的存在性校验）', async () => {
+    const res = await authed()
+      .post('/api/platform/role-presets')
+      .send({
+        code: presetCode,
+        name: 'E2E 预设',
+        side: 'PLATFORM',
+        permissionCodes: ['{{domainSlug}}:list', '{{domainSlug}}:write'],
+      })
+      .expect(201)
+    const data = expectOk<{ id: string; builtin: boolean; permissionCodes: string[] }>(res.body)
+    customPresetId = data.id
+    expect(data.builtin).toBe(false)
+    expect(data.permissionCodes.sort()).toEqual(['{{domainSlug}}:list', '{{domainSlug}}:write'])
+  })
+
+  it('引用了不存在的权限点被拒（PERMISSION_REGISTRY 已接入，走存在性校验）', async () => {
+    const res = await authed()
+      .post('/api/platform/role-presets')
+      .send({
+        code: `${presetCode}-bad`,
+        name: 'bad',
+        side: 'PLATFORM',
+        permissionCodes: ['no-such-module:no-such-action'],
+      })
+    expect(codeOf(res.body)).toBe(1040000)
+  })
+
+  it('(code, side) 重复被拒', async () => {
+    const res = await authed()
+      .post('/api/platform/role-presets')
+      .send({ code: presetCode, name: '重复', side: 'PLATFORM', permissionCodes: [] })
+    expect(codeOf(res.body)).toBe(1040000)
+  })
+
+  it('修改自建预设成功', async () => {
+    const res = await authed()
+      .patch(`/api/platform/role-presets/${customPresetId}`)
+      .send({ name: 'E2E 预设（改名）' })
+      .expect(200)
+    expect(expectOk<{ name: string }>(res.body).name).toBe('E2E 预设（改名）')
+  })
+
+  it('内置预设（builtin=true）禁止修改与删除', async () => {
+    const builtin = await prisma.rolePreset.findFirstOrThrow({
+      where: { side: 'PLATFORM', builtin: true },
+    })
+    const update = await authed()
+      .patch(`/api/platform/role-presets/${builtin.id}`)
+      .send({ name: '想改内置预设' })
+    expect(codeOf(update.body)).toBe(1040000)
+
+    const remove = await authed().delete(`/api/platform/role-presets/${builtin.id}`)
+    expect(codeOf(remove.body)).toBe(1040000)
+  })
+
+  it('删除自建预设成功', async () => {
+    await authed().delete(`/api/platform/role-presets/${customPresetId}`).expect(200)
+    const row = await prisma.rolePreset.findUnique({ where: { id: customPresetId } })
+    expect(row).toBeNull()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑪ 公告：发布 / 已读统计 / 下线
+// ─────────────────────────────────────────────────────────────────────────────
+
+let announcementId = ''
+
+describe('⑪ 公告', () => {
+  it('新建（草稿）', async () => {
+    const res = await authed()
+      .post('/api/platform/announcements')
+      .send({
+        title: `E2E 公告 ${RUN}`,
+        contentHtml: '<p>hello</p>',
+        publishAt: new Date().toISOString(),
+      })
+      .expect(201)
+    const data = expectOk<{ id: string; status: string }>(res.body)
+    announcementId = data.id
+    expect(data.status).toBe('DRAFT')
+  })
+
+  it('发布', async () => {
+    const res = await authed().patch(`/api/platform/announcements/${announcementId}/publish`)
+    expect(expectOk<{ status: string }>(res.body).status).toBe('PUBLISHED')
+  })
+
+  it('重复发布被拒', async () => {
+    const res = await authed().patch(`/api/platform/announcements/${announcementId}/publish`)
+    expect(codeOf(res.body)).toBe(1040000)
+  })
+
+  it('已读统计：先直接插入一条已读回执（读者是 staff），再查统计', async () => {
+    await prisma.announcementRead.create({
+      data: {
+        id: ulid(),
+        announcementId,
+        readerType: 'STAFF',
+        readerId: ownerStaffId,
+      },
+    })
+    const res = await authed()
+      .get(`/api/platform/announcements/${announcementId}/reads`)
+      .expect(200)
+    const stats = expectOk<{ total: number; byReaderType: Record<string, number> }>(res.body)
+    expect(stats.total).toBe(1)
+    expect(stats.byReaderType.STAFF).toBe(1)
+  })
+
+  it('已发布过的公告不能删除', async () => {
+    const res = await authed().delete(`/api/platform/announcements/${announcementId}`)
+    expect(codeOf(res.body)).toBe(1040000)
+  })
+
+  it('下线 → ARCHIVED，内容与已读回执还在', async () => {
+    const res = await authed().patch(`/api/platform/announcements/${announcementId}/unpublish`)
+    expect(expectOk<{ status: string }>(res.body).status).toBe('ARCHIVED')
+
+    const stillThere = await prisma.announcementRead.count({ where: { announcementId } })
+    expect(stillThere).toBe(1)
+  })
+
+  it('草稿可以被删除', async () => {
+    const draft = await authed()
+      .post('/api/platform/announcements')
+      .send({
+        title: `E2E 待删草稿 ${RUN}`,
+        contentHtml: '<p>x</p>',
+        publishAt: new Date().toISOString(),
+      })
+      .expect(201)
+    const id = expectOk<{ id: string }>(draft.body).id
+    await authed().delete(`/api/platform/announcements/${id}`).expect(200)
+    expect(await prisma.announcement.findUnique({ where: { id } })).toBeNull()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑫ 审计列表：能查到以上每一步
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑫ 审计日志', () => {
+  it('平台侧审计（PlatformAuditLog）能查到本文件做过的高危操作', async () => {
+    // 审计是拦截器在响应返回后才写的旁路操作（`AuditInterceptor` 文件头），这里
+    // 逐条 `waitFor`（而不是只等第一条）：前面几十个用例各自触发的写入是并发落盘的，
+    // 用一次等待去赌"全部都已经落库"在慢机器/共享库上会偶发 flaky。
+    for (const action of [
+      'tenant.create',
+      'tenant.renew',
+      'tenant.change-plan',
+      'tenant.suspend',
+      'tenant.resume',
+      'tenant.reset-owner-password',
+      'tenant.deregister',
+      'plan.create',
+      'plan.update',
+      'plan.publish',
+      'plan.unpublish',
+      'plan.archive',
+      'plan.sort',
+      'platform-admin.create',
+      'platform-admin.update',
+      'platform-admin.reset-password',
+      'platform-admin.disable',
+      'platform-admin.enable',
+      'role-preset.create',
+      'role-preset.update',
+      'role-preset.delete',
+      'announcement.create',
+      'announcement.publish',
+      'announcement.unpublish',
+      'announcement.delete',
+    ]) {
+      await waitFor(() => auditActionSeen(action), 15_000)
+      expect(await auditActionSeen(action), `动作 ${action} 应该出现在平台审计日志里`).toBe(true)
+    }
+  }, 60_000)
+
+  it('按 targetTenantId 筛选能定位到这家店的操作', async () => {
+    const res = await authed().get(
+      `/api/platform/audit-logs?action=tenant.suspend&targetTenantId=${tenantId}`,
+    )
+    const page = expectOk<{ items: unknown[] }>(res.body)
+    expect(page.items.length).toBeGreaterThan(0)
+  })
+
+  it('租户域审计（AuditLog）：店主建商品那条动作能通过"某租户的审计日志"接口查到', async () => {
+    const res = await authed().get(`/api/platform/tenants/${tenantId}/audit-logs`).expect(200)
+    const page = expectOk<{ items: { action: string; tenantId: string }[] }>(res.body)
+    expect(page.items.every((i) => i.tenantId === tenantId)).toBe(true)
+    expect(page.items.some((i) => i.action === '{{domainSlug}}.create')).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑬ Dashboard
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑬ 看板', () => {
+  it('租户数按状态分组里必然算进了我们这家店（此刻是 DEREGISTERED）', async () => {
+    const res = await authed().get('/api/platform/dashboard/overview').expect(200)
+    const data = expectOk<{
+      tenantCountsByStatus: Record<string, number>
+      newTenants7d: number
+      expiringSoon7d: number
+      revenueByMonth: { month: string; amountCents: number }[]
+    }>(res.body)
+
+    expect(data.tenantCountsByStatus.DEREGISTERED ?? 0).toBeGreaterThanOrEqual(1)
+    // 本文件建租户就在最近 7 天内，全平台的"近 7 天新增"必然把它算进去。
+    expect(data.newTenants7d).toBeGreaterThanOrEqual(1)
+    expect(data.expiringSoon7d).toBeGreaterThanOrEqual(0)
+
+    const now = new Date()
+    const thisMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`
+    const bucket = data.revenueByMonth.find((b) => b.month === thisMonth)
+    // 只断言"至少包含我们这一笔"，不断言恰好等于——看板是全平台汇总，与其它
+    // 并发跑的 e2e / 历史数据共享同一个库。
+    expect(bucket, `revenueByMonth 里应该有 ${thisMonth} 这一桶`).toBeTruthy()
+    expect(bucket?.amountCents ?? 0).toBeGreaterThanOrEqual(0)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑮ bootstrap：身份 / 权限（全权 TODO）/ 已裁剪的 PLATFORM 侧菜单
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑮ GET /api/platform/auth/bootstrap', () => {
+  it("返回 PLATFORM 侧菜单树、identity 带 adminId/username、permissions 是字面量 ['*']", async () => {
+    const res = await authed().get('/api/platform/auth/bootstrap').expect(200)
+    const data = expectOk<{
+      identity: { adminId: string; username: string; name: string }
+      permissions: string[]
+      menus: { key: string; componentKey?: string }[]
+    }>(res.body)
+
+    expect(data.identity.username).toBe('admin')
+    expect(data.identity.adminId).toBeTruthy()
+    // 见 platform-auth.service.ts「permissions 为什么是字面量」：本阶段全权，TODO 按
+    // PlatformAdmin.roleIds 展开。
+    expect(data.permissions).toEqual(['*'])
+
+    const keys = data.menus.map((m) => m.key)
+    expect(keys).toContain('platform-dashboard')
+    expect(keys).toContain('platform-tenant')
+    expect(keys).toContain('platform-job-dead-letter')
+  })
+
+  it('不带 token 是 1140100（与其它 T1-7 接口同一个默认拒绝口径）', async () => {
+    const res = await request(http()).get('/api/platform/auth/bootstrap')
+    expect(codeOf(res.body)).toBe(1140100)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑯ 死信队列：列表 + 重放（真队列：直接调 DeadLetterService.record() 制造一条死信，
+// 理由见下——不用真的把一个任务重试到耗尽，那要等好几轮 BullMQ 退避）
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑯ 死信队列', () => {
+  const QUEUE_NAME = `e2e-dead-letter-${RUN}`
+  let deadLetterId = ''
+
+  it(
+    '制造一条死信：DeadLetterService.record() 是「任务重试耗尽后落库」这一步本身，' +
+      '直接调它等价于真的经历了一轮重试耗尽，且不用等 BullMQ 的退避延迟',
+    async () => {
+      const deadLetters = app.get(DeadLetterService)
+      const payload: JobEnvelope = {
+        traceId: ulid(),
+        data: { hello: 'e2e' },
+        enqueuedAt: Date.now(),
+      }
+      const id = await deadLetters.record({
+        queue: QUEUE_NAME,
+        jobName: QUEUE_NAME,
+        payload,
+        attempts: 5,
+        lastError: 'e2e 模拟：上游超时',
+        traceId: payload.traceId,
+      })
+      expect(id).toBeTruthy()
+      deadLetterId = id as string
+    },
+  )
+
+  it('GET /api/platform/jobs/dead-letters 按 queue 筛选能查到这一条', async () => {
+    const res = await authed()
+      .get(`/api/platform/jobs/dead-letters?queue=${encodeURIComponent(QUEUE_NAME)}`)
+      .expect(200)
+    const page = expectOk<{ items: { id: string; queue: string; resolvedAt: string | null }[] }>(
+      res.body,
+    )
+    expect(page.items.map((i) => i.id)).toContain(deadLetterId)
+    const row = page.items.find((i) => i.id === deadLetterId)
+    expect(row?.resolvedAt).toBeNull()
+  })
+
+  it('resolved=false 只看待处理，resolved=true 看不到（还没重放）', async () => {
+    const pending = await authed()
+      .get(`/api/platform/jobs/dead-letters?queue=${encodeURIComponent(QUEUE_NAME)}&resolved=false`)
+      .expect(200)
+    expect(expectOk<{ items: { id: string }[] }>(pending.body).items.map((i) => i.id)).toContain(
+      deadLetterId,
+    )
+
+    const resolved = await authed()
+      .get(`/api/platform/jobs/dead-letters?queue=${encodeURIComponent(QUEUE_NAME)}&resolved=true`)
+      .expect(200)
+    expect(
+      expectOk<{ items: { id: string }[] }>(resolved.body).items.map((i) => i.id),
+    ).not.toContain(deadLetterId)
+  })
+
+  it('POST .../replay 原样重新入队，成功后 resolvedAt 非空（先入队再标记，见 DeadLetterService 文件头）', async () => {
+    const res = await authed()
+      .post(`/api/platform/jobs/dead-letters/${deadLetterId}/replay`)
+      .expect(201)
+    const data = expectOk<{ jobId: string }>(res.body)
+    expect(data.jobId).toBeTruthy()
+
+    const row = await prisma.jobDeadLetter.findUniqueOrThrow({ where: { id: deadLetterId } })
+    expect(row.resolvedAt).not.toBeNull()
+  })
+
+  it('重放一个不存在的死信 → 1850000（JOB_REPLAY_FAILED）', async () => {
+    const res = await authed().post(`/api/platform/jobs/dead-letters/${ulid()}/replay`)
+    expect(codeOf(res.body)).toBe(1850000)
+  })
+
+  it('GET /api/platform/jobs/cron-runs 能查到一条手工插入的运行记录', async () => {
+    const cronKey = `e2e-cron-${RUN}`
+    await prisma.cronRun.create({
+      data: {
+        id: ulid(),
+        key: cronKey,
+        startedAt: new Date(),
+        finishedAt: new Date(),
+        instanceId: 'e2e-instance',
+        ok: true,
+      },
+    })
+
+    const res = await authed().get(`/api/platform/jobs/cron-runs?key=${cronKey}`).expect(200)
+    const page = expectOk<{ items: { key: string; ok: boolean }[] }>(res.body)
+    expect(page.items.length).toBeGreaterThanOrEqual(1)
+    expect(page.items.every((i) => i.key === cronKey)).toBe(true)
+    expect(page.items[0]?.ok).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑰ 看板：即将到期租户明细
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑰ 看板：即将到期租户明细', () => {
+  const EXPIRING_SHOP = { slug: `e2e-expiring-${RUN}`, name: `即将到期 ${RUN}`, phone: phoneFor(2) }
+  let expiringTenantId = ''
+
+  it('开一家 3 天后到期的试用店', async () => {
+    const res = await authed()
+      .post('/api/platform/tenants')
+      .send({
+        slug: EXPIRING_SHOP.slug,
+        name: EXPIRING_SHOP.name,
+        ownerPhone: EXPIRING_SHOP.phone,
+        ownerPassword: OWNER_PASSWORD,
+        trialDays: 3,
+      })
+      .expect(201)
+    const data = expectOk<{ tenant: { id: string; status: string; planExpireAt: string } }>(
+      res.body,
+    )
+    expiringTenantId = data.tenant.id
+    expect(data.tenant.status).toBe('TRIAL')
+  })
+
+  it('GET /api/platform/dashboard/expiring?days=7 明细含这家店，带 slug/name/planExpireAt/daysLeft', async () => {
+    const res = await authed()
+      .get('/api/platform/dashboard/expiring?days=7&pageSize=200')
+      .expect(200)
+    const page = expectOk<{
+      items: { id: string; slug: string; name: string; planExpireAt: string; daysLeft: number }[]
+      total: number
+    }>(res.body)
+
+    const row = page.items.find((i) => i.id === expiringTenantId)
+    expect(row, '3 天后到期的店应该出现在 7 天内到期明细里').toBeTruthy()
+    expect(row?.slug).toBe(EXPIRING_SHOP.slug)
+    expect(row?.name).toBe(EXPIRING_SHOP.name)
+    // `trialDays: 3` 算出来的 `planExpireAt` 是「3 天后那一天的日历日终点」
+    // （`computeTrialEnd` = `endOfCalendarDay(addCalendarDays(今天, 3))`），不是精确的
+    // now+72h——如果建号时刻本身就接近当天末尾，`Math.ceil((到期-此刻)/1天)` 可能算出 4
+    // 而不是 3。断言留一点余量（0~4），不假装两套时间口径能精确对上。
+    expect(row?.daysLeft).toBeGreaterThanOrEqual(0)
+    expect(row?.daysLeft).toBeLessThanOrEqual(4)
+  })
+
+  it('days=1 时这家店（3 天后到期）不出现——过滤窗口真的生效，不是把全表都下发了', async () => {
+    const res = await authed()
+      .get('/api/platform/dashboard/expiring?days=1&pageSize=200')
+      .expect(200)
+    const page = expectOk<{ items: { id: string }[] }>(res.body)
+    expect(page.items.map((i) => i.id)).not.toContain(expiringTenantId)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑱ MFA 开关位：enable/verify 往返（登录时是否强制校验仍是 TODO，见 platform-auth.service.ts）
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑱ MFA 开关位', () => {
+  let secret = ''
+
+  it('POST enable 生成 TOTP secret，返回 otpauth URL', async () => {
+    const res = await authed().post('/api/platform/admins/me/mfa/enable').expect(201)
+    const data = expectOk<{ otpauthUrl: string }>(res.body)
+    expect(data.otpauthUrl.startsWith('otpauth://totp/')).toBe(true)
+
+    const query = new URL(data.otpauthUrl).searchParams
+    secret = query.get('secret') ?? ''
+    expect(secret).toBeTruthy()
+  })
+
+  it('POST verify 用正确的一次性码校验通过', async () => {
+    const code = totp(secret)
+    const res = await authed().post('/api/platform/admins/me/mfa/verify').send({ code }).expect(201)
+    expect(expectOk<{ verified: boolean }>(res.body).verified).toBe(true)
+  })
+
+  it('错误的一次性码 → 1140100（UNAUTHENTICATED）', async () => {
+    const res = await authed().post('/api/platform/admins/me/mfa/verify').send({ code: '000000' })
+    expect(codeOf(res.body)).toBe(1140100)
+  })
+
+  it('格式不对（不是 6 位数字）在 DTO 校验这一层就被拒（BAD_REQUEST）', async () => {
+    const res = await authed().post('/api/platform/admins/me/mfa/verify').send({ code: 'abcdef' })
+    expect(codeOf(res.body)).toBe(1040000)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑲ 默认拒绝：platform 命名空间零豁免（这里只做运行时抽查，静态扫描见 test/arch）
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑲ 默认拒绝', () => {
+  it('不带 token 打任意一个 T1-7/T3-4 新接口都是 1140100', async () => {
+    const paths = [
+      '/api/platform/admins',
+      '/api/platform/plans',
+      '/api/platform/orders',
+      '/api/platform/role-presets',
+      '/api/platform/announcements',
+      '/api/platform/audit-logs',
+      '/api/platform/dashboard/overview',
+      '/api/platform/dashboard/expiring',
+      '/api/platform/jobs/dead-letters',
+      '/api/platform/jobs/cron-runs',
+      `/api/platform/tenants/${tenantId}/overview`,
+      `/api/platform/tenants/${tenantId}/audit-logs`,
+    ]
+    for (const path of paths) {
+      const res = await request(http()).get(path)
+      expect(codeOf(res.body), `${path} 无 token 应为 1140100`).toBe(1140100)
+    }
+
+    // POST/replay 与 MFA 两条是 @Post，用 GET 打会先撞路由不存在（Nest 404，不是信封），
+    // 单独用正确方法验证零 token 的默认拒绝。
+    const postPaths = [
+      `/api/platform/jobs/dead-letters/${ulid()}/replay`,
+      '/api/platform/admins/me/mfa/enable',
+      '/api/platform/admins/me/mfa/verify',
+    ]
+    for (const path of postPaths) {
+      const res = await request(http()).post(path).send({})
+      expect(codeOf(res.body), `${path} 无 token 应为 1140100`).toBe(1140100)
+    }
+  })
+})

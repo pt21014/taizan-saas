@@ -1,0 +1,153 @@
+/**
+ * {{name}}的**业务规则纯函数**（蓝图 §9「商业规则纯函数 + 单测」）。
+ *
+ * ## 为什么单独一个文件
+ *
+ * 规则写在 service 里就只能靠起 Nest + 连库才能测，于是实际上没人测边界值。
+ * 抽成不碰数据库、不读时钟、不 import `@nestjs/*` 的纯函数之后，
+ * `{{slug}}.rules.spec.ts` 可以把每条边界都过一遍（0 元、名字全是空格、超长……），
+ * 而这些恰恰是运营真的会踩到的输入。
+ *
+ * **不要往这里 import 任何 `@nestjs/*` 或 `@prisma/client`**：一旦引入，它就不再是
+ * 纯函数，单测就要起容器，于是边界用例又会慢慢消失。
+ *
+ * @packageDocumentation
+ */
+
+/** {{name}}状态（与 `prisma/schema/10-business/{{schemaFileBase}}.prisma` 的 `{{Pascal}}Status` 一一对应）。 */
+export type {{Pascal}}StatusLike = 'DRAFT' | 'ACTIVE' | 'ARCHIVED'
+
+/** 合法状态全集，供 DTO 校验与本文件共用（两处各写一份必然会漂）。 */
+export const {{CONST}}_STATUSES: readonly {{Pascal}}StatusLike[] = ['DRAFT', 'ACTIVE', 'ARCHIVED']
+
+/** 名称最大长度（字符数，不是字节）。 */
+export const {{CONST}}_NAME_MAX = 60
+
+/** 金额上限：1 亿分 = 100 万元。不设上限的话一次手滑多打几个 0 会直接进 C 端。 */
+export const {{CONST}}_PRICE_CENTS_MAX = 100_000_000
+
+/** 备注最大长度。 */
+export const {{CONST}}_REMARK_MAX = 500
+
+/** 一条校验结论。 */
+export interface RuleViolation {
+  /** 出问题的字段名，与 DTO 字段同名，便于前端定位到输入框。 */
+  field: string
+  /** 给人看的中文说明。 */
+  message: string
+}
+
+/** 校验入参（新建时字段齐全，修改时可缺）。 */
+export interface {{Pascal}}Input {
+  name?: unknown
+  priceCents?: unknown
+  status?: unknown
+  remark?: unknown
+}
+
+/**
+ * 名称归一：去首尾空白、把连续空白压成一个。
+ *
+ * 压空白不是洁癖：`"可乐  330ml"` 与 `"可乐 330ml"` 在唯一索引看来是两条不同的记录，
+ * 而在人看来是同一个。不归一的话「重名检查」会被一个多打的空格绕过去。
+ */
+export function normalize{{Pascal}}Name(raw: unknown): string {
+  if (typeof raw !== 'string') return ''
+  return raw.trim().replace(/\s+/g, ' ')
+}
+
+/** 新建时的完整校验。 */
+export function validate{{Pascal}}Input(input: {{Pascal}}Input): RuleViolation[] {
+  const violations: RuleViolation[] = []
+  violations.push(...checkName(input.name, true))
+  violations.push(...checkPriceCents(input.priceCents, true))
+  violations.push(...checkStatus(input.status, true))
+  violations.push(...checkRemark(input.remark))
+  return violations
+}
+
+/**
+ * 修改时的校验：**只校验给了的字段**。
+ *
+ * 与 `validate{{Pascal}}Input` 分成两个函数而不是加一个 `partial` 布尔参数：
+ * 布尔参数的调用点读起来是 `validate(x, true)`，谁也说不清 true 是哪一边。
+ */
+export function validate{{Pascal}}Patch(patch: {{Pascal}}Input): RuleViolation[] {
+  const violations: RuleViolation[] = []
+  if (patch.name !== undefined) violations.push(...checkName(patch.name, false))
+  if (patch.priceCents !== undefined) violations.push(...checkPriceCents(patch.priceCents, false))
+  if (patch.status !== undefined) violations.push(...checkStatus(patch.status, false))
+  if (patch.remark !== undefined) violations.push(...checkRemark(patch.remark))
+  return violations
+}
+
+/**
+ * 「已启用但金额为 0」——**不拦，只提示**。
+ *
+ * 免费项目是真实场景（试用、赠品、内部单）。拦掉的话业务只能填 1 分钱绕过去，
+ * 于是账上多出一堆 1 分钱的脏数据。提示交给前端展示，写入照常。
+ */
+export function warnActiveWithoutPrice(input: {
+  status?: unknown
+  priceCents?: unknown
+}): string | null {
+  if (input.status !== 'ACTIVE') return null
+  if (typeof input.priceCents !== 'number' || input.priceCents > 0) return null
+  return '已启用但金额为 0，确认是免费项目吗？'
+}
+
+function checkName(value: unknown, required: boolean): RuleViolation[] {
+  const name = normalize{{Pascal}}Name(value)
+  if (name === '') {
+    return required || value !== undefined
+      ? [{ field: 'name', message: '名称不能为空（去掉首尾空白之后）' }]
+      : []
+  }
+  if ([...name].length > {{CONST}}_NAME_MAX) {
+    return [{ field: 'name', message: '名称不能超过 ' + {{CONST}}_NAME_MAX + ' 个字' }]
+  }
+  return []
+}
+
+function checkPriceCents(value: unknown, required: boolean): RuleViolation[] {
+  if (value === undefined || value === null) {
+    return required ? [{ field: 'priceCents', message: '金额必填（单位：分）' }] : []
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    return [{ field: 'priceCents', message: '金额必须是整数，单位是分（不是元）' }]
+  }
+  if (value < 0) return [{ field: 'priceCents', message: '金额不能为负' }]
+  if (value > {{CONST}}_PRICE_CENTS_MAX) {
+    return [
+      {
+        field: 'priceCents',
+        message:
+          '金额上限 ' +
+          {{CONST}}_PRICE_CENTS_MAX +
+          ' 分（' +
+          {{CONST}}_PRICE_CENTS_MAX / 100 +
+          ' 元）',
+      },
+    ]
+  }
+  return []
+}
+
+function checkStatus(value: unknown, required: boolean): RuleViolation[] {
+  if (value === undefined || value === null) {
+    return required ? [{ field: 'status', message: '状态必填' }] : []
+  }
+  if (!{{CONST}}_STATUSES.includes(value as {{Pascal}}StatusLike)) {
+    return [{ field: 'status', message: '状态只能是 ' + {{CONST}}_STATUSES.join(' / ') }]
+  }
+  return []
+}
+
+function checkRemark(value: unknown): RuleViolation[] {
+  if (value === undefined || value === null || value === '') return []
+  if (typeof value !== 'string') return [{ field: 'remark', message: '备注必须是字符串' }]
+  if ([...value].length > {{CONST}}_REMARK_MAX) {
+    return [{ field: 'remark', message: '备注不能超过 ' + {{CONST}}_REMARK_MAX + ' 个字' }]
+  }
+  return []
+}

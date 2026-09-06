@@ -1,0 +1,1338 @@
+/**
+ * **商家侧管理接口 e2e**（T1-9）—— 员工 / 角色 / 审计 / 公告 / 个人设置 + 菜单注册。
+ *
+ * 跑在 `deploy/docker/docker-compose.dev.yml` 起的**真** MySQL + Redis 上：
+ *
+ * ```
+ * pnpm dev:infra
+ * pnpm -F {{scope}}/api prisma:migrate
+ * REDIS_URL=redis://127.0.0.1:6380/6 pnpm -F {{scope}}/api test:e2e
+ * ```
+ *
+ * ## 为什么必须连真库、起真 app
+ *
+ * 这一批断言里有一半的对象是**缓存与会话**：改了角色多久生效、停用之后下一个请求
+ * 是不是 401、改密之后旧 token 还能不能用。这些东西用替身全都测不出来——替身怎么写，
+ * 断言就怎么过。尤其是「`invalidate` 忘了调」这种失败模式：它在单测里完全看不见，
+ * 只有真的发两个 HTTP 请求、中间隔零秒，才知道那 30 秒的缓存有没有被清掉。
+ *
+ * ## 每组用例自带一家新店
+ *
+ * 转让店主、改密、停用会**改坏**一家店（原店主降级了、token 全撤了），而改坏的店
+ * 没法还原成「正常」再给下一组用。所以每组各开一家新店，slug 带本次运行的随机后缀。
+ *
+ * ## 伪 `X-Forwarded-For`
+ *
+ * `TRUSTED_PROXY_HOPS=1` 时 `resolveIps` 把 XFF 的**末段**同时当作 client 与 edge，
+ * 所以带一段合法 IPv4 就能让每个「模拟客户端」落进独立的限流桶。
+ * 这条对 `signup` 档（`clientLimit: 3 / 24h`，**成功也计数**）尤其要紧——
+ * 邀请核销走的就是那一档，不分桶的话第 4 次核销会变成 `1042900`，
+ * 而那会让一条本该验证配额的用例**因为错误的原因**红掉。
+ *
+ * ## 用例清单（44 条）
+ *
+ * ```
+ * ①  员工列表与邀请        8 条  列表 / 关键字搜手机号 / 邀请不扣配额 / lookup 有效 / lookup 乱猜 / accept 不下发 token / 新员工能登录 / 配额 +1
+ * ②  邀请的边界             3 条  重复核销 / 配额为 0 → 1540301 / 手机号不符
+ * ③  改角色与启停           6 条  改完立刻生效 / 停用后 401 / 启用恢复 / 不能停自己 / 不能停店主 / 受限员工看不到员工列表
+ * ④  店主角色不可授予       2 条  非店主授予店主角色被拒 / 店主自己也不行
+ * ⑤  转让店主               4 条  非店主调被拒 / 转让成功 / 原店主失去 OWNER-only 能力 / 原店主不再是全量权限
+ * ⑥  角色 CRUD              8 条  目录 / 建 / 改完立刻生效 / platform-* 拒 / 通配拒 / 未注册码拒 / builtin 保护 / 引用中不可删→改完可删
+ * ⑦  审计                   3 条  看得到上面的操作 / 只含本租户 / 按模块筛
+ * ⑧  公告                   4 条  ALL_TENANT 可见 / 别家 TENANT_IDS 不可见 / 过期不可见 / 已读幂等
+ * ⑨  个人设置与改密         4 条  读 / 改名反映到 bootstrap / 旧密码错 / 改密后旧 token 失效且新密码可登录
+ * ⑩  bootstrap 菜单         3 条  店主看得到 7 个框架页 / 受限员工看不到 staff·role·audit·announcement·profile /
+ *                                只挂内置 staff 角色模板的员工看得到「个人设置」与「公告」
+ * ```
+ *
+ * @packageDocumentation
+ */
+
+import 'reflect-metadata'
+import 'dotenv/config'
+
+import type { INestApplication } from '@nestjs/common'
+import { Test } from '@nestjs/testing'
+import { PrismaClient } from '@prisma/client'
+import type { MenuNode } from '@taizan/contracts'
+import { ulid } from '@taizan/contracts'
+import { PLATFORM_GATEWAY } from '@taizan/nest-billing'
+import type { PlatformGateway } from '@taizan/nest-billing'
+import { hashPassword, seedBase } from '@taizan/prisma-base'
+import request from 'supertest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+
+import { AppModule } from '../src/bootstrap/app.module'
+import { configureApp } from '../src/bootstrap/configure-app'
+import { findFirstUpsertDelegate } from '../src/seed-delegates'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 夹具
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 每次跑用一段唯一后缀，重复跑也不打架。 */
+const RUN = ulid().slice(-8).toLowerCase()
+const PASSWORD = 'e2e-password-123'
+
+/**
+ * 手机号池：`136` + 本次运行的 6 位数字化后缀 + 2 位序号 = **恰好 11 位**。
+ *
+ * 位数是硬约束（DTO 上是 `/^1\d{10}$/`，多一位少一位都会被拦成 1040000），
+ * 所以序号补零而不是直接拼。前缀用 `136` 与 `rbac-billing.e2e-spec.ts` 的 `137` 错开，
+ * 两份 e2e 在同一个库上跑时不会撞 `StaffAccount.phone` 的全局唯一键。
+ */
+const PHONE_BASE = [...RUN]
+  .map((c) => c.charCodeAt(0) % 10)
+  .join('')
+  .slice(0, 6)
+
+function phoneFor(n: number): string {
+  return `136${PHONE_BASE}${String(n).padStart(2, '0')}`
+}
+
+/** 从任意字符串种子派生一个伪客户端 IP。见文件头「伪 X-Forwarded-For」。 */
+function fakeClientIp(seed: string): string {
+  const codes = [...seed].map((c) => c.charCodeAt(0))
+  const octet = (offset: number): number => {
+    const sum = codes.reduce((acc, code, i) => acc + code * (i + offset + 1), 0)
+    return (sum % 254) + 1 // 1..254，避开 0（非法段）与 255
+  }
+  return `10.${octet(1)}.${octet(2)}.${octet(3)}`
+}
+
+let app: INestApplication
+let prisma: PrismaClient
+let gateway: PlatformGateway
+let platformToken = ''
+
+function http(): Parameters<typeof request>[0] {
+  return app.getHttpServer() as Parameters<typeof request>[0]
+}
+
+/** 成功响应的信封形状；`code` 不为 0 时直接把整个 body 打出来，省得反复加日志。 */
+function expectOk<T>(body: unknown): T {
+  const envelope = body as { code: number; message: string; data: T }
+  expect(envelope.code, `期望 code=0，实际：${JSON.stringify(envelope)}`).toBe(0)
+  return envelope.data
+}
+
+/** 取业务码。 */
+function codeOf(body: unknown): number {
+  return (body as { code: number }).code
+}
+
+/** 取错误文案。 */
+function messageOf(body: unknown): string {
+  return (body as { message: string }).message
+}
+
+interface Shop {
+  tenantId: string
+  slug: string
+  /** 店主 token。 */
+  token: string
+  /** 店主的 `Staff.id`。 */
+  staffId: string
+  ownerPhone: string
+}
+
+/** 用平台 token 开一家店并以店主身份登录。不传 `planId` = 这家店没有套餐（不限量、全功能）。 */
+async function createShop(index: number, label: string): Promise<Shop> {
+  const slug = `e2e-am-${index}-${RUN}`
+  const phone = phoneFor(index)
+  const created = await request(http())
+    .post('/api/platform/tenants')
+    .set('Authorization', `Bearer ${platformToken}`)
+    .send({
+      slug,
+      name: `E2E 管理面 ${label} ${RUN}`,
+      ownerPhone: phone,
+      ownerPassword: PASSWORD,
+      trialDays: 30,
+    })
+  const data = expectOk<{ tenant: { id: string; slug: string } }>(created.body)
+  const session = await login(phone, PASSWORD, data.tenant.id)
+  return {
+    tenantId: data.tenant.id,
+    slug: data.tenant.slug,
+    token: session.access,
+    staffId: session.staffId,
+    ownerPhone: phone,
+  }
+}
+
+/** 商家登录。每次一个独立的限流桶。 */
+async function login(
+  phone: string,
+  password: string,
+  tenantId: string,
+): Promise<{ access: string; staffId: string }> {
+  const res = await request(http())
+    .post('/api/admin/auth/login')
+    .set('X-Forwarded-For', fakeClientIp(`${phone}-${password}-${tenantId}`))
+    .send({ phone, password, tenantId })
+  return expectOk<{ access: string; staffId: string }>(res.body)
+}
+
+/**
+ * 直接写库造一个带角色的员工，再登录拿 token。
+ *
+ * 走库而不是走「邀请 → 核销」那条真实路径，是因为大多数用例要的只是「一个权限受限的
+ * 身份」，而核销那条路每次都会消耗一格 `signup` 档限流额度（24 小时窗口）。
+ * 邀请路径本身由用例组①②专门验证。
+ */
+async function createStaffWithRole(
+  shop: Shop,
+  spec: { phone: string; codes: string[]; name?: string },
+): Promise<{ token: string; staffId: string; roleId: string; accountId: string }> {
+  const role = await prisma.role.create({
+    data: {
+      id: ulid(),
+      tenantId: shop.tenantId,
+      code: `e2e-role-${ulid().slice(-6).toLowerCase()}`,
+      name: 'E2E 受限角色',
+      permissionCodes: spec.codes,
+      builtin: false,
+    },
+  })
+  const account = await prisma.staffAccount.create({
+    data: {
+      id: ulid(),
+      phone: spec.phone,
+      passwordHash: await hashPassword(PASSWORD),
+      name: spec.name ?? 'E2E 员工',
+      status: 'ACTIVE',
+    },
+  })
+  const staff = await prisma.staff.create({
+    data: {
+      id: ulid(),
+      tenantId: shop.tenantId,
+      accountId: account.id,
+      name: spec.name ?? 'E2E 员工',
+      status: 'ACTIVE',
+      roleIds: [role.id],
+      dataScope: 'ALL',
+      isOwner: false,
+    },
+  })
+  const session = await login(spec.phone, PASSWORD, shop.tenantId)
+  return {
+    token: session.access,
+    staffId: staff.id,
+    roleId: role.id,
+    accountId: account.id,
+  }
+}
+
+/** 建一档套餐（平台域表，直接写库——套餐管理是另一条工作流）。 */
+async function createPlan(spec: {
+  code?: string
+  features?: string[] | null
+  quotas: Record<string, number | null>
+}): Promise<{ id: string; code: string }> {
+  const code = spec.code ?? `e2e-am-plan-${ulid().slice(-8).toLowerCase()}`
+  const plan = await prisma.plan.create({
+    data: {
+      id: ulid(),
+      code,
+      name: 'E2E 管理面套餐',
+      firstPriceCents: 0,
+      renewPriceCents: 0,
+      periodMonths: 1,
+      quotas: spec.quotas,
+      // `undefined` = 不写这一列 = `null` = 全部功能可用。传 `[]` 是「一个都不给」，
+      // 那会让这些用例先撞上 1540302，测的就不是配额了。
+      features: spec.features == null ? undefined : spec.features,
+      appKeys: ['admin', 'client'],
+      trafficMb: 0,
+    },
+  })
+  return { id: plan.id, code: plan.code }
+}
+
+/**
+ * 改一家店的闸门相关字段，然后**必须** `invalidate`。
+ *
+ * 不 invalidate 的话闸门视图还在 30 秒缓存里，改了跟没改一样。
+ */
+async function mutateTenant(tenantId: string, data: Record<string, unknown>): Promise<void> {
+  await prisma.tenant.update({ where: { id: tenantId }, data })
+  gateway.invalidate(tenantId)
+}
+
+/** 取 bootstrap。 */
+async function bootstrapOf(token: string): Promise<{
+  permissions: string[]
+  menus: MenuNode[]
+  identity: { name: string; isOwner: boolean }
+  quotas: Record<string, { used: number; limit: number | null }>
+}> {
+  const res = await request(http())
+    .get('/api/admin/auth/bootstrap')
+    .set('Authorization', `Bearer ${token}`)
+    .expect(200)
+  return expectOk(res.body)
+}
+
+/** 把菜单树摊平成 key 列表。 */
+function menuKeys(menus: readonly MenuNode[]): string[] {
+  return menus.flatMap((node) => [node.key, ...menuKeys(node.children ?? [])])
+}
+
+/** 生成一张邀请。 */
+async function createInvite(
+  shop: Shop,
+  body: { phone?: string; roleIds?: string[] } = {},
+): Promise<{ token: string; acceptPath: string; id: string }> {
+  const res = await request(http())
+    .post('/api/admin/staff/invites')
+    .set('Authorization', `Bearer ${shop.token}`)
+    .send({ roleIds: body.roleIds ?? [], ...(body.phone ? { phone: body.phone } : {}) })
+  return expectOk(res.body)
+}
+
+/** 核销一张邀请。**每次一个独立的限流桶**（`signup` 档，成功也计数）。 */
+function acceptInvite(token: string, phone: string, password = PASSWORD): request.Test {
+  return request(http())
+    .post(`/api/public/invites/${token}/accept`)
+    .set('X-Forwarded-For', fakeClientIp(`accept-${token}-${phone}`))
+    .send({ phone, password })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 装配
+// ─────────────────────────────────────────────────────────────────────────────
+
+beforeAll(async () => {
+  prisma = new PrismaClient()
+  await seedBase(
+    {
+      platformAdmin: prisma.platformAdmin,
+      plan: prisma.plan,
+      tenant: prisma.tenant,
+      staffAccount: prisma.staffAccount,
+      staff: findFirstUpsertDelegate(prisma.staff),
+      role: findFirstUpsertDelegate(prisma.role),
+      rolePreset: prisma.rolePreset,
+    },
+    { withDemoTenant: false },
+  )
+
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
+  app = moduleRef.createNestApplication({ logger: false })
+  configureApp(app)
+  await app.init()
+  gateway = app.get<PlatformGateway>(PLATFORM_GATEWAY)
+
+  const res = await request(http())
+    .post('/api/platform/auth/login')
+    .set('X-Forwarded-For', fakeClientIp(`platform-admin-${RUN}`))
+    .send({ username: 'admin', password: 'admin123' })
+  platformToken = expectOk<{ access: string }>(res.body).access
+})
+
+/**
+ * 收尾：把本次运行造出来的**平台域**数据删掉。
+ *
+ * 租户域的东西（店、员工、角色、商品）留着不管——它们带着 `RUN` 后缀、彼此隔离，
+ * 而且租户隔离扩展保证下一轮跑不会看见它们。
+ *
+ * 但 `Plan` 与 `Announcement` 是**平台域**表，没有租户维度，攒下来会真的影响别人：
+ *
+ * - `platform.e2e-spec.ts` 有一条「`GET /api/platform/plans?pageSize=200` 里能查到刚建的套餐」，
+ *   开发库里的 e2e 套餐一旦攒过 200 条，那一条就会**因为分页而不是因为 bug** 变红；
+ * - 本文件的公告可见性用例读的是「已发布 + 在有效期内」的前 500 条候选
+ *   （`AdminAnnouncementService` 的 `CANDIDATE_LIMIT`），攒多了同样会被截断。
+ *
+ * 「测试自己造的平台域数据自己收」是唯一能长期成立的规则——指望定期手工清库
+ * 等于指望有人记得，而那件事在实践中约等于不会发生。
+ */
+afterAll(async () => {
+  await app?.close()
+
+  if (prisma) {
+    // 公告：按本次运行的后缀认领。
+    await prisma.announcement
+      .deleteMany({ where: { title: { contains: RUN } } })
+      .catch(() => undefined)
+    // 套餐：先把挂着它的店解绑（`Tenant.planId` 上没有外键，但留一个指向已删套餐的
+    // id 会让闸门视图算不出 planCode，下一次跑到这些店上时行为会很怪）。
+    const plans = await prisma.plan
+      .findMany({ where: { code: { startsWith: 'e2e-am-plan-' } }, select: { id: true } })
+      .catch(() => [])
+    if (plans.length > 0) {
+      const ids = plans.map((x) => x.id)
+      await prisma.tenant
+        .updateMany({ where: { planId: { in: ids } }, data: { planId: null } })
+        .catch(() => undefined)
+      await prisma.plan.deleteMany({ where: { id: { in: ids } } }).catch(() => undefined)
+    }
+  }
+
+  await prisma?.$disconnect()
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ① 员工列表与邀请
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('① 员工列表与邀请 → 核销 → 新员工能登录', () => {
+  let shop: Shop
+  let invite: { token: string; acceptPath: string }
+  const newbiePhone = phoneFor(11)
+  /**
+   * 建店那一刻 `STAFF` 配额的基线。
+   *
+   * **不是 0**：`@taizan/provision` 开通租户时会给店主本人扣一格
+   * （店主也是一个 `Staff` 行）。写死 0 的断言会红，而红的原因与「邀请扣没扣配额」
+   * 毫无关系——所以这里取实测基线，只断言**增量**。
+   */
+  let staffQuotaBaseline = 0
+
+  beforeAll(async () => {
+    shop = await createShop(1, '员工')
+  })
+
+  it('店主看得到员工列表，自己是 isOwner 且带着登录手机号', async () => {
+    const res = await request(http())
+      .get('/api/admin/staff')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .expect(200)
+    const data = expectOk<{
+      total: number
+      items: { id: string; isOwner: boolean; phone: string; roleNames: string[] }[]
+    }>(res.body)
+
+    expect(data.total).toBe(1)
+    const owner = data.items[0]
+    expect(owner?.id).toBe(shop.staffId)
+    expect(owner?.isOwner).toBe(true)
+    // 手机号在 **StaffAccount**（平台域表）上，列表要跨过去取——取不到会是空串。
+    expect(owner?.phone).toBe(shop.ownerPhone)
+  })
+
+  it('按手机号关键字能搜到（关键字同时匹配店内昵称与手机号）', async () => {
+    const res = await request(http())
+      .get('/api/admin/staff')
+      .query({ keyword: shop.ownerPhone.slice(-6) })
+      .set('Authorization', `Bearer ${shop.token}`)
+      .expect(200)
+    expect(expectOk<{ total: number }>(res.body).total).toBe(1)
+  })
+
+  it('生成邀请**不扣配额**（人没来之前不占名额）', async () => {
+    const before = await bootstrapOf(shop.token)
+    staffQuotaBaseline = before.quotas.STAFF?.used ?? 0
+    expect(staffQuotaBaseline, '店主自己占一格').toBe(1)
+
+    invite = await createInvite(shop)
+    expect(invite.token.length).toBeGreaterThanOrEqual(24)
+    expect(invite.acceptPath).toBe(`/api/public/invites/${invite.token}`)
+
+    const after = await bootstrapOf(shop.token)
+    expect(
+      after.quotas.STAFF?.used,
+      '发了 10 张没人用的邀请就把配额占死，那需要一个「撤销邀请」动作来释放——又一条要维护的路径。',
+    ).toBe(staffQuotaBaseline)
+  })
+
+  it('GET /api/public/invites/:token 免登录查得到（有效 + 店名）', async () => {
+    const res = await request(http())
+      .get(`/api/public/invites/${invite.token}`)
+      .set('X-Forwarded-For', fakeClientIp(`lookup-ok-${RUN}`))
+      .expect(200)
+    const data = expectOk<{ valid: boolean; shopName: string | null; phoneMask: string | null }>(
+      res.body,
+    )
+    expect(data.valid).toBe(true)
+    expect(data.shopName).toContain('E2E 管理面')
+    expect(data.phoneMask, '这张邀请不限手机号').toBeNull()
+  })
+
+  it('乱猜的 token 回 200 + valid:false，且**不下发店名**', async () => {
+    const res = await request(http())
+      .get(`/api/public/invites/no-such-token-${RUN}`)
+      .set('X-Forwarded-For', fakeClientIp(`lookup-bad-${RUN}`))
+      .expect(200)
+    const data = expectOk<{ valid: boolean; reason: string; shopName: string | null }>(res.body)
+    expect(data.valid).toBe(false)
+    expect(data.reason).toBe('NOT_FOUND')
+    expect(data.shopName, '连店名都下发的话，乱猜令牌就能把平台上的店名单抄走').toBeNull()
+  })
+
+  it('核销成功：建出 Staff，且**响应里没有 token**', async () => {
+    const res = await acceptInvite(invite.token, newbiePhone)
+    const data = expectOk<Record<string, unknown>>(res.body)
+    expect(data.staffId).toBeTruthy()
+    expect(data.tenantId).toBe(shop.tenantId)
+    expect(data.loggedIn).toBe(false)
+    expect(
+      Object.keys(data),
+      '在这里签 token 等于开了第二条进后台的路，而登录接口上的限流与停用判定这里一条都没有。',
+    ).not.toContain('access')
+  })
+
+  it('新员工能用手机号 + 密码正常登录，并且出现在员工列表里', async () => {
+    const session = await login(newbiePhone, PASSWORD, shop.tenantId)
+    expect(session.access).toBeTruthy()
+
+    const res = await request(http())
+      .get('/api/admin/staff')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .expect(200)
+    const data = expectOk<{ total: number; items: { phone: string }[] }>(res.body)
+    expect(data.total).toBe(2)
+    expect(data.items.map((s) => s.phone)).toContain(newbiePhone)
+  })
+
+  it('核销之后 STAFF 配额计数 +1（配额扣在这一刻，不在发邀请时）', async () => {
+    const after = await bootstrapOf(shop.token)
+    expect(after.quotas.STAFF?.used).toBe(staffQuotaBaseline + 1)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ② 邀请的边界
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('② 邀请的边界：重复核销 / 配额用尽 / 手机号不符', () => {
+  let shop: Shop
+
+  beforeAll(async () => {
+    shop = await createShop(2, '邀请边界')
+  })
+
+  it('同一张邀请核销两次：第二次 1040000（一次性核销）', async () => {
+    const invite = await createInvite(shop)
+    expectOk(await acceptInvite(invite.token, phoneFor(21)).then((r) => r.body))
+
+    const again = await acceptInvite(invite.token, phoneFor(22))
+    expect(codeOf(again.body)).toBe(1040000)
+    expect(messageOf(again.body)).toContain('用过')
+  })
+
+  it('限定了手机号的邀请，换个号核销 → 1040000', async () => {
+    const invite = await createInvite(shop, { phone: phoneFor(23) })
+    const res = await acceptInvite(invite.token, phoneFor(24))
+    expect(codeOf(res.body)).toBe(1040000)
+    expect(messageOf(res.body)).toContain('指定手机号')
+  })
+
+  it('STAFF 配额为 0 时核销 → 1540301，且库里没有多出员工', async () => {
+    const plan = await createPlan({ quotas: { STAFF: 0 } })
+    await mutateTenant(shop.tenantId, {
+      planId: plan.id,
+      status: 'ACTIVE',
+      planExpireAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      trialEndAt: null,
+    })
+
+    const before = await prisma.staff.count({ where: { tenantId: shop.tenantId } })
+    const invite = await createInvite(shop)
+    const res = await acceptInvite(invite.token, phoneFor(25))
+
+    expect(
+      codeOf(res.body),
+      '1540301（升套餐）与 1440301（续费）必须分开：合成一个笼统的「无权限」，商家只会来问客服。',
+    ).toBe(1540301)
+    expect(await prisma.staff.count({ where: { tenantId: shop.tenantId } })).toBe(before)
+
+    // 配额没扣成，邀请也该被放回去（补偿路径）——否则商家升了套餐还得重新发一张。
+    const row = await prisma.staffInvite.findUnique({ where: { token: invite.token } })
+    expect(row?.usedAt, '扣配额失败要把抢占的 usedAt 回滚，不然那张邀请白白作废了').toBeNull()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ③ 改角色与启停
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('③ 改角色立刻生效 / 停用后 401', () => {
+  let shop: Shop
+  let viewer: { token: string; staffId: string; roleId: string }
+  let writerRoleId = ''
+
+  beforeAll(async () => {
+    shop = await createShop(3, '角色与启停')
+    viewer = await createStaffWithRole(shop, { phone: phoneFor(31), codes: ['{{domainSlug}}:list'] })
+    const role = await prisma.role.create({
+      data: {
+        id: ulid(),
+        tenantId: shop.tenantId,
+        code: `e2e-writer-${ulid().slice(-6).toLowerCase()}`,
+        name: 'E2E 可写角色',
+        permissionCodes: ['{{domainSlug}}:list', '{{domainSlug}}:write'],
+        builtin: false,
+      },
+    })
+    writerRoleId = role.id
+  })
+
+  it('受限员工没有 staff:list → 员工列表 1340300', async () => {
+    const res = await request(http())
+      .get('/api/admin/staff')
+      .set('Authorization', `Bearer ${viewer.token}`)
+    expect(codeOf(res.body)).toBe(1340300)
+  })
+
+  it('改角色之前：他建不了商品（1340300）', async () => {
+    const res = await request(http())
+      .post('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${viewer.token}`)
+      .send({ name: `改角色前 ${RUN}`, priceCents: 100 })
+    expect(codeOf(res.body)).toBe(1340300)
+  })
+
+  it('店主把他改到可写角色上 → **下一个请求就生效**（不用等 30 秒缓存过期）', async () => {
+    const patched = await request(http())
+      .patch(`/api/admin/staff/${viewer.staffId}`)
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ roleIds: [writerRoleId] })
+    expectOk(patched.body)
+
+    const res = await request(http())
+      .post('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${viewer.token}`)
+      .send({ name: `改角色后 ${RUN}`, priceCents: 100 })
+    expectOk<{ {{domainSlug}}: { id: string } }>(res.body)
+  })
+
+  it('停用之后他的请求立刻变 1140100（成员关系缓存必须被清）', async () => {
+    const disabled = await request(http())
+      .post(`/api/admin/staff/${viewer.staffId}/disable`)
+      .set('Authorization', `Bearer ${shop.token}`)
+    expect(expectOk<{ status: string }>(disabled.body).status).toBe('DISABLED')
+
+    const res = await request(http())
+      .get('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${viewer.token}`)
+    expect(
+      codeOf(res.body),
+      '不清 MembershipProvider 的缓存，他还能再操作最多 30 秒——而「把人停了他还在改单」正是这个按钮存在的理由。',
+    ).toBe(1140100)
+  })
+
+  it('重新启用之后他又能用（同一条 token）', async () => {
+    const enabled = await request(http())
+      .post(`/api/admin/staff/${viewer.staffId}/enable`)
+      .set('Authorization', `Bearer ${shop.token}`)
+    expect(expectOk<{ status: string }>(enabled.body).status).toBe('ACTIVE')
+
+    const res = await request(http())
+      .get('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${viewer.token}`)
+      .expect(200)
+    expectOk<{ items: unknown[] }>(res.body)
+  })
+
+  it('不能停用自己，也不能停用店主', async () => {
+    const self = await request(http())
+      .post(`/api/admin/staff/${shop.staffId}/disable`)
+      .set('Authorization', `Bearer ${shop.token}`)
+    expect(codeOf(self.body)).toBe(1040000)
+    // 店主停自己这一条同时命中两条红线，文案取先判的那条。
+    expect(messageOf(self.body)).toContain('自己')
+
+    // 换一个有 staff:disable 的普通员工来停店主，才测得到「不能停店主」那一条。
+    const hr = await createStaffWithRole(shop, {
+      phone: phoneFor(32),
+      codes: ['staff:list', 'staff:disable'],
+    })
+    const onOwner = await request(http())
+      .post(`/api/admin/staff/${shop.staffId}/disable`)
+      .set('Authorization', `Bearer ${hr.token}`)
+    expect(codeOf(onOwner.body)).toBe(1040000)
+    expect(messageOf(onOwner.body)).toContain('店主')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ④ 店主角色不可授予（ASSIGNABLE_ROLE_RULE）
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('④ 店主角色永远不可授予', () => {
+  let shop: Shop
+  let hr: { token: string; staffId: string }
+  let target: { staffId: string }
+  let ownerRoleId = ''
+
+  beforeAll(async () => {
+    shop = await createShop(4, '角色授予')
+    hr = await createStaffWithRole(shop, {
+      phone: phoneFor(41),
+      codes: ['staff:list', 'staff:write'],
+    })
+    target = await createStaffWithRole(shop, { phone: phoneFor(42), codes: ['{{domainSlug}}:list'] })
+    // 建店时 `@taizan/provision` 按 RolePreset 实例化了内置角色，其中 `owner` 的
+    // permissionCodes 是 `['*']`——那就是「店主角色」。
+    const owner = await prisma.role.findFirst({
+      where: { tenantId: shop.tenantId, code: 'owner', deletedAt: null },
+      select: { id: true },
+    })
+    ownerRoleId = owner?.id ?? ''
+    expect(ownerRoleId, '建店没有实例化 owner 内置角色？RolePreset 表是空的吗').not.toBe('')
+  })
+
+  it('非店主把店主角色授予别人 → 1040000，文案指向「转让店铺」', async () => {
+    const res = await request(http())
+      .patch(`/api/admin/staff/${target.staffId}`)
+      .set('Authorization', `Bearer ${hr.token}`)
+      .send({ roleIds: [ownerRoleId] })
+    expect(codeOf(res.body)).toBe(1040000)
+    expect(messageOf(res.body)).toContain('转让店铺')
+  })
+
+  it('**店主自己也不行**——这条规则不看操作者是谁', async () => {
+    const res = await request(http())
+      .patch(`/api/admin/staff/${target.staffId}`)
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ roleIds: [ownerRoleId] })
+    expect(
+      codeOf(res.body),
+      '允许店主通过授予角色把店主身份发出去，就等于绕开了转让流程的审计与二次确认。',
+    ).toBe(1040000)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑤ 转让店主
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑤ 转让店主', () => {
+  let shop: Shop
+  let heir: { token: string; staffId: string }
+  /** 一个**带着 staff:transfer-owner 权限点**的非店主：用来证明服务层还有第二道判定。 */
+  let pretender: { token: string; staffId: string }
+
+  beforeAll(async () => {
+    shop = await createShop(5, '转让')
+    heir = await createStaffWithRole(shop, {
+      phone: phoneFor(51),
+      codes: ['{{domainSlug}}:list'],
+      name: 'E2E 接班人',
+    })
+    pretender = await createStaffWithRole(shop, {
+      phone: phoneFor(52),
+      codes: ['staff:list', 'staff:transfer-owner'],
+    })
+  })
+
+  it('非店主即使被授予了 staff:transfer-owner，服务层照样拒（1340300）', async () => {
+    const res = await request(http())
+      .post('/api/admin/staff/transfer-owner')
+      .set('Authorization', `Bearer ${pretender.token}`)
+      .send({ staffId: heir.staffId })
+    expect(
+      codeOf(res.body),
+      '权限点是「能不能看见这个按钮」，principal.isOwner 才是「真的按下去时」。',
+    ).toBe(1340300)
+  })
+
+  it('店主转让成功：接班人 isOwner，自己降为内置角色', async () => {
+    const res = await request(http())
+      .post('/api/admin/staff/transfer-owner')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ staffId: heir.staffId })
+    const data = expectOk<{
+      newOwnerStaffId: string
+      previousOwnerStaffId: string
+      demotedToRoleId: string | null
+    }>(res.body)
+
+    expect(data.newOwnerStaffId).toBe(heir.staffId)
+    expect(data.previousOwnerStaffId).toBe(shop.staffId)
+    expect(data.demotedToRoleId, '本店应当有 manager / staff 内置角色可降').not.toBeNull()
+
+    const rows = await prisma.staff.findMany({
+      where: { tenantId: shop.tenantId, isOwner: true },
+      select: { id: true },
+    })
+    expect(
+      rows.map((r) => r.id),
+      '全店只能有一个店主',
+    ).toEqual([heir.staffId])
+  })
+
+  it('原店主立刻失去 OWNER-only 能力（再转一次 → 1340300）', async () => {
+    const res = await request(http())
+      .post('/api/admin/staff/transfer-owner')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ staffId: pretender.staffId })
+    expect(codeOf(res.body)).toBe(1340300)
+  })
+
+  it('原店主的 bootstrap 不再是全量权限，新店主是', async () => {
+    const previous = await bootstrapOf(shop.token)
+    const now = await bootstrapOf(heir.token)
+    expect(previous.identity.isOwner).toBe(false)
+    expect(now.identity.isOwner).toBe(true)
+    expect(now.permissions.length).toBeGreaterThan(previous.permissions.length)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑥ 角色 CRUD
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑥ 角色 CRUD + 保护规则', () => {
+  let shop: Shop
+  let createdRoleId = ''
+  let holder: { token: string; staffId: string }
+
+  beforeAll(async () => {
+    shop = await createShop(6, '角色')
+    holder = await createStaffWithRole(shop, { phone: phoneFor(61), codes: ['{{domainSlug}}:list'] })
+  })
+
+  it('权限点目录按模块分组，且**不含 platform-***', async () => {
+    const res = await request(http())
+      .get('/api/admin/roles/permissions')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .expect(200)
+    const groups = expectOk<{ module: string; items: { code: string }[] }[]>(res.body)
+
+    const codes = groups.flatMap((g) => g.items.map((i) => i.code))
+    expect(codes).toContain('staff:list')
+    expect(codes).toContain('role:write')
+    expect(codes).toContain('audit:list')
+    expect(codes).toContain('announcement:list')
+    expect(codes).toContain('profile:read')
+    expect(
+      codes.filter((c) => c.startsWith('platform-')),
+      '平台侧权限点只对 platform token 生效，配进商家角色什么也不会发生，只会误导配置的人。',
+    ).toEqual([])
+    expect(groups.map((g) => g.module)).toContain('员工')
+  })
+
+  it('新建角色成功，列表里看得到，staffCount = 0', async () => {
+    const created = await request(http())
+      .post('/api/admin/roles')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ code: 'cashier', name: '收银员', permissionCodes: ['{{domainSlug}}:list'] })
+    const role = expectOk<{ id: string; builtin: boolean; staffCount: number }>(created.body)
+    createdRoleId = role.id
+    expect(role.builtin).toBe(false)
+    expect(role.staffCount).toBe(0)
+
+    const list = await request(http())
+      .get('/api/admin/roles')
+      .query({ keyword: 'cashier' })
+      .set('Authorization', `Bearer ${shop.token}`)
+      .expect(200)
+    expect(expectOk<{ total: number }>(list.body).total).toBe(1)
+  })
+
+  it('改角色的权限点 → 挂着它的人**下一个请求就生效**', async () => {
+    // 先把人挂到这个角色上。
+    expectOk(
+      (
+        await request(http())
+          .patch(`/api/admin/staff/${holder.staffId}`)
+          .set('Authorization', `Bearer ${shop.token}`)
+          .send({ roleIds: [createdRoleId] })
+      ).body,
+    )
+
+    const before = await request(http())
+      .post('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${holder.token}`)
+      .send({ name: `角色改权限前 ${RUN}`, priceCents: 100 })
+    expect(codeOf(before.body)).toBe(1340300)
+
+    expectOk(
+      (
+        await request(http())
+          .patch(`/api/admin/roles/${createdRoleId}`)
+          .set('Authorization', `Bearer ${shop.token}`)
+          .send({ permissionCodes: ['{{domainSlug}}:list', '{{domainSlug}}:write'] })
+      ).body,
+    )
+
+    const after = await request(http())
+      .post('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${holder.token}`)
+      .send({ name: `角色改权限后 ${RUN}`, priceCents: 100 })
+    expectOk<{ {{domainSlug}}: { id: string } }>(after.body)
+  })
+
+  it('permissionCodes 里含 platform-* → 1040000', async () => {
+    const res = await request(http())
+      .post('/api/admin/roles')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({
+        code: 'sneaky',
+        name: '想偷平台权限的角色',
+        permissionCodes: ['{{domainSlug}}:list', 'platform-tenant:list'],
+      })
+    expect(codeOf(res.body)).toBe(1040000)
+    expect(messageOf(res.body)).toContain('platform-tenant:list')
+  })
+
+  it('permissionCodes 里含通配 → 1040000（通配会随新增权限点静默放宽）', async () => {
+    const res = await request(http())
+      .post('/api/admin/roles')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ code: 'wild', name: '通配角色', permissionCodes: ['{{domainSlug}}:*'] })
+    expect(codeOf(res.body)).toBe(1040000)
+    expect(messageOf(res.body)).toContain('通配')
+  })
+
+  it('permissionCodes 里含未注册的 code → 1040000', async () => {
+    const res = await request(http())
+      .post('/api/admin/roles')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ code: 'typo', name: '拼错了的角色', permissionCodes: ['{{domainSlug}}:lst'] })
+    expect(codeOf(res.body)).toBe(1040000)
+    expect(messageOf(res.body)).toContain('{{domainSlug}}:lst')
+  })
+
+  it('内置角色：不能删，也不能改 code（但改名 / 改权限点可以）', async () => {
+    const builtin = await prisma.role.findFirst({
+      where: { tenantId: shop.tenantId, code: 'manager', deletedAt: null },
+      select: { id: true },
+    })
+    expect(builtin, '建店应当实例化 manager 内置角色').not.toBeNull()
+    const id = builtin?.id ?? ''
+
+    const removed = await request(http())
+      .delete(`/api/admin/roles/${id}`)
+      .set('Authorization', `Bearer ${shop.token}`)
+    expect(codeOf(removed.body)).toBe(1040000)
+    expect(messageOf(removed.body)).toContain('内置角色')
+
+    const renamedCode = await request(http())
+      .patch(`/api/admin/roles/${id}`)
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ code: 'manager-2' })
+    expect(codeOf(renamedCode.body)).toBe(1040000)
+
+    const renamed = await request(http())
+      .patch(`/api/admin/roles/${id}`)
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ name: '门店店长' })
+    expect(expectOk<{ name: string }>(renamed.body).name).toBe('门店店长')
+  })
+
+  it('还有人挂着的角色删不掉；把人改走之后就能删了', async () => {
+    const blocked = await request(http())
+      .delete(`/api/admin/roles/${createdRoleId}`)
+      .set('Authorization', `Bearer ${shop.token}`)
+    expect(
+      codeOf(blocked.body),
+      '硬删的话那个员工会**悄悄少一批权限**（rolesOf 把查不到的角色当成空集），而后台上看不出来。',
+    ).toBe(1040000)
+    expect(messageOf(blocked.body)).toContain('1 名员工')
+
+    expectOk(
+      (
+        await request(http())
+          .patch(`/api/admin/staff/${holder.staffId}`)
+          .set('Authorization', `Bearer ${shop.token}`)
+          .send({ roleIds: [] })
+      ).body,
+    )
+
+    const removed = await request(http())
+      .delete(`/api/admin/roles/${createdRoleId}`)
+      .set('Authorization', `Bearer ${shop.token}`)
+    expect(expectOk<{ id: string }>(removed.body).id).toBe(createdRoleId)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑦ 审计
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑦ 审计日志', () => {
+  let shopA: Shop
+  let shopB: Shop
+  let staffA: { staffId: string }
+
+  beforeAll(async () => {
+    shopA = await createShop(7, '审计 A')
+    shopB = await createShop(8, '审计 B')
+    staffA = await createStaffWithRole(shopA, { phone: phoneFor(71), codes: ['{{domainSlug}}:list'] })
+
+    // A 店做三件会被审计的事。
+    await createInvite(shopA)
+    await request(http())
+      .patch(`/api/admin/staff/${staffA.staffId}`)
+      .set('Authorization', `Bearer ${shopA.token}`)
+      .send({ name: '改过名的员工' })
+    await request(http())
+      .post('/api/admin/roles')
+      .set('Authorization', `Bearer ${shopA.token}`)
+      .send({ code: 'audited', name: '被审计的角色', permissionCodes: [] })
+
+    // B 店也做一件，用来证明 A 看不到它。
+    await request(http())
+      .post('/api/admin/roles')
+      .set('Authorization', `Bearer ${shopB.token}`)
+      .send({ code: 'b-only', name: 'B 店独有角色', permissionCodes: [] })
+  })
+
+  it('看得到刚才那三个动作', async () => {
+    const res = await request(http())
+      .get('/api/admin/audit-logs')
+      .set('Authorization', `Bearer ${shopA.token}`)
+      .expect(200)
+    const data = expectOk<{ items: { action: string; actorName: string; result: string }[] }>(
+      res.body,
+    )
+    const actions = data.items.map((i) => i.action)
+    expect(actions).toContain('staff.invite')
+    expect(actions).toContain('staff.role-change')
+    expect(actions).toContain('role.create')
+    // 操作者名字是**快照**，不是关联查询：人改名了、删了，日志上仍然是当时那个名字。
+    expect(data.items.every((i) => i.actorName.length > 0)).toBe(true)
+  })
+
+  it('只含本租户——B 店那条 role.create 在 A 店看不到', async () => {
+    const res = await request(http())
+      .get('/api/admin/audit-logs')
+      .query({ action: 'role.create', pageSize: 200 })
+      .set('Authorization', `Bearer ${shopA.token}`)
+      .expect(200)
+    const items = expectOk<{ items: { targetId: string | null }[] }>(res.body).items
+
+    const bRole = await prisma.role.findFirst({
+      where: { tenantId: shopB.tenantId, code: 'b-only' },
+      select: { id: true },
+    })
+    // A 店建了 1 条（`audited`），B 店建了 1 条。租户条件由 `prisma.tenant` 注入，
+    // 这个接口一行 `tenantId` 都没写——写了才是隐患。
+    expect(items).toHaveLength(1)
+    expect(items.map((i) => i.targetId)).not.toContain(bRole?.id)
+  })
+
+  it('按模块段筛（`module=staff` 等价于 action LIKE "staff.%"）', async () => {
+    const res = await request(http())
+      .get('/api/admin/audit-logs')
+      .query({ module: 'staff', pageSize: 200 })
+      .set('Authorization', `Bearer ${shopA.token}`)
+      .expect(200)
+    const items = expectOk<{ items: { action: string }[] }>(res.body).items
+    expect(items.length).toBeGreaterThanOrEqual(2)
+    expect(items.every((i) => i.action.startsWith('staff.'))).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑧ 平台公告
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑧ 平台公告：audience 可见性与已读', () => {
+  let shop: Shop
+  let otherTenantId = ''
+  let allTenantId = ''
+  let planCode = ''
+
+  beforeAll(async () => {
+    shop = await createShop(9, '公告')
+    const other = await createShop(10, '公告对照')
+    otherTenantId = other.tenantId
+
+    const plan = await createPlan({ quotas: {} })
+    planCode = plan.code
+    await mutateTenant(shop.tenantId, {
+      planId: plan.id,
+      status: 'ACTIVE',
+      planExpireAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      trialEndAt: null,
+    })
+
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    const rows = [
+      { key: 'all', title: `全平台公告 ${RUN}`, audience: 'ALL_TENANT', refs: undefined },
+      { key: 'plan', title: `按套餐公告 ${RUN}`, audience: 'PLAN', refs: [planCode] },
+      { key: 'mine', title: `点名本店公告 ${RUN}`, audience: 'TENANT_IDS', refs: [shop.tenantId] },
+      { key: 'other', title: `点名别家公告 ${RUN}`, audience: 'TENANT_IDS', refs: [otherTenantId] },
+      { key: 'cend', title: `会员公告 ${RUN}`, audience: 'C_END', refs: undefined },
+    ] as const
+
+    for (const row of rows) {
+      const created = await prisma.announcement.create({
+        data: {
+          id: ulid(),
+          title: row.title,
+          contentHtml: `<p>${row.title}</p>`,
+          audience: row.audience,
+          ...(row.refs === undefined ? {} : { audienceRefs: [...row.refs] }),
+          level: 'INFO',
+          publishAt: yesterday,
+          status: 'PUBLISHED',
+        },
+      })
+      if (row.key === 'all') allTenantId = created.id
+    }
+
+    // 两条不该出现的：一条已过期、一条还是草稿。
+    await prisma.announcement.create({
+      data: {
+        id: ulid(),
+        title: `已过期公告 ${RUN}`,
+        contentHtml: '<p>过期</p>',
+        audience: 'ALL_TENANT',
+        level: 'INFO',
+        publishAt: new Date(Date.now() - 48 * 60 * 60 * 1000),
+        expireAt: yesterday,
+        status: 'PUBLISHED',
+      },
+    })
+    await prisma.announcement.create({
+      data: {
+        id: ulid(),
+        title: `草稿公告 ${RUN}`,
+        contentHtml: '<p>草稿</p>',
+        audience: 'ALL_TENANT',
+        level: 'INFO',
+        publishAt: yesterday,
+        status: 'DRAFT',
+      },
+    })
+  })
+
+  it('ALL_TENANT / 命中套餐 / 点名本店 三条都看得到', async () => {
+    const res = await request(http())
+      .get('/api/admin/announcements')
+      .query({ pageSize: 200 })
+      .set('Authorization', `Bearer ${shop.token}`)
+      .expect(200)
+    const titles = expectOk<{ items: { title: string }[] }>(res.body).items.map((i) => i.title)
+
+    expect(titles).toContain(`全平台公告 ${RUN}`)
+    expect(titles).toContain(`按套餐公告 ${RUN}`)
+    expect(titles).toContain(`点名本店公告 ${RUN}`)
+  })
+
+  it('点名别家的 / 给会员的 / 已过期的 / 草稿 四条都看不到', async () => {
+    const res = await request(http())
+      .get('/api/admin/announcements')
+      .query({ pageSize: 200 })
+      .set('Authorization', `Bearer ${shop.token}`)
+      .expect(200)
+    const titles = expectOk<{ items: { title: string }[] }>(res.body).items.map((i) => i.title)
+
+    expect(titles).not.toContain(`点名别家公告 ${RUN}`)
+    expect(titles, 'C_END 是发给会员的，商家后台一律不显示').not.toContain(`会员公告 ${RUN}`)
+    expect(titles).not.toContain(`已过期公告 ${RUN}`)
+    expect(titles).not.toContain(`草稿公告 ${RUN}`)
+  })
+
+  it('标记已读：列表里 read 变 true，且**重复标记不刷新首次已读时间**', async () => {
+    const first = await request(http())
+      .post(`/api/admin/announcements/${allTenantId}/read`)
+      .set('Authorization', `Bearer ${shop.token}`)
+    const readAt = expectOk<{ readAt: string }>(first.body).readAt
+
+    const again = await request(http())
+      .post(`/api/admin/announcements/${allTenantId}/read`)
+      .set('Authorization', `Bearer ${shop.token}`)
+    expect(
+      expectOk<{ readAt: string }>(again.body).readAt,
+      '每次点开都刷新首次已读时间的话，「发出去 3 天了还有人没看」这种统计永远是假的。',
+    ).toBe(readAt)
+
+    const list = await request(http())
+      .get('/api/admin/announcements')
+      .query({ pageSize: 200 })
+      .set('Authorization', `Bearer ${shop.token}`)
+      .expect(200)
+    const row = expectOk<{ items: { id: string; read: boolean }[] }>(list.body).items.find(
+      (i) => i.id === allTenantId,
+    )
+    expect(row?.read).toBe(true)
+  })
+
+  it('unreadOnly 把已读的那条滤掉；标记别家的公告为已读 → 1940400', async () => {
+    const unread = await request(http())
+      .get('/api/admin/announcements')
+      .query({ pageSize: 200, unreadOnly: 'true' })
+      .set('Authorization', `Bearer ${shop.token}`)
+      .expect(200)
+    const ids = expectOk<{ items: { id: string }[] }>(unread.body).items.map((i) => i.id)
+    expect(ids).not.toContain(allTenantId)
+
+    const foreign = await prisma.announcement.findFirst({
+      where: { title: `点名别家公告 ${RUN}` },
+      select: { id: true },
+    })
+    const res = await request(http())
+      .post(`/api/admin/announcements/${foreign?.id}/read`)
+      .set('Authorization', `Bearer ${shop.token}`)
+    expect(
+      codeOf(res.body),
+      '「不可见」与「不存在」回同一个码：区分开就等于提供一个「平台给别家店发了什么」的探测器。',
+    ).toBe(1940400)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑨ 个人设置与改密
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑨ 个人设置与改密', () => {
+  let shop: Shop
+
+  beforeAll(async () => {
+    shop = await createShop(11, '个人设置')
+  })
+
+  it('读得到自己的资料（账号级 + 当前店里的身份）', async () => {
+    const res = await request(http())
+      .get('/api/admin/profile')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .expect(200)
+    const data = expectOk<{ phone: string; staffId: string; isOwner: boolean }>(res.body)
+    expect(data.phone).toBe(shop.ownerPhone)
+    expect(data.staffId).toBe(shop.staffId)
+    expect(data.isOwner).toBe(true)
+  })
+
+  it('改显示名 → bootstrap 的 identity.name 跟着变（顶栏读的就是这一份）', async () => {
+    const patched = await request(http())
+      .patch('/api/admin/profile')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ name: `改过名的店主 ${RUN}`, avatar: 'https://{{rootDomain}}/a.png' })
+    expect(expectOk<{ name: string }>(patched.body).name).toBe(`改过名的店主 ${RUN}`)
+
+    const boot = await bootstrapOf(shop.token)
+    expect(boot.identity.name).toBe(`改过名的店主 ${RUN}`)
+  })
+
+  it('旧密码不对 → 1140100，且口令没被改动', async () => {
+    const res = await request(http())
+      .post('/api/admin/profile/change-password')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ oldPassword: 'definitely-wrong', newPassword: 'brand-new-pass-1' })
+    expect(codeOf(res.body)).toBe(1140100)
+
+    // 原口令仍然能登录 = 真的没改。
+    const session = await login(shop.ownerPhone, PASSWORD, shop.tenantId)
+    expect(session.access).toBeTruthy()
+  })
+
+  it('改密成功 → 旧 token 立刻失效，新密码能登录', async () => {
+    const changed = await request(http())
+      .post('/api/admin/profile/change-password')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ oldPassword: PASSWORD, newPassword: 'brand-new-pass-1' })
+    const result = expectOk<{ ok: boolean; revokedStaffCount: number }>(changed.body)
+    expect(result.ok).toBe(true)
+    expect(result.revokedStaffCount).toBeGreaterThanOrEqual(1)
+
+    const stale = await request(http())
+      .get('/api/admin/profile')
+      .set('Authorization', `Bearer ${shop.token}`)
+    expect(
+      codeOf(stale.body),
+      '改密的动机通常就是「我怀疑号被盗了」，这时候还留着别的端在线，改密就白改了。',
+    ).toBe(1140100)
+
+    const session = await login(shop.ownerPhone, 'brand-new-pass-1', shop.tenantId)
+    expect(session.access).toBeTruthy()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑩ bootstrap 下发的菜单
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑩ bootstrap 的菜单里有七个框架页面', () => {
+  let shop: Shop
+  let viewer: { token: string }
+
+  beforeAll(async () => {
+    shop = await createShop(12, '菜单')
+    viewer = await createStaffWithRole(shop, { phone: phoneFor(91), codes: ['{{domainSlug}}:list'] })
+  })
+
+  it('店主看得到全部七个（工作台 / 员工 / 角色 / 账单 / 审计 / 公告 / 个人设置）', async () => {
+    const boot = await bootstrapOf(shop.token)
+    const keys = menuKeys(boot.menus)
+    for (const key of [
+      'dashboard',
+      'staff',
+      'role',
+      'billing',
+      'audit',
+      'announcement',
+      'profile',
+    ]) {
+      expect(keys, `框架页面 ${key} 没有下发——前端那一页会变成 404`).toContain(key)
+    }
+    // 示例业务模块的菜单还在（新增的框架菜单不该把它挤掉）。
+    expect(keys).toContain('{{domainSlug}}.list')
+  })
+
+  it('受限员工看不到 staff / role / audit / 个人设置，但工作台与账单还在', async () => {
+    const boot = await bootstrapOf(viewer.token)
+    const keys = menuKeys(boot.menus)
+
+    expect(keys, '登录后的落地页不受权限裁剪，裁掉它 = 登录进去 404').toContain('dashboard')
+    expect(keys, '到期时人人都得看得到「去续费」').toContain('billing')
+    expect(keys).toContain('{{domainSlug}}.list')
+
+    for (const key of ['staff', 'role', 'audit', 'announcement', 'profile']) {
+      expect(
+        keys,
+        `${key} 要求一个他没有的权限点，pruneMenus 必须把它裁掉——` +
+          '菜单裁剪与守卫判定用的是同一份 granted 集合，所以「看得到但点了 403」不该发生。',
+      ).not.toContain(key)
+    }
+  })
+
+  it('只挂内置 staff 角色模板的员工：看得到「个人设置」与「公告」，看不到 staff / role / audit（缺口 1 的验收标准）', async () => {
+    // 建店时 provisionTenant 已经把 BASE_ROLE_PRESETS 实例化成这家店自己的 Role，
+    // 内置 `staff` 角色就在里面——不用另建一个自定义角色。
+    const staffRole = await prisma.role.findFirst({
+      where: { tenantId: shop.tenantId, code: 'staff' },
+    })
+    if (staffRole === null) {
+      throw new Error('provisionTenant 没有下发内置的 staff 角色——role-presets 的 seed 被改坏了？')
+    }
+    const phone = phoneFor(92)
+    const account = await prisma.staffAccount.create({
+      data: {
+        id: ulid(),
+        phone,
+        passwordHash: await hashPassword(PASSWORD),
+        name: 'E2E 普通员工（内置模板）',
+        status: 'ACTIVE',
+      },
+    })
+    await prisma.staff.create({
+      data: {
+        id: ulid(),
+        tenantId: shop.tenantId,
+        accountId: account.id,
+        name: 'E2E 普通员工（内置模板）',
+        status: 'ACTIVE',
+        roleIds: [staffRole.id],
+        dataScope: 'ALL',
+        isOwner: false,
+      },
+    })
+    const session = await login(phone, PASSWORD, shop.tenantId)
+
+    const boot = await bootstrapOf(session.access)
+    const keys = menuKeys(boot.menus)
+
+    expect(
+      keys,
+      '内置 staff 模板含 profile:read/write——员工连自己的资料都看不到，是缺口 1 的症状。',
+    ).toContain('profile')
+    expect(
+      keys,
+      '内置 staff 模板含 announcement:list——员工连平台公告都看不到，是缺口 1 的症状。',
+    ).toContain('announcement')
+
+    for (const key of ['staff', 'role', 'audit']) {
+      expect(
+        keys,
+        `内置 staff 模板不含对应权限点，${key} 该被裁掉——普通员工不该看得到通讯录/角色配置/审计日志。`,
+      ).not.toContain(key)
+    }
+  })
+})

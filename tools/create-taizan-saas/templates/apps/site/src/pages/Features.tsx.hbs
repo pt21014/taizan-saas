@@ -1,0 +1,79 @@
+import { usePageTitle } from '../hooks/usePageTitle'
+import { PageHead } from '../components/PageHead'
+import { Cta } from '../components/Cta'
+import { useSiteConfig } from '../context/SiteConfigContext'
+import { NAV } from '../config/NAV'
+
+const MODULES: Array<[string, string[]]> = [
+  ['商品与订单', ['商品/课程上下架', '订单列表与导出', '售后与退款登记']],
+  ['会员与营销', ['会员卡与等级', '优惠券', '分销与佣金']],
+  ['员工与权限', ['按权限点分配角色', '操作审计留痕', '一号多店切换']],
+  ['计费与账单', ['套餐配额三态（不限/禁用/上限）', '到期只读闸门', '账单与续费记录']],
+]
+
+/**
+ * 如实列出还没做的，硬做出来就是配了也不生效的壳——这条比列一堆已完成的功能更重要，
+ * 商家发现「文档说有、点开是空的」之后不会再信这份文档。
+ */
+const NOT_YET = [
+  '独立域名绑定',
+  '多语言店铺',
+  '离线支付对账工具',
+  'App 端全部功能对齐 H5',
+  '自定义报表导出',
+  '开放平台第三方应用市场',
+  '跨店铺库存调拨',
+  '客服工单系统',
+  '私有化部署一键安装包',
+]
+
+export default function Features() {
+  const meta = NAV[2]
+  usePageTitle(meta?.title ?? '功能介绍', meta?.description)
+  const { cfg } = useSiteConfig()
+
+  return (
+    <>
+      <PageHead
+        eyebrow="功能介绍"
+        title="按模块说清楚，不堆形容词"
+        desc="所有套餐功能一致，差别只在配额（课程数/学员数/存储空间），不会为了一个功能逼你升级。"
+      />
+
+      <section className="section">
+        <div className="container">
+          <div className="grid grid--2">
+            {MODULES.map(([title, items]) => (
+              <div className="card" key={title}>
+                <h3>{title}</h3>
+                <ul className="list" style=\{{ marginTop: 10 }}>
+                  {items.map((it) => (
+                    <li key={it}>{it}</li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="section section--tint">
+        <div className="container">
+          <div className="card card--pad-lg">
+            <h3>目前还没做的</h3>
+            <p style=\{{ color: '#6b7078', marginTop: 8 }}>
+              下面这些是真实缺口，不是「以后再说」的客套话——写在这里，是让你在决定要不要用之前先知道。
+            </p>
+            <ul className="list" style=\{{ marginTop: 14, columns: 2, gap: 24 }}>
+              {NOT_YET.map((it) => (
+                <li key={it}>{it}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <Cta trialDays={cfg?.trialDays ?? null} />
+    </>
+  )
+}

@@ -1,0 +1,166 @@
+/**
+ * 五张注册表之二：**菜单**（蓝图 §4.4、§7 扩展点④）。
+ *
+ * 同权限点，菜单也是「代码即真源」，DB 的 `Menu` 表只是镜像。下发给前端的是
+ * `pruneMenus()` 按 权限 ∩ 套餐 features ∩ 显式禁用 ∩ 所属侧 裁剪之后的结果
+ * （见 `modules/admin/bootstrap`）——前端拿不到裁剪依据，也不需要知道某个菜单为什么没了。
+ *
+ * @packageDocumentation
+ */
+
+import { defineMenus, type MenuDef } from '@taizan/contracts'
+
+import { GOODS_MENUS } from '../modules/example-goods/goods.menus'
+import { PLATFORM_MENUS as PLATFORM_SIDE_MENUS } from '../modules/platform/platform.menus'
+
+/**
+ * 框架自带的商家后台页面（T1-9）。
+ *
+ * ## 为什么这七条**直接写在注册表文件里**，而不是各回各的模块目录
+ *
+ * 业务模块的菜单归模块（`goods.menus.ts`），判据是「删掉这个目录，这条菜单也该消失」。
+ * 这七条不满足那个判据：`Dashboard` 与 `BillingCenter` 没有对应的
+ * `modules/admin/<模块>/` 目录（工作台是纯前端页，账单在 `admin/billing/` 但那是
+ * 续费白名单模块、删不掉），而剩下五条即使模块还在也永远不会被删——它们是框架面。
+ * 硬凑五个 `*.menus.ts` 只会让「看一眼后台长什么样」要翻七个文件。
+ *
+ * ## `featureKey` 全部留空 = 所有套餐都有
+ *
+ * 这是刻意的：把「员工管理」做成付费功能意味着一家没续费的店连人都管不了，
+ * 而它此刻最该做的事之一恰恰是把离职的人停掉。功能开关该拦的是业务能力
+ * （`goods`），不是后台自己的骨架。
+ *
+ * ## 哪些挂了 `permission`，哪些没挂
+ *
+ * | 菜单 | permission | 为什么 |
+ * |---|---|---|
+ * | 工作台 | 无 | 登录后的落地页（`path: '/'`）。裁掉它 = 登录进去 404 |
+ * | 账单与续费 | 无 | 与 `/api/admin/billing` 上没有 `@RequirePermission` 保持一致；到期时人人都得看得到「去续费」 |
+ * | 员工 / 角色 / 审计 / 公告 / 个人设置 | 有 | 与对应路由上的 `@RequirePermission` **逐条对齐** |
+ *
+ * 「菜单与接口用同一个依据」是这里唯一的硬约束。两边不一致的表现只有两种：
+ * 菜单里看得到、点进去 403；或者菜单里没有、接口却照样能调。两种都比「这个人
+ * 看不到这一页」难解释得多。
+ *
+ * `path` 与 `apps/admin/src/App.tsx` 里 `FRAMEWORK_ROUTES` 的七条逐字对齐——
+ * 前端把那份静态路由删掉之后，`buildRoutes(session.menus, componentMap)` 生成的
+ * 路由必须落在同样的地址上，否则用户收藏的链接会全部失效。
+ */
+const ADMIN_FRAMEWORK_MENUS: readonly MenuDef[] = [
+  {
+    key: 'dashboard',
+    title: '工作台',
+    icon: 'DashboardOutlined',
+    path: '/',
+    componentKey: 'Dashboard',
+    type: 'MENU',
+    side: 'ADMIN',
+    sort: 10,
+  },
+  {
+    key: 'staff',
+    title: '员工',
+    icon: 'TeamOutlined',
+    path: '/staff',
+    componentKey: 'StaffList',
+    type: 'MENU',
+    side: 'ADMIN',
+    permission: 'staff:list',
+    sort: 30,
+  },
+  {
+    key: 'role',
+    title: '角色权限',
+    icon: 'SafetyCertificateOutlined',
+    path: '/roles',
+    componentKey: 'RoleList',
+    type: 'MENU',
+    side: 'ADMIN',
+    permission: 'role:list',
+    sort: 40,
+  },
+  {
+    key: 'billing',
+    title: '账单与续费',
+    icon: 'CreditCardOutlined',
+    path: '/billing',
+    componentKey: 'BillingCenter',
+    type: 'MENU',
+    side: 'ADMIN',
+    sort: 50,
+  },
+  {
+    key: 'audit',
+    title: '操作日志',
+    icon: 'AuditOutlined',
+    path: '/audit',
+    componentKey: 'AuditList',
+    type: 'MENU',
+    side: 'ADMIN',
+    permission: 'audit:list',
+    sort: 60,
+  },
+  {
+    key: 'announcement',
+    title: '平台公告',
+    icon: 'NotificationOutlined',
+    path: '/announcements',
+    componentKey: 'AnnouncementList',
+    type: 'MENU',
+    side: 'ADMIN',
+    permission: 'announcement:list',
+    sort: 70,
+  },
+  {
+    key: 'profile',
+    title: '个人设置',
+    icon: 'UserOutlined',
+    path: '/profile',
+    componentKey: 'ProfileSettings',
+    type: 'MENU',
+    side: 'ADMIN',
+    permission: 'profile:read',
+    sort: 80,
+  },
+]
+
+/** 商家后台（`side: 'ADMIN'`）的菜单树。 */
+export const ADMIN_MENUS: readonly MenuDef[] = defineMenus([
+  ...ADMIN_FRAMEWORK_MENUS,
+  // 示例业务模块的菜单排在工作台之后、员工之前（`goods` 目录 sort 20）。
+  // 顺序是「先看数据 → 再管业务 → 最后管人和钱」。
+  ...GOODS_MENUS,
+])
+
+/** 平台超管后台（`side: 'PLATFORM'`）的菜单树。 */
+export const PLATFORM_MENUS: readonly MenuDef[] = defineMenus([
+  // 平台面模块自己定义、这里汇总，与上面 `...GOODS_MENUS` 同一个形状。
+  // 它引用的那批 `platform-*:list` 权限点暂居 `registry/permissions.ts`
+  // （理由写在那个文件里）——引用了未注册的权限点会让 `RbacModule.forRoot()` 直接拒启。
+  ...PLATFORM_SIDE_MENUS,
+  // ── T3-4：队列死信查看/重放 ──────────────────────────────────────────
+  //
+  // 直接写在这里而不是 `modules/platform/platform.menus.ts`：本次改动的允许范围
+  // 明确把「追加死信菜单项」放在这个文件（见任务书），`platform.menus.ts` 与
+  // `platform.permissions.ts` 都不在允许改动范围内——所以这条也没有挂 `permission`
+  // （现状是 T1-7 那批控制器方法上本来就没有任何一个挂了 `@RequirePermission`，
+  // 这里不去 `platform.permissions.ts` 新造一个专属权限点，保持与现状一致）。
+  {
+    key: 'platform-job-dead-letter',
+    title: '死信队列',
+    icon: 'BugOutlined',
+    type: 'MENU',
+    side: 'PLATFORM',
+    path: '/jobs/dead-letter',
+    componentKey: 'PlatformJobDeadLetter',
+    sort: 80,
+  },
+])
+
+/**
+ * 两侧菜单的合集。
+ *
+ * `pruneMenus` 会按 `ctx.side` 过滤，所以给它传合集是安全的；分开导出是为了
+ * `menu-route-map.spec.ts`（spec 7，T1-2）能分别拿去和两个前端的 `component-map.ts` 比对。
+ */
+export const ALL_MENUS: readonly MenuDef[] = [...ADMIN_MENUS, ...PLATFORM_MENUS]

@@ -1,0 +1,91 @@
+[
+  {
+    "key": "platform-dashboard",
+    "title": "数据看板",
+    "icon": "DashboardOutlined",
+    "type": "MENU",
+    "path": "/dashboard",
+    "componentKey": "PlatformDashboard",
+    "permission": "platform-dashboard:view",
+    "sort": 5
+  },
+  {
+    "key": "platform-admin",
+    "title": "管理员",
+    "icon": "TeamOutlined",
+    "type": "MENU",
+    "path": "/admins",
+    "componentKey": "PlatformAdminList",
+    "permission": "platform-admin:list",
+    "sort": 10
+  },
+  {
+    "key": "platform-tenant",
+    "title": "租户管理",
+    "icon": "ShopOutlined",
+    "type": "MENU",
+    "path": "/tenants",
+    "componentKey": "PlatformTenantList",
+    "permission": "platform-tenant:list",
+    "sort": 20
+  },
+  {
+    "key": "platform-plan",
+    "title": "套餐",
+    "icon": "GiftOutlined",
+    "type": "MENU",
+    "path": "/plans",
+    "componentKey": "PlatformPlanList",
+    "permission": "platform-plan:list",
+    "sort": 30
+  },
+  {
+    "key": "platform-order",
+    "title": "订单",
+    "icon": "FileTextOutlined",
+    "type": "MENU",
+    "path": "/orders",
+    "componentKey": "PlatformOrderList",
+    "permission": "platform-order:list",
+    "sort": 40
+  },
+  {
+    "key": "platform-role-preset",
+    "title": "角色预设",
+    "icon": "SafetyCertificateOutlined",
+    "type": "MENU",
+    "path": "/role-presets",
+    "componentKey": "PlatformRolePresetList",
+    "permission": "platform-role-preset:list",
+    "sort": 50
+  },
+  {
+    "key": "platform-announcement",
+    "title": "公告",
+    "icon": "NotificationOutlined",
+    "type": "MENU",
+    "path": "/announcements",
+    "componentKey": "PlatformAnnouncementList",
+    "permission": "platform-announcement:list",
+    "sort": 60
+  },
+  {
+    "key": "platform-audit",
+    "title": "审计日志",
+    "icon": "AuditOutlined",
+    "type": "MENU",
+    "path": "/audit-logs",
+    "componentKey": "PlatformAuditLogList",
+    "permission": "platform-audit:list",
+    "sort": 70
+  },
+  {
+    "key": "platform-job-dead-letter",
+    "title": "死信队列",
+    "icon": "BugOutlined",
+    "type": "MENU",
+    "path": "/jobs/dead-letter",
+    "componentKey": "PlatformJobDeadLetter",
+    "sort": 80
+  }
+]

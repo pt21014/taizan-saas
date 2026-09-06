@@ -1,0 +1,42 @@
+{
+  "name": "@taizan/wechatpay",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "description": "微信支付协议层：V3 签名/验签、回调 AES-256-GCM 解密与归一化、JSAPI 二次签名、RSA-OAEP 敏感字段加密、直连/服务商下单与退款、分账、商家转账、特约商户进件、小程序虚拟支付双 HMAC、WechatPayProvider 与 FakeWechatPayClient。零框架依赖，只用 node:crypto，HTTP 走注入的 HttpClient。",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@taizan/payment-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@taizan/eslint-config": "workspace:*",
+    "@taizan/tsconfig": "workspace:*",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

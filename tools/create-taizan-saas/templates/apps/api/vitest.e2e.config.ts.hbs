@@ -1,0 +1,106 @@
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { defineConfig } from 'vitest/config'
+
+/**
+ * 隔离 e2e：连 `deploy/docker/docker-compose.dev.yml` 起的**真** MySQL + Redis。
+ *
+ * - `fileParallelism: false` + `singleThread`：多个测试文件同时往同一个库里写会互相踩，
+ *   而这批用例断言的正是「谁能看见谁的数据」——被别的文件写脏一次就得排查半天。
+ * - 超时放宽到 60s：第一次跑要建 Nest app、连库、跑一堆写入。
+ * - **Redis 库序号自动隔离**，见下。
+ */
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+
+/**
+ * e2e 默认占用的 Redis 逻辑库序号。
+ *
+ * 0 号库是开发进程的默认落点（`.env` 里就是 `/0`），而 e2e 会起真的 BullMQ worker。
+ * 两边同时连 0 号库时，**跑在旁边的那个 dev api 进程会把 `{{domainSlug}}.sync` 的任务抢走**——
+ * 于是 `rbac-billing.e2e-spec.ts` 的队列用例等不到自己入的那条任务，红成「队列坏了」。
+ * 这类假红最贵的地方在于它是间歇的：dev 进程没开的时候一切正常。
+ *
+ * 所以这里不再依赖「跑测试的人记得手动传 env」，而是把隔离做成**默认**。
+ * 需要换库时传 `E2E_REDIS_DB=7`；需要完全自己指定时传一个非 0 库的 `REDIS_URL`。
+ */
+const DEFAULT_E2E_REDIS_DB = 3
+
+/** 一个都读不到 `.env` 时的兜底：compose 里 Redis 映射在宿主 6380。 */
+const FALLBACK_REDIS_URL = 'redis://127.0.0.1:6380/0'
+
+/** 从 `apps/api/.env` 里抠出 `REDIS_URL=`（dotenv 还没跑，这里只做最朴素的逐行解析）。 */
+function redisUrlFromEnvFile(): string | undefined {
+  const file = join(HERE, '.env')
+  if (!existsSync(file)) return undefined
+  for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
+    const m = /^\s*REDIS_URL\s*=\s*(.*?)\s*$/.exec(line)
+    if (m === null) continue
+    const value = (m[1] ?? '').replace(/^['"]|['"]$/g, '')
+    if (value !== '') return value
+  }
+  return undefined
+}
+
+/**
+ * 决定 e2e 用哪个 Redis URL。
+ *
+ * 规则（**只动库序号，主机/端口/密码原样保留**）：
+ * - `REDIS_URL` 没设，或设了但指向 0 号库 → 改写成 `E2E_REDIS_DB`（默认 3）号库；
+ * - `REDIS_URL` 已经指向非 0 库 → 原样尊重，一个字都不改。
+ *
+ * @returns `[最终 URL, 给人看的一行说明]`
+ */
+function resolveE2eRedisUrl(): [string, string] {
+  const explicit = process.env.REDIS_URL
+  const raw = explicit ?? redisUrlFromEnvFile() ?? FALLBACK_REDIS_URL
+  const wanted = Number.parseInt(process.env.E2E_REDIS_DB ?? '', 10)
+  const db = Number.isInteger(wanted) && wanted >= 0 ? wanted : DEFAULT_E2E_REDIS_DB
+
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    // 连 URL 都解析不了就别自作聪明了，原样交给应用去报错——那条错误信息比这里的猜测有用。
+    return [raw, `[e2e] REDIS_URL 无法解析（${raw}），原样透传，不做库序号隔离。`]
+  }
+
+  const current = url.pathname.replace(/^\//, '')
+  if (current !== '' && current !== '0') {
+    return [raw, `[e2e] REDIS_URL 已指向 ${url.host} 的 ${current} 号库，尊重显式设置，不改写。`]
+  }
+
+  url.pathname = `/${db}`
+  const rewritten = url.toString()
+  return [
+    rewritten,
+    `[e2e] Redis 库序号隔离：${url.host} 的 ${current === '' ? '(未指定)' : current} 号库 → ${db} 号库。` +
+      '（0 号库是 dev 进程的默认落点，共用会被抢走 {{domainSlug}}.sync 队列任务导致假红；' +
+      '要换库传 E2E_REDIS_DB=<n>，要完全自定义传一个非 0 库的 REDIS_URL。）',
+  ]
+}
+
+const [E2E_REDIS_URL, E2E_REDIS_NOTE] = resolveE2eRedisUrl()
+
+// 配置文件在主进程里求值，早于任何 worker 起来。打这一行是为了让 CI 日志里能看到
+// 「这一次 e2e 到底连的哪个库」——排查队列类假红时，这是第一个要确认的事实。
+console.log(E2E_REDIS_NOTE)
+
+export default defineConfig({
+  test: {
+    environment: 'node',
+    include: ['test/**/*.e2e-spec.ts'],
+    fileParallelism: false,
+    testTimeout: 60_000,
+    hookTimeout: 120_000,
+    poolOptions: {
+      threads: { singleThread: true },
+    },
+    // `test.env` 在测试文件求值之前写进 worker 的 process.env。测试文件里的
+    // `import 'dotenv/config'` 不会覆盖已经存在的变量，所以这里的值最终生效。
+    env: {
+      REDIS_URL: E2E_REDIS_URL,
+    },
+  },
+})

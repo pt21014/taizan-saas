@@ -1,0 +1,321 @@
+name: CI
+
+# T4-2 CI 与架构约束测试套件收口。
+#
+# 五个 job，按「越便宜的越先红」排：
+#
+#   quality      —— lint / typecheck / format / peer-deps / changeset / 错误码总表同步
+#   unit         —— build + 全量单测（含 apps/* 的前端构建，见下面「为什么没有单独的 web-build」）
+#   arch         —— 蓝图 §8 的 16 条架构约束，外加「守卫真的会红」的机器证明
+#   api-e2e      —— 真 MySQL + Redis 的隔离/权限/计费 e2e
+#   migrate-check—— migrations 与 schema 是否已经漂开
+#
+# 五个 job 全部并行（互相不 needs）。总时长 = 最慢的那个，目标 <10 分钟。
+# 串起来会「省」一点 runner 分钟数，但会把 lint 的 30 秒堵在 e2e 的 5 分钟后面——
+# 而 CI 的价值在于**多快告诉你坏了**，不在于省钱。
+#
+# ## 为什么没有单独的 web-build job
+#
+# 任务分解里列的 `web-build` 已经被 `unit` 覆盖：`pnpm build` 是 `turbo run build`，
+# 它会跑到 `apps/{admin,platform,site,client}` 的 build。再开一个 job 等于把同一份
+# turbo 图跑两遍，只为了在 UI 上多一个绿勾。前端构建真正开始变慢（>2 分钟）的那天
+# 再拆，届时拆的理由是并行度，不是分类学。
+#
+# ## 缓存
+#
+# 两层：pnpm store（`setup-node` 的 `cache: pnpm`）+ turbo 的本地任务缓存。
+# turbo 缓存的 key 带 `github.sha`、restore-keys 退到分支/全局，这样每次都能命中
+# 上一次的产物，只重跑真正变了的包。
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# 同一个 PR 连续推两次时，取消上一次还在跑的。main 上不取消（每个 commit 都要有结论）。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # engines.node 是 >=22；这里钉死大版本，避免「本地 22 CI 24」这种只在 CI 上复现的问题。
+  NODE_VERSION: '22'
+  # turbo 在 CI 上不需要交互式 TUI，日志会干净很多。
+  TURBO_UI: 'false'
+  DO_NOT_TRACK: '1'
+
+jobs:
+  quality:
+    name: quality（lint / typecheck / format / 依赖与文档同步）
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # check-changeset.mjs 要算 `merge-base origin/main HEAD`，浅克隆算不出来。
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        # 不传 version：从根 package.json 的 packageManager 字段读（pnpm@11.1.2）。
+        # 版本号只有那一个真源，不在 workflow 里重复写死——写死两处必然漂。
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Format check
+        run: pnpm format:check
+
+      - name: Check peer deps（零框架依赖包不许 dependencies 里出现 @nestjs/* 或 @prisma/client）
+        run: pnpm check:peer-deps
+
+      - name: Check changeset（改了 packages/*/src 就必须带 changeset）
+        if: github.event_name == 'pull_request'
+        run: node scripts/check-changeset.mjs --base=origin/${{ github.base_ref }}
+
+      - name: Check error-code doc（docs/ERROR-CODES.md 必须与 @taizan/contracts 同步）
+        # 手改过总表 / 加了错误码没重跑生成器，这一步红。
+        run: pnpm docs:error-codes --check
+
+  unit:
+    name: unit（build + 全量单测，含前端构建）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Restore turbo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .turbo
+            node_modules/.cache/turbo
+          key: turbo-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ github.ref_name }}-
+            turbo-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        # 单测里有 import 到 @prisma/client 类型的模块；client 没生成时是 import 期报错，
+        # 那种红看起来像「代码坏了」，实际只是少跑了一步。
+        run: pnpm -F @taizan/api prisma:generate
+
+      - name: Build（turbo run build：全部 packages + 四个前端 app）
+        run: pnpm build
+
+      - name: Test（turbo run test：全部包与 apps 的单测）
+        run: pnpm test
+
+  arch:
+    name: arch（蓝图 §8 的 16 条 + 守卫会红的证明）
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: 架构约束套件（16 条，按编号输出）
+        run: pnpm test:arch
+
+      - name: 故意注入 4 类违规，验证守卫会红
+        # 全绿只说明「现在没有违规」，说明不了「有违规时会被抓住」。
+        # 这一步往真实项目副本里注入漏登记租户表 / 无守卫控制器 / Decimal 金额列 /
+        # 裸 setInterval，四类全部被拦下才退出 0。
+        run: pnpm check:arch
+
+  api-e2e:
+    name: api-e2e（真 MySQL + Redis）
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: taizan_ci_root
+          MYSQL_DATABASE: taizan_ci
+          MYSQL_USER: taizan
+          MYSQL_PASSWORD: taizan_ci
+        ports:
+          - 3306:3306
+        # 与 compose 里同一条理由：端口在初始化阶段就开了，但那时库还没建好，
+        # migrate 会撞上 Unknown database。所以健康检查用 mysqladmin ping 而不是探端口。
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -ptaizan_ci_root"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+          --health-start-period=30s
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: mysql://taizan:taizan_ci@127.0.0.1:3306/taizan_ci
+      # **3 号库**，不是 0 号。0 号是任何一个连上来的进程的默认落点；这批用例里
+      # rbac-billing 会真的入队一条 goods.sync 并等着自己消费掉它，被别的进程抢走
+      # 就是一次假红。`vitest.e2e.config.ts` 也会把 0 号库自动改写成 3 号，
+      # 这里显式写出来只是为了让日志里看得见。
+      REDIS_URL: redis://127.0.0.1:6379/3
+      API_BASE_URL: http://localhost:3000
+      # 三把密钥必须 ≥32 位且互不相同（loadEnv 有跨字段校验）。CI 用固定假值，
+      # 这些串不连接任何真实系统，公开在 workflow 里没有意义上的泄漏。
+      JWT_SECRET_PLATFORM: ci-platform-secret-ci-platform-secret-0001
+      JWT_SECRET_STAFF: ci-staff-secret-ci-staff-secret-00000002
+      JWT_SECRET_MEMBER: ci-member-secret-ci-member-secret-000003
+      CRYPTO_KEYS: '{"k1":"17d151623052e68e58340cbff4dc990db1f455a0e71d53b6a0a783ee34fc66fe"}'
+      CRYPTO_KEY_CURRENT: k1
+      CORS_ORIGINS: http://localhost:5173
+      TRUSTED_PROXY_HOPS: '1'
+      LOG_LEVEL: warn
+      # 闸门关着跑：用例自己按需重建一个 BILLING_ENFORCE=true 的 app（见
+      # rbac-billing.e2e-spec.ts 的文件头），全局打开反而会把别的用例一起锁死。
+      BILLING_ENFORCE: 'false'
+      # 假支付 provider：plan-order 的兑现链路要靠带真 HMAC 的假回调走完。
+      PAY_FAKE_ENABLED: 'true'
+      CLIENT_DEV_LOGIN: 'true'
+      SMS_RETURN_DEV_CODE: 'false'
+      WECHAT_DEV_FAKE_LOGIN: 'false'
+      SWAGGER_ENABLED: 'false'
+      CRON_ENABLED: 'true'
+      QUEUE_ENABLED: 'true'
+      SIGNUP_ENABLED: 'true'
+      SIGNUP_TRIAL_DAYS: '14'
+      APP_NAME: taizan-saas
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm -F @taizan/api prisma:generate
+
+      - name: Migrate（deploy，不是 dev——CI 上不许生成新迁移）
+        run: pnpm -F @taizan/api prisma:deploy
+
+      - name: Seed（幂等基础数据：权限点、菜单、通知模板、平台超管）
+        run: pnpm -F @taizan/api seed
+
+      - name: E2E
+        run: pnpm -F @taizan/api test:e2e
+
+  migrate-check:
+    name: migrate-check（migrations 与 schema 未漂开）
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: taizan_ci_root
+          MYSQL_DATABASE: taizan_ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -ptaizan_ci_root"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+          --health-start-period=30s
+
+    env:
+      DATABASE_URL: mysql://root:taizan_ci_root@127.0.0.1:3306/taizan_ci
+      # migrate diff 要一个可以随便建了删、删了建的库来重放迁移历史。用 root 是因为
+      # Prisma 需要 CREATE/DROP DATABASE 权限。
+      SHADOW_DATABASE_URL: mysql://root:taizan_ci_root@127.0.0.1:3306/taizan_shadow
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: schema-sync 未漂开（00-base/ 与 @taizan/prisma-base 的片段一致）
+        # 这条与 spec 15（base.lock.json 的 sha256）互补：spec 15 守的是「lock 与本地一致」，
+        # 这条守的是「本地与当前装着的框架版本一致」——升级了框架却忘了 sync，只有这条会红。
+        run: pnpm -F @taizan/api taizan:schema-check
+
+      - name: migrate diff（migrations 重放后的结构必须等于 schema）
+        # --exit-code：0 = 没差异；2 = 有差异（step 红）。有差异意味着有人改了 schema
+        # 却没生成迁移——那个改动会在部署日「悄悄没生效」，而本地开发库上一切正常，
+        # 因为本地是 `migrate dev` 直接推上去的。
+        working-directory: apps/api
+        run: |
+          pnpm exec prisma migrate diff \
+            --from-migrations prisma/migrations \
+            --to-schema-datamodel prisma/schema \
+            --shadow-database-url "$SHADOW_DATABASE_URL" \
+            --exit-code

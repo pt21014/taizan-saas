@@ -1,0 +1,81 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// 本文件由 @taizan/prisma-base 托管，勿手改；升级请 pnpm taizan:schema-sync
+// ─────────────────────────────────────────────────────────────────────────────
+// 平台运营面：公告、已读回执、平台设置（含平台级三方密钥）。
+
+/// 平台公告。【平台域】——受众按 audience 决定，不属于任何单个租户。
+model Announcement {
+  id           String             @id @db.VarChar(26)
+  title        String
+  contentHtml  String             @db.LongText
+  audience     Audience           @default(ALL_TENANT)
+  /// 受众补充参数：audience = PLAN 时是 Plan.code 数组；TENANT_IDS 时是 Tenant.id 数组。
+  audienceRefs Json?
+  level        AnnouncementLevel  @default(INFO)
+  publishAt    DateTime
+  expireAt     DateTime?
+  status       AnnouncementStatus @default(DRAFT)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  @@index([status, publishAt])
+  @@index([audience, status])
+}
+
+/// 公告已读回执。【平台域】——读者可能是平台管理员/员工/会员，跨租户统计，故不做租户归属。
+model AnnouncementRead {
+  id             String    @id @db.VarChar(26)
+  announcementId String    @db.VarChar(26)
+  readerType     ActorType
+  /// 读者 id（Staff.id / Member.id / PlatformAdmin.id）。
+  readerId       String    @db.VarChar(26)
+  readAt         DateTime  @default(now())
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([announcementId, readerType, readerId])
+  @@index([readerType, readerId])
+}
+
+/// 平台级设置：site-config、全局开关、平台三方密钥。【平台域】
+/// 明文配置放 value，密钥放 valueEnc + keyId（成对，登记在 src/encrypted-columns.ts）。
+model PlatformSetting {
+  id        String   @id @db.VarChar(26)
+  /// 设置项 key，例如 site.title / pay.wechat.mchId。
+  key       String   @unique
+  /// 明文配置值（结构由业务约定）。密钥类不许放这里。
+  value     Json
+  /// 密钥类设置的密文。
+  valueEnc  String?  @db.Text
+  /// valueEnc 的加密密钥版本号。
+  keyId     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// 公告受众。
+enum Audience {
+  /// 所有租户。
+  ALL_TENANT
+  /// 指定套餐下的租户，见 audienceRefs。
+  PLAN
+  /// 指定租户，见 audienceRefs。
+  TENANT_IDS
+  /// C 端会员。
+  C_END
+}
+
+/// 公告级别，决定前端展示强度（气泡 / 横幅 / 强弹窗）。
+enum AnnouncementLevel {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+/// 公告生命周期。
+enum AnnouncementStatus {
+  DRAFT
+  PUBLISHED
+  /// 下线：不再展示，保留内容与已读回执。
+  ARCHIVED
+}

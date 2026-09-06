@@ -1,0 +1,29 @@
+{
+  "name": "{{scope}}/codegen",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "业务模块脚手架：pnpm gen:module <slug> 一次生成蓝图 §7 的七个扩展点 + rules 纯函数 + 三个 spec + 前端两处",
+  "bin": {
+    "{{projectName}}-gen-module": "./src/index.ts"
+  },
+  "scripts": {
+    "gen": "tsx src/index.ts",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "handlebars": "^4.7.8",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "{{scope}}/eslint-config": "workspace:*",
+    "{{scope}}/tsconfig": "workspace:*",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

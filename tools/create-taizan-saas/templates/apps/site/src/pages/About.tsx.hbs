@@ -1,0 +1,46 @@
+import { usePageTitle } from '../hooks/usePageTitle'
+import { PageHead } from '../components/PageHead'
+import { BRAND, CONTACT_PHONE_PLAIN } from '../config/BRAND'
+import { NAV } from '../config/NAV'
+
+export default function About() {
+  const meta = NAV[7]
+  usePageTitle(meta?.title ?? '关于我们', meta?.description)
+
+  return (
+    <>
+      <PageHead eyebrow="关于" title={`关于 ${BRAND.productName}`} />
+
+      <section className="section">
+        <div className="container" style=\{{ maxWidth: 760 }}>
+          <div className="card card--pad-lg">
+            <h3>我们在做什么</h3>
+            <p style=\{{ marginTop: 10, color: '#4d5158' }}>
+              {BRAND.productName} 是面向培训机构、个人讲师与私域电商团队的 SaaS
+              基座，覆盖开店、上架、收款、发货全流程，微信公众号与小程序双端可用。
+              {BRAND.slogan}。
+            </p>
+          </div>
+
+          <div className="card card--pad-lg" style=\{{ marginTop: 16 }}>
+            <h3>运营主体</h3>
+            <p style=\{{ marginTop: 10, color: '#4d5158' }}>{BRAND.companyName}</p>
+          </div>
+
+          <div className="card card--pad-lg" style=\{{ marginTop: 16 }}>
+            <h3>联系方式</h3>
+            <p style=\{{ marginTop: 10, color: '#4d5158' }}>
+              咨询电话：
+              <a href={`tel:${CONTACT_PHONE_PLAIN}`} style=\{{ fontWeight: 600 }}>
+                {BRAND.contactPhone}
+              </a>
+              <br />
+              邮箱：
+              <a href={`mailto:${BRAND.contactEmail}`}>{BRAND.contactEmail}</a>
+            </p>
+          </div>
+        </div>
+      </section>
+    </>
+  )
+}

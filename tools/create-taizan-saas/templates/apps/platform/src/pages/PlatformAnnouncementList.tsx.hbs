@@ -1,0 +1,203 @@
+import { useState } from 'react'
+import { DatePicker, Descriptions, Form, Input, Modal, Select } from 'antd'
+import dayjs, { type Dayjs } from 'dayjs'
+import {
+  CrudDrawerForm,
+  CrudTable,
+  dateTimeColumn,
+  statusTagColumn,
+  useCrudForm,
+  useCrudTable,
+} from '@taizan/admin-ui'
+import {
+  ANNOUNCEMENT_AUDIENCES,
+  ANNOUNCEMENT_AUDIENCE_LABELS,
+  ANNOUNCEMENT_LEVELS,
+  ANNOUNCEMENT_LEVEL_TAGS,
+  ANNOUNCEMENT_STATUS_TAGS,
+  useAnnouncementApi,
+  type AnnouncementReadStats,
+  type AnnouncementView,
+  type CreateAnnouncementInput,
+} from '../api/announcement'
+
+/** 表单里时间字段用 `Dayjs`，提交给后端要转回 ISO 字符串。 */
+type AnnouncementFormValues = Omit<CreateAnnouncementInput, 'publishAt' | 'expireAt'> & {
+  publishAt: Dayjs
+  expireAt?: Dayjs
+}
+
+export default function PlatformAnnouncementList() {
+  const api = useAnnouncementApi()
+  const [readStats, setReadStats] = useState<AnnouncementReadStats | null>(null)
+
+  const table = useCrudTable<AnnouncementView>({
+    list: api.list,
+    remove: (row) => api.remove(row).then(() => undefined),
+    rowKey: 'id',
+    syncUrl: true,
+    searchSchema: [
+      {
+        name: 'status',
+        label: '状态',
+        type: 'select',
+        options: Object.entries(ANNOUNCEMENT_STATUS_TAGS).map(([value, tag]) => ({
+          label: tag.text,
+          value,
+        })),
+      },
+    ],
+  })
+
+  const form = useCrudForm<AnnouncementFormValues>({
+    get: (id) =>
+      api.get(id).then((a) => ({
+        ...a,
+        audienceRefs: a.audienceRefs ?? undefined,
+        publishAt: dayjs(a.publishAt),
+        expireAt: a.expireAt ? dayjs(a.expireAt) : undefined,
+      })) as unknown as Promise<AnnouncementFormValues>,
+    create: (values) =>
+      api.create({
+        ...values,
+        publishAt: values.publishAt.toISOString(),
+        expireAt: values.expireAt?.toISOString(),
+      }),
+    update: (id, values) =>
+      api.update(id, {
+        ...values,
+        publishAt: values.publishAt.toISOString(),
+        expireAt: values.expireAt?.toISOString(),
+      }),
+    onSuccess: table.refresh,
+  })
+
+  const showReads = async (row: AnnouncementView) => {
+    setReadStats(await api.reads(row.id))
+  }
+
+  return (
+    <>
+      <CrudTable
+        table={table}
+        title="公告"
+        create=\{{ label: '新建公告', onClick: () => form.openForm() }}
+        columns={[
+          { title: '标题', dataIndex: 'title', key: 'title' },
+          {
+            title: '受众',
+            dataIndex: 'audience',
+            key: 'audience',
+            render: (v: string) => ANNOUNCEMENT_AUDIENCE_LABELS[v] ?? v,
+          },
+          statusTagColumn<AnnouncementView>({
+            title: '级别',
+            dataIndex: 'level',
+            map: ANNOUNCEMENT_LEVEL_TAGS,
+          }),
+          statusTagColumn<AnnouncementView>({
+            title: '状态',
+            dataIndex: 'status',
+            map: ANNOUNCEMENT_STATUS_TAGS,
+          }),
+          dateTimeColumn<AnnouncementView>({ title: '展示起始', dataIndex: 'publishAt' }),
+          dateTimeColumn<AnnouncementView>({ title: '过期时间', dataIndex: 'expireAt' }),
+        ]}
+        actionsWidth={280}
+        actions={[
+          {
+            key: 'edit',
+            label: '编辑',
+            hidden: (r) => r.status === 'PUBLISHED',
+            onClick: (r) => form.openForm(r.id),
+          },
+          {
+            key: 'reads',
+            label: '已读统计',
+            hidden: (r) => r.status !== 'PUBLISHED',
+            onClick: showReads,
+          },
+          {
+            key: 'publish',
+            label: '发布',
+            hidden: (r) => r.status !== 'DRAFT',
+            confirm: '确定发布？发布后到达展示起始时间会推给对应受众。',
+            onClick: (r) => api.publish(r.id).then(table.refresh),
+          },
+          {
+            key: 'unpublish',
+            label: '下线',
+            danger: true,
+            hidden: (r) => r.status !== 'PUBLISHED',
+            confirm: '下线会停止展示，但保留内容与已读回执，确定？',
+            onClick: (r) => api.unpublish(r.id).then(table.refresh),
+          },
+          {
+            key: 'del',
+            label: '删除',
+            danger: true,
+            hidden: (r) => r.status !== 'DRAFT',
+            confirm: '仅能删除从未发布过的草稿，确定？',
+            onClick: (r) => void table.removeRow(r),
+          },
+        ]}
+      />
+
+      <CrudDrawerForm form={form} title="公告" width={640}>
+        <Form.Item name="title" label="标题" rules={[{ required: true }]}>
+          <Input />
+        </Form.Item>
+        <Form.Item name="contentHtml" label="正文（HTML）" rules={[{ required: true }]}>
+          <Input.TextArea rows={6} placeholder="支持 HTML" />
+        </Form.Item>
+        <Form.Item name="audience" label="受众" initialValue="ALL_TENANT">
+          <Select
+            options={ANNOUNCEMENT_AUDIENCES.map((a) => ({
+              label: ANNOUNCEMENT_AUDIENCE_LABELS[a],
+              value: a,
+            }))}
+          />
+        </Form.Item>
+        <Form.Item
+          name="audienceRefs"
+          label="受众范围值"
+          tooltip="受众=按套餐时填 Plan.code 列表；受众=指定租户时填 Tenant.id 列表"
+        >
+          <Select mode="tags" placeholder="按需填写，回车新增" />
+        </Form.Item>
+        <Form.Item name="level" label="级别" initialValue="INFO">
+          <Select
+            options={ANNOUNCEMENT_LEVELS.map((l) => ({
+              label: ANNOUNCEMENT_LEVEL_TAGS[l]?.text,
+              value: l,
+            }))}
+          />
+        </Form.Item>
+        <Form.Item name="publishAt" label="展示起始时间" rules={[{ required: true }]}>
+          <DatePicker showTime style=\{{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item name="expireAt" label="过期时间（不填就一直展示到手动下线）">
+          <DatePicker showTime style=\{{ width: '100%' }} />
+        </Form.Item>
+      </CrudDrawerForm>
+
+      <Modal
+        title="已读统计"
+        open={readStats !== null}
+        onCancel={() => setReadStats(null)}
+        footer={null}
+      >
+        {readStats && (
+          <Descriptions column={1} size="small" bordered>
+            <Descriptions.Item label="总已读数">{readStats.total}</Descriptions.Item>
+            {Object.entries(readStats.byReaderType).map(([type, count]) => (
+              <Descriptions.Item key={type} label={type}>
+                {count}
+              </Descriptions.Item>
+            ))}
+          </Descriptions>
+        )}
+      </Modal>
+    </>
+  )
+}

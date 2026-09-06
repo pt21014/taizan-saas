@@ -1,0 +1,21 @@
+node_modules
+dist
+.turbo
+.env
+.env.*
+!.env.example
+coverage
+*.log
+.DS_Store
+
+# Taro/swc 插件缓存
+.swc/
+
+# Playwright 产物/缓存
+test-results/
+playwright-report/
+.playwright-mcp/
+
+# @taizan/prisma-base 的 .env 只是 `prisma validate` 解析 env("DATABASE_URL") 用的占位值，
+# 不指向任何真实数据库，必须随仓库走，否则 CI 上 validate 直接失败。
+!packages/prisma-base/.env

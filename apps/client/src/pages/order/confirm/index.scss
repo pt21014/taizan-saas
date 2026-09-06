@@ -1,0 +1,22 @@
+.confirm {
+  padding: 32px;
+
+  &__name {
+    font-size: 32px;
+    color: #333;
+    margin-bottom: 16px;
+  }
+
+  &__price {
+    font-size: 40px;
+    color: #ff4d4f;
+    font-weight: 600;
+    margin-bottom: 48px;
+  }
+
+  &__mock-tip {
+    margin-top: 24px;
+    font-size: 24px;
+    color: #999;
+  }
+}

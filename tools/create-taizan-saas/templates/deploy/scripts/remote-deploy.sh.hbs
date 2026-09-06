@@ -1,0 +1,175 @@
+#!/bin/bash
+# 远程部署：本机打包 → 上传 → 远端 `pnpm install --prod` → `prisma migrate deploy`
+# → `pm2 reload`。跟 build-release.sh 的关系：这份脚本**调用**它来产出 tar 包
+# （除非用 --release-file 指定一个已经打好的包），自己只管"怎么把包搬到服务器上
+# 并在那边跑起来"。
+#
+# ── 目录形状（服务器上） ──────────────────────────────────────────────────────
+#   <APP_DIR>/
+#     releases/<时间戳>/     ← 每次部署解开一份，内容跟 build-release.sh 的产物一致
+#     shared/.env            ← 敏感配置，**不在**每次上传的包里，跨发布持久存在
+#     current -> releases/<时间戳>   ← rollback.sh 切的就是这个软链接
+#     ecosystem.config.cjs   ← deploy/pm2/ecosystem.config.cjs 的副本，每次部署同步一份
+#     ops/{migrate.sh,health-check.sh}  ← 部署脚本自己需要在远端跑的那几个小脚本
+#
+# ── 已知坑，踩过才知道有多容易中招 ──────────────────────────────────────────────
+# 1. **CRLF**：这份文件如果被 Windows 上的编辑器/Git 配置（`core.autocrlf=true`）
+#    存成 CRLF 换行，`scp` 传过去之后用 `bash remote-deploy.sh` 在 Linux 上跑，
+#    第一行报错常是 `$'\r': command not found` 或者 `bad interpreter`——
+#    看起来像脚本坏了，其实是行尾多了个 `\r`。本仓 `.gitattributes` 建议给
+#    `deploy/**/*.sh` 强制 `eol=lf`；手动排查用 `file deploy/scripts/*.sh`，
+#    看到 `with CRLF line terminators` 就是这个问题，`sed -i 's/\r$//' 文件` 能救。
+# 2. **非交互 SSH shell 里找不到 pnpm/node**：`ssh host 'pnpm -v'` 经常报
+#    `pnpm: command not found`，但用同一个账号登上去交互式敲 `pnpm -v` 又是好的——
+#    原因是非交互、非登录 shell 不会去读 `~/.bashrc`/`~/.bash_profile`，
+#    而 nvm/宝塔装的 node 版本管理器把 PATH 是写在那些文件里的。两个办法：
+#    (a) `ssh host 'bash -lc "pnpm -v"'`（`-lc` 强制当成登录 shell，读配置文件）；
+#    (b) 直接用全路径调用（宝塔典型路径 `/www/server/nvm/versions/node/v22.x.x/bin/`，
+#        或者 `$(npm prefix -g)/bin`）。本脚本远端命令统一走 (a)，
+#    并在探测不到 pnpm 时打印 (b) 的排查提示。
+#
+# 有副作用，用 set -e。
+set -euo pipefail
+
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+
+HOST=""
+SSH_USER="${SSH_USER:-root}"
+SSH_PORT="${SSH_PORT:-22}"
+SSH_KEY=""
+APP_DIR="${ {{projectConst}}_APP_DIR:-/www/wwwroot/{{projectName}} }"
+RELEASE_FILE=""
+SKIP_BUILD=0
+DRY_RUN=0
+ECOSYSTEM="$REPO_ROOT/deploy/pm2/ecosystem.config.cjs"
+
+usage() {
+  cat <<'USAGE'
+用法：bash deploy/scripts/remote-deploy.sh --host <服务器> [选项]
+
+  本机打包 → 上传 → 远端 pnpm install --prod → prisma migrate deploy → pm2 reload。
+
+选项：
+  --host <地址>        目标服务器（必填）
+  --user <用户名>       SSH 用户，默认 root（或环境变量 SSH_USER）
+  --port <端口>        SSH 端口，默认 22（或环境变量 SSH_PORT）
+  --key <私钥文件>      SSH 私钥路径，不给就用 ssh-agent/默认身份
+  --app-dir <远端目录>  服务器上的发布根目录，默认 /www/wwwroot/{{projectName}}
+  --release-file <文件> 用已经打好的 release 包，跳过本机 build-release.sh 这一步
+  --skip-build         不重新打包，直接用上一次 build-release.sh 的产物
+                        （deploy/.releases/ 下最新的一个；调试当前包有没有问题时用）
+  --dry-run            只打印会执行的每一条 ssh/scp 命令，不真的连接服务器、
+                        不改本机任何文件（build-release.sh 也会带上 --dry-run）
+  -h, --help           显示本帮助
+
+首次在一台新服务器上部署前，先手动做好这几件事（本脚本不会自动创建）：
+  1. mkdir -p <APP_DIR>/{releases,shared,ops}
+  2. 把 apps/api/.env.example 抄一份改成真实值，放到 <APP_DIR>/shared/.env
+  3. 确认服务器上有 mysql/redis 可连（宝塔面板装的那两个，或者远端也用 docker-compose.prod.yml）
+  4. 确认 pm2 已经全局装好：`npm i -g pm2`
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --host) HOST="${2:?--host 后面要跟服务器地址}"; shift 2 ;;
+    --user) SSH_USER="${2:?}"; shift 2 ;;
+    --port) SSH_PORT="${2:?}"; shift 2 ;;
+    --key) SSH_KEY="${2:?}"; shift 2 ;;
+    --app-dir) APP_DIR="${2:?}"; shift 2 ;;
+    --release-file) RELEASE_FILE="${2:?}"; shift 2 ;;
+    --skip-build) SKIP_BUILD=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "❌ 认不出的参数：$1（--help 看用法）" >&2; exit 2 ;;
+  esac
+done
+
+if [ -z "$HOST" ] && [ "$DRY_RUN" != "1" ]; then
+  echo "❌ 没给 --host。（想先看看会执行什么命令，加 --dry-run 可以不填 --host 也能跑）" >&2
+  exit 2
+fi
+HOST="${HOST:-<未指定，--dry-run 演示用>}"
+
+SSH_OPTS=(-p "$SSH_PORT" -o StrictHostKeyChecking=accept-new)
+[ -n "$SSH_KEY" ] && SSH_OPTS+=(-i "$SSH_KEY")
+SCP_OPTS=(-P "$SSH_PORT")
+[ -n "$SSH_KEY" ] && SCP_OPTS+=(-i "$SSH_KEY")
+
+run() {
+  echo "+ $*"
+  [ "$DRY_RUN" = "1" ] || "$@"
+}
+# 远端命令统一走登录 shell（-lc），见文件头「已知坑」第 2 条。
+remote() {
+  echo "+ ssh ${SSH_OPTS[*]} ${SSH_USER}@${HOST} -- bash -lc '$*'"
+  [ "$DRY_RUN" = "1" ] || ssh "${SSH_OPTS[@]}" "${SSH_USER}@${HOST}" -- bash -lc "$*"
+}
+
+echo "=========== 1. 本机打包 ==========="
+if [ -n "$RELEASE_FILE" ]; then
+  echo "  使用指定的包：$RELEASE_FILE"
+elif [ "$SKIP_BUILD" = "1" ]; then
+  RELEASE_FILE=$(ls -t "$REPO_ROOT"/deploy/.releases/{{projectName}}-release-*.tar.gz 2>/dev/null | head -1)
+  [ -n "$RELEASE_FILE" ] || { echo "❌ --skip-build 但 deploy/.releases/ 下没有任何包，先跑一次不带这个参数的部署，或去掉 --skip-build。" >&2; exit 1; }
+  echo "  复用上一次的包：$RELEASE_FILE"
+else
+  BUILD_ARGS=()
+  [ "$DRY_RUN" = "1" ] && BUILD_ARGS+=(--dry-run)
+  bash "$REPO_ROOT/deploy/scripts/build-release.sh" "${BUILD_ARGS[@]}"
+  if [ "$DRY_RUN" != "1" ]; then
+    RELEASE_FILE=$(ls -t "$REPO_ROOT"/deploy/.releases/{{projectName}}-release-*.tar.gz | head -1)
+  else
+    RELEASE_FILE="$REPO_ROOT/deploy/.releases/{{projectName}}-release-<时间戳>.tar.gz"
+  fi
+fi
+
+TS=$(date +%Y%m%d%H%M%S)
+RELEASE_DIR="$APP_DIR/releases/$TS"
+
+echo ""
+echo "=========== 2. 上传 ==========="
+run mkdir -p /tmp/{{projectName}}-deploy-check   # 占位，dry-run 下也有点动作可看；真正上传见下面
+remote "mkdir -p '$RELEASE_DIR' '$APP_DIR/ops'"
+run scp "${SCP_OPTS[@]}" "$RELEASE_FILE" "${SSH_USER}@${HOST}:$RELEASE_DIR.tar.gz"
+run scp "${SCP_OPTS[@]}" "$ECOSYSTEM" "${SSH_USER}@${HOST}:$APP_DIR/ecosystem.config.cjs"
+run scp "${SCP_OPTS[@]}" \
+  "$REPO_ROOT/deploy/scripts/migrate.sh" \
+  "$REPO_ROOT/deploy/scripts/rollback.sh" \
+  "$REPO_ROOT/deploy/checks/health-check.sh" \
+  "${SSH_USER}@${HOST}:$APP_DIR/ops/"
+
+echo ""
+echo "=========== 3. 远端解包 + 接入共享配置 ==========="
+remote "tar -xzf '$RELEASE_DIR.tar.gz' -C '$RELEASE_DIR' && rm -f '$RELEASE_DIR.tar.gz'"
+# .env 不在每次上传的包里（它是敏感配置，跟发布批次无关，跨发布持久存在），
+# 用软链接接进这一次的 release，而不是每次都复制一份——改一次 shared/.env，
+# 所有历史 release 目录（万一要临时切回去看）读到的都是同一份。
+remote "ln -sfn '$APP_DIR/shared/.env' '$RELEASE_DIR/apps/api/.env'"
+remote "chmod +x '$APP_DIR/ops/migrate.sh' '$APP_DIR/ops/rollback.sh' '$APP_DIR/ops/health-check.sh'"
+
+echo ""
+echo "=========== 4. 装生产依赖 ==========="
+# --prod：这份包是 build-release.sh 编译完之后打的，不需要 tsup/vitest 这些
+# devDependencies；服务器装的是「跑起来需要的」那一半，体积和攻击面都小很多。
+remote "cd '$RELEASE_DIR' && command -v pnpm >/dev/null 2>&1 || { echo '❌ 找不到 pnpm，检查 PATH（宝塔典型路径 /www/server/nvm/versions/node/*/bin，或 \$(npm prefix -g)/bin），见本脚本文件头「已知坑」第 2 条'; exit 1; }"
+remote "cd '$RELEASE_DIR' && pnpm install --frozen-lockfile --prod"
+
+echo ""
+echo "=========== 5. 数据库迁移（先预览再 deploy，失败即停） ==========="
+remote "bash '$APP_DIR/ops/migrate.sh' --cwd '$RELEASE_DIR/apps/api'"
+
+echo ""
+echo "=========== 6. 切换 current + pm2 reload ==========="
+remote "ln -sfn '$RELEASE_DIR' '$APP_DIR/current'"
+remote "cd '$APP_DIR' && pm2 reload ecosystem.config.cjs || pm2 start ecosystem.config.cjs"
+remote "pm2 save"
+
+echo ""
+echo "=========== 7. 探活 ==========="
+remote "sleep 3 && {{projectConst}}_HEALTH_URL=http://127.0.0.1:3000/health bash '$APP_DIR/ops/health-check.sh' --url http://127.0.0.1:3000/health"
+
+echo ""
+echo "✅ 部署完成：$RELEASE_DIR"
+echo "   出问题要回滚，在服务器上跑："
+echo "     bash '$APP_DIR/ops/rollback.sh' --app-dir '$APP_DIR' --ecosystem '$APP_DIR/ecosystem.config.cjs'"

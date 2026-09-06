@@ -1,0 +1,157 @@
+#!/bin/bash
+# 回滚：把 `<APP_DIR>/current` 这个软链接切回上一个（或指定的）release 目录，
+# 然后 `pm2 reload`。**不回滚数据库**——原因见下面第 3 节，这不是漏做，是刻意的。
+#
+# 目录形状（跟 remote-deploy.sh 产出的一致）：
+#   <APP_DIR>/
+#     releases/
+#       20260101120000/   ← 一次发布解出来的完整目录（apps/api/dist、node_modules、prisma…）
+#       20260102093000/
+#       20260103150000/
+#     current -> releases/20260103150000   ← PM2 的 cwd 指的就是这个软链接
+#
+# 有副作用的脚本，跟 checks/*.sh 反过来，用 set -e。
+set -euo pipefail
+
+APP_DIR="${TAIZAN_APP_DIR:-/www/wwwroot/taizan-saas}"
+KEEP=5
+TO=""
+# 默认指向 <APP_DIR>/ecosystem.config.cjs——remote-deploy.sh 每次部署都会把
+# deploy/pm2/ecosystem.config.cjs 同步一份到这里（服务器上没有完整仓库，
+# 相对路径 deploy/pm2/ecosystem.config.cjs 大概率找不到文件）。仓库内联调时
+# 用 --ecosystem deploy/pm2/ecosystem.config.cjs 显式指定。
+ECOSYSTEM=""
+DRY_RUN=0
+
+usage() {
+  cat <<'USAGE'
+用法：bash deploy/scripts/rollback.sh [选项]
+
+  把 <APP_DIR>/current 切回上一个（或 --to 指定的）release，然后 pm2 reload。
+  只切代码，**不碰数据库**（原因见脚本内注释第 3 节）。
+
+选项：
+  --app-dir <目录>     发布根目录，默认 /www/wwwroot/taizan-saas（或环境变量 TAIZAN_APP_DIR）
+  --to <release 目录名> 回滚到指定 release（releases/ 下的目录名，通常是时间戳），
+                        不给的话回滚到「当前之前的那一个」
+  --keep <N>           保留最近 N 个 release 目录，多的删掉，默认 5
+  --ecosystem <文件>    pm2 reload 用的配置文件，默认 <APP_DIR>/ecosystem.config.cjs
+  --dry-run            只打印会做什么，不真的切软链接/删目录/reload
+  -h, --help           显示本帮助
+
+退出码：0 成功；1 找不到可回滚的目标；2 参数错误。
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --app-dir) APP_DIR="${2:?--app-dir 后面要跟目录路径}"; shift 2 ;;
+    --to) TO="${2:?--to 后面要跟 releases/ 下的目录名}"; shift 2 ;;
+    --keep) KEEP="${2:?--keep 后面要跟数字}"; shift 2 ;;
+    --ecosystem) ECOSYSTEM="${2:?--ecosystem 后面要跟文件路径}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "❌ 认不出的参数：$1（--help 看用法）" >&2; exit 2 ;;
+  esac
+done
+
+ECOSYSTEM="${ECOSYSTEM:-$APP_DIR/ecosystem.config.cjs}"
+
+RELEASES_DIR="$APP_DIR/releases"
+CURRENT_LINK="$APP_DIR/current"
+
+[ -d "$RELEASES_DIR" ] || { echo "❌ 没有 $RELEASES_DIR，这台机器上还没发布过。" >&2; exit 1; }
+
+run() {
+  echo "+ $*"
+  [ "$DRY_RUN" = "1" ] || "$@"
+}
+
+echo "=========== 1. 找回滚目标 ==========="
+# releases/ 下按目录名排序（目录名是时间戳，字典序 = 时间序）。
+mapfile -t ALL_RELEASES < <(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+[ "${#ALL_RELEASES[@]}" -gt 0 ] || { echo "❌ $RELEASES_DIR 是空的，没有可回滚的版本。" >&2; exit 1; }
+
+CURRENT_TARGET=""
+if [ -L "$CURRENT_LINK" ]; then
+  CURRENT_TARGET=$(basename "$(readlink -f "$CURRENT_LINK")")
+fi
+echo "  当前 current -> ${CURRENT_TARGET:-<未设置>}"
+
+if [ -n "$TO" ]; then
+  TARGET="$TO"
+else
+  # 默认目标：比当前早一个的那个 release。
+  TARGET=""
+  PREV=""
+  for r in "${ALL_RELEASES[@]}"; do
+    if [ "$r" = "$CURRENT_TARGET" ]; then
+      TARGET="$PREV"
+      break
+    fi
+    PREV="$r"
+  done
+  if [ -z "$TARGET" ]; then
+    echo "❌ 找不到「当前之前的一个」release（当前是最早的一个，或 current 没指向 releases/ 下任何目录）。" >&2
+    echo "   用 --to <目录名> 显式指定回滚目标；可用目标：${ALL_RELEASES[*]}" >&2
+    exit 1
+  fi
+fi
+
+[ -d "$RELEASES_DIR/$TARGET" ] || {
+  echo "❌ $RELEASES_DIR/$TARGET 不存在。可用目标：${ALL_RELEASES[*]}" >&2
+  exit 1
+}
+echo "  回滚目标：$TARGET"
+
+echo ""
+echo "=========== 2. 切软链接 + pm2 reload ==========="
+# 先切链接、成功了再 reload——顺序不能反：reload 用的是 cwd（软链接路径本身），
+# 只要链接指对了地方，reload 读到的就是新目标；反过来先 reload 再切链接的话，
+# 中间这段时间新起的 worker 读到的还是旧目标，等于白 reload 一次。
+run ln -sfn "$RELEASES_DIR/$TARGET" "$CURRENT_LINK"
+run pm2 reload "$ECOSYSTEM"
+
+echo ""
+echo "=========== 3. 为什么不回滚数据库 ==========="
+cat <<'NOTE'
+  本脚本只切代码，数据库迁移**不做任何操作**（不 down、不建反向迁移）。原因：
+
+  1. 迁移之间不是对称的。加一列、加一张表这类"膨胀式"变更，旧代码通常能容忍
+     （多出来的列/表旧代码不用，不代表会出错）；但如果新版本的迁移里有
+     `DROP COLUMN` / 数据回填改写，"回滚数据库结构"意味着**丢数据**——
+     那些数据是回滚这一刻之后、旧代码运行期间也可能继续被写入的，
+     没有任何自动化脚本能安全地"猜"出应该把回滚后的空洞填成什么。
+  2. 回滚的典型场景是"新代码有 bug，先切回旧代码稳住"，这时候数据库结构造成的
+     影响面通常比代码 bug 小得多——旧代码只要没被新迁移的破坏性变更卡住
+     （破坏性变更本来就该配合 feature flag 做"先加后删"两阶段发布，
+     不应该指望回滚脚本来兜底），继续跑在新结构的数据库上完全没问题。
+  3. 真的需要撤销某次迁移，那是一次**人工评估 + 手写反向 SQL**的操作，
+     必须先看清楚这次迁移之后写入了什么数据、哪些数据会因为回滚结构而丢失——
+     这类判断脚本做不了，硬塞一个"自动回滚数据库"的选项只会让人在真正紧急的
+     时候，习惯性地多按一个其实不该按的按钮。
+
+  如果这次发布确实需要撤销数据库变更：先用 deploy/scripts/migrate.sh 里那种
+  `prisma migrate diff` 预览手法，看清楚要撤销的这次迁移改了什么，再手写迁移
+  或者 SQL 去有针对性地处理，不要指望这里能有一键操作。
+NOTE
+
+echo ""
+echo "=========== 4. 清理旧 release，只留最近 $KEEP 个 ==========="
+TOTAL="${#ALL_RELEASES[@]}"
+if [ "$TOTAL" -gt "$KEEP" ]; then
+  TO_DELETE_COUNT=$((TOTAL - KEEP))
+  for ((i = 0; i < TO_DELETE_COUNT; i++)); do
+    old="${ALL_RELEASES[$i]}"
+    if [ "$old" = "$TARGET" ]; then
+      echo "  ⏭️  跳过 $old（正是这次回滚的目标，不删）"
+      continue
+    fi
+    run rm -rf "${RELEASES_DIR:?}/$old"
+  done
+else
+  echo "  当前只有 $TOTAL 个 release，不到保留上限 $KEEP，不清理。"
+fi
+
+echo ""
+echo "✅ 已回滚到 $TARGET。"

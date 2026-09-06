@@ -1,0 +1,10 @@
+import { Module } from '@nestjs/common'
+
+import { {{DomainPascal}}Module } from '../../example-{{domainSlug}}/{{domainSlug}}.module'
+import { Client{{DomainPascal}}Controller } from './client-{{domainSlug}}.controller'
+
+@Module({
+  imports: [{{DomainPascal}}Module],
+  controllers: [Client{{DomainPascal}}Controller],
+})
+export class Client{{DomainPascal}}Module {}

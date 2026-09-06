@@ -1,0 +1,104 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// 本文件由 @taizan/prisma-base 托管，勿手改；升级请 pnpm taizan:schema-sync
+// ─────────────────────────────────────────────────────────────────────────────
+// 基础设施表：幂等键、队列死信、cron 运行记录、事务发件箱。
+//
+// 这四张全是【平台域】：它们的读者是无人值守的后台进程（drainer / leader cron / 运维台），
+// 那里没有租户上下文，一旦被纳入租户隔离，隔离决策函数会直接抛「无上下文」。
+// 需要记录「这条记录来自哪家店」时用 **originTenantId**——刻意不叫 tenantId：
+// 蓝图 §3.1 禁止可空 tenantId，而叫 tenantId 又会被隔离校验器当成归属列。
+
+/// 幂等键。【平台域】——支付回调、对外下单等「同一请求可能来两次」的入口用。
+model IdempotencyKey {
+  id         String            @id @db.VarChar(26)
+  /// 作用域，通常是接口名，例如 pay.notify.wechat。
+  scope      String
+  /// 调用方给的幂等键。
+  key        String
+  status     IdempotencyStatus @default(IN_PROGRESS)
+  /// 首次成功时的结果指纹，用于校验重放请求参数是否一致。
+  resultHash String?
+  /// 过期时间，到点由清理任务删。
+  expiresAt  DateTime
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  @@unique([scope, key])
+  @@index([expiresAt])
+}
+
+/// 队列死信。【平台域】
+model JobDeadLetter {
+  id             String    @id @db.VarChar(26)
+  queue          String
+  jobName        String
+  /// 任务来自哪家店；平台级任务为 null。见本文件头关于命名的说明。
+  originTenantId String?   @db.VarChar(26)
+  payload        Json
+  attempts       Int       @default(0)
+  lastError      String    @db.Text
+  traceId        String
+  /// 人工处理（重投/忽略）的时刻。
+  resolvedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([queue, createdAt])
+  @@index([originTenantId, createdAt])
+  @@index([resolvedAt])
+}
+
+/// cron 执行记录。【平台域】——leader 锁的可观测面：多实例部署时到底哪台跑了、跑没跑成。
+model CronRun {
+  id         String    @id @db.VarChar(26)
+  /// 任务 key，与 @LeaderCron 的 key 一致。
+  key        String
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  /// 抢到 leader 的实例标识（主机名 + pid）。
+  instanceId String
+  ok         Boolean   @default(false)
+  error      String?   @db.Text
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([key, startedAt])
+  @@index([startedAt])
+}
+
+/// 事务发件箱。【平台域】——业务事务内写一行，队列由 drainer 事务外投递，避免「写库成功但消息丢了」。
+model OutboxEvent {
+  id             String       @id @db.VarChar(26)
+  /// 事件来自哪家店；平台级事件为 null。见本文件头关于命名的说明。
+  originTenantId String?      @db.VarChar(26)
+  topic          String
+  payload        Json
+  status         OutboxStatus @default(PENDING)
+  attempts       Int          @default(0)
+  /// 最早可投递时刻，退避重试靠它。
+  availableAt    DateTime     @default(now())
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([status, availableAt])
+  @@index([topic, status])
+  @@index([originTenantId, createdAt])
+}
+
+/// 幂等键状态。
+enum IdempotencyStatus {
+  /// 已占位、首次请求处理中；并发同键请求应直接返回「处理中」。
+  IN_PROGRESS
+  SUCCEEDED
+  FAILED
+}
+
+/// 发件箱投递状态。
+enum OutboxStatus {
+  PENDING
+  SENT
+  /// 本轮失败，等 availableAt 后重试。
+  FAILED
+  /// 超过重试上限，已转入死信，人工处理。
+  DEAD
+}

@@ -1,0 +1,66 @@
+{
+  "name": "@taizan/nest-payment",
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "description": "支付的 Nest 装配层（蓝图 §4.12）：按 PayChannel 注册 Provider、租户级商户密钥解密解析、统一回调控制器（验签 → 幂等 → 归一化 → 按 outTradeNo 前缀路由到领域处理器）、下单/查单/退款编排、@PaymentHandler 发现，以及供 e2e 驱动整条回调链路的 FakeProvider + TestKit。",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@taizan/contracts": "workspace:*",
+    "@taizan/crypto": "workspace:*",
+    "@taizan/nest-audit": "workspace:*",
+    "@taizan/nest-auth": "workspace:*",
+    "@taizan/nest-core": "workspace:*",
+    "@taizan/nest-infra": "workspace:*",
+    "@taizan/nest-prisma": "workspace:*",
+    "@taizan/payment-core": "workspace:*"
+  },
+  "peerDependencies": {
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@nestjs/common": "^11.0.1",
+    "@nestjs/core": "^11.0.1",
+    "@nestjs/platform-express": "^11.0.1",
+    "@nestjs/testing": "^11.0.1",
+    "@taizan/eslint-config": "workspace:*",
+    "@taizan/tsconfig": "workspace:*",
+    "@taizan/wechatpay": "workspace:*",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "@types/supertest": "^6.0.2",
+    "eslint": "^9.17.0",
+    "ioredis": "^5.4.1",
+    "ioredis-mock": "^8.9.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "supertest": "^7.0.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  }
+}

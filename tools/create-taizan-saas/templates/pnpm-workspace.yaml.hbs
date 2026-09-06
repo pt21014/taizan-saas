@@ -1,0 +1,22 @@
+# 生成项目的 workspace 成员只有 apps/* 与 tools/*。
+# **没有 packages/**：框架包（@{{projectSlug}}/*）是从 npm 装的，不在本仓库里——
+# 这正是「升级框架 = 改一个版本号」这件事成立的前提。
+packages:
+  - 'apps/*'
+  - 'tools/*'
+allowBuilds:
+  '@parcel/watcher': true
+  '@prisma/client': true
+  '@prisma/engines': true
+  '@scarf/scarf': false
+  '@swc/core': true
+  '@tarojs/binding': true
+  core-js: true
+  core-js-pure: true
+  esbuild: true
+  # msgpackr-extract 是 BullMQ 依赖链上的一个**可选**原生加速包（序列化提速）。
+  # 不给它跑构建脚本，msgpackr 会退回纯 JS 实现——功能完全一样，只是慢一点。
+  # 框架仓库那份 pnpm-workspace.yaml 里这一项还是 pnpm 生成的占位文案，
+  # 生成项目里必须是一个确定的布尔值，否则 `pnpm install` 直接 ERR_PNPM_IGNORED_BUILDS。
+  msgpackr-extract: false
+  prisma: true

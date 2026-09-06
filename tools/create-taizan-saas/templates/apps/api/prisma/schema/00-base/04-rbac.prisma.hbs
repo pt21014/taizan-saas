@@ -1,0 +1,114 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// 本文件由 @taizan/prisma-base 托管，勿手改；升级请 pnpm taizan:schema-sync
+// ─────────────────────────────────────────────────────────────────────────────
+// 权限点、菜单、角色模板、租户角色。
+//
+// 关键约定（蓝图附录 #3）：**权限点与菜单以代码注册表为唯一真源，DB 只是镜像**。
+// Permission / Menu / RolePreset 三张表由启动期的同步任务按代码注册表覆盖写，
+// 人工在 DB 里改会在下次启动被覆盖；也因此它们不做软删（同步任务直接删多余行）。
+
+/// 权限点镜像。【平台域】——真源是代码里的权限注册表，本表只为「查询与勾选」存在。
+model Permission {
+  id        String   @id @db.VarChar(26)
+  /// 权限码，例如 {{domainSlug}}:sku:update。
+  code      String   @unique
+  /// 所属模块，用于后台按组勾选。
+  module    String
+  name      String
+  type      PermType
+  sort      Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([module, sort])
+}
+
+/// 菜单镜像。【平台域】——真源同样在代码注册表，admin 与 platform 两侧共用一张表，按 side 区分。
+model Menu {
+  id           String   @id @db.VarChar(26)
+  /// 菜单唯一 key，父子关系按 key 串，不用 id（代码注册表里写 key 更稳）。
+  key          String   @unique
+  parentKey    String?
+  title        String
+  icon         String?
+  /// 前端路由路径。
+  path         String?
+  /// 前端 component-map.ts 里的键（spec 7 双向比对它）。
+  componentKey String?
+  type         MenuType
+  /// 渲染该菜单需要的权限码（Permission.code）。
+  permission   String?
+  /// 该菜单归属的功能开关 key；套餐没开这个功能时整块隐藏。
+  featureKey   String?
+  sort         Int      @default(0)
+  side         MenuSide
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([side, parentKey, sort])
+}
+
+/// 平台下发的角色模板。【平台域】——建租户时按模板实例化成租户自己的 Role。
+model RolePreset {
+  id              String   @id @db.VarChar(26)
+  code            String
+  name            String
+  /// 与 Menu.side 同一套取值：这套模板给商家后台用还是给平台后台用。
+  side            MenuSide
+  permissionCodes Json
+  /// 内置模板不允许平台运营删除。
+  builtin         Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([code, side])
+  @@index([side])
+}
+
+/// 租户自己的角色。【租户域】
+model Role {
+  id              String    @id @db.VarChar(26)
+  tenantId        String    @db.VarChar(26)
+  code            String
+  name            String
+  /// Permission.code 数组；`["*"]` 表示全量（店主角色）。
+  permissionCodes Json
+  /// 菜单可见范围；null = 跟随权限码自动推导。
+  menuKeys        Json?
+  /// 建租户时内置下发的角色，租户不能删。
+  builtin         Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  @@unique([tenantId, code, deletedAt])
+  @@index([tenantId, id])
+}
+
+/// 权限点类型。
+enum PermType {
+  /// 接口权限，与 @RequirePermission 一一对应（spec 6 要求每个 API 类权限点都被引用）。
+  API
+  /// 菜单可见性权限。
+  MENU
+  /// 页面内按钮级权限。
+  BUTTON
+}
+
+/// 菜单节点类型。
+enum MenuType {
+  /// 目录（只分组，不落路由）。
+  DIR
+  /// 菜单（落路由）。
+  MENU
+  /// 按钮（挂在菜单下的操作点）。
+  BUTTON
+}
+
+/// 后台侧别。Menu 与 RolePreset 共用：一个权限模板要么给商家后台，要么给平台后台。
+enum MenuSide {
+  /// 商家后台 apps/admin。
+  ADMIN
+  /// 平台后台 apps/platform。
+  PLATFORM
+}

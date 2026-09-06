@@ -1,0 +1,63 @@
+import { usePageTitle } from '../hooks/usePageTitle'
+import { PageHead } from '../components/PageHead'
+import { BRAND } from '../config/BRAND'
+import { LEGAL_NAV } from '../config/NAV'
+
+const SECTIONS: Array<[string, string]> = [
+  [
+    '一、服务内容',
+    `${BRAND.companyName}（以下称"我们"）通过 ${BRAND.productName} 向注册商家提供开店、商品管理、收款对接、数据统计等 SaaS 服务。注册即视为你已阅读并同意本条款。`,
+  ],
+  [
+    '二、账号与店铺',
+    '店铺路径（slug）一经确定不可更改，请在注册前确认无误。同一手机号可以开通多家店铺，登录后可在后台切换；账号密码由你自行保管，因保管不善导致的损失由你自行承担。',
+  ],
+  [
+    '三、资金与收款',
+    '顾客的付款走商家自行填写的微信特约商户号，资金直接进入商家账户，不经过我们；我们按约定收取平台服务费，具体比例以开通时的约定为准。',
+  ],
+  [
+    '四、套餐与到期',
+    '试用期与付费套餐到期后，商家后台自动转为只读、店铺暂停对外营业，但数据一律保留，续费后立即恢复，不因逾期而删除数据。',
+  ],
+  [
+    '五、内容合规',
+    '你在店铺中发布的商品、课程、宣传内容应遵守国家法律法规，不得含有虚假宣传、侵权、违法违规信息；因内容违规产生的责任由发布者自行承担。',
+  ],
+  [
+    '六、服务变更与终止',
+    '我们可能因业务调整对服务内容进行更新，重大变更会提前公告；你可以随时申请注销店铺，注销后的数据保留期与清除规则见《隐私政策》。',
+  ],
+  [
+    '七、免责与责任限制',
+    '因不可抗力、第三方服务（如微信支付、短信通道）故障导致的服务中断，我们不承担超出合理范围的赔偿责任。',
+  ],
+  ['八、联系方式', `对本条款有疑问，可通过「关于」页列出的联系方式与我们联系。`],
+]
+
+export default function Terms() {
+  usePageTitle(LEGAL_NAV[0]?.title ?? '服务条款', LEGAL_NAV[0]?.description)
+
+  return (
+    <>
+      <PageHead
+        eyebrow="法律条款"
+        title="服务条款"
+        desc="最近更新：本页内容随服务变更持续维护，请以最新版本为准。"
+      />
+
+      <section className="section">
+        <div className="container" style={{ maxWidth: 760 }}>
+          <div style={{ display: 'grid', gap: 20 }}>
+            {SECTIONS.map(([title, body]) => (
+              <div key={title}>
+                <h3 style={{ fontSize: 17 }}>{title}</h3>
+                <p style={{ color: '#4d5158', marginTop: 8, lineHeight: 1.8 }}>{body}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+    </>
+  )
+}

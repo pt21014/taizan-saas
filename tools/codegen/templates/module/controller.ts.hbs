@@ -1,0 +1,116 @@
+/**
+ * `/api/admin/{{slug}}` —— {{name}}模块的 HTTP 层。
+ *
+ * ## 这个控制器上有什么，为什么
+ *
+ * | 装饰器 | 作用 | 谁在看着 |
+ * |---|---|---|
+ * | `@Auth('staff')` | 只接受商家员工 token；member/platform token 打过来是 1140102 | `guard-default-deny.spec.ts`（spec 5） |
+ * | 没有 `@Public()` | 于是被全局守卫默认拒绝——**这才是默认行为** | 同上 |
+ * | `@RequirePermission(...)` | 每条路由需要哪个权限点，不满足 1340300 | `permission-registry.spec.ts`（spec 6） |
+ * | `@DataScope({ ownerField })` | 列表按当前员工的数据范围收窄 | —— |
+ * | `@Audit({...})` | 写操作自动记 `AuditLog` | 隔离 e2e |
+ *
+ * ## `@DataScope` 为什么只在列表上
+ *
+ * 数据范围翻译成的是一段 `where` 片段，只有「查一批」才用得上。单条读与写走
+ * `requireOwned(id)`，那里已经有租户归属校验；再叠一层数据范围会让「店主帮员工改一条」
+ * 失败，而那正是店主该能做的事。
+ *
+ * @packageDocumentation
+ */
+
+import { Body, Controller, Delete, Get, Inject, Param, Post, Put, Query } from '@nestjs/common'
+import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger'
+import type { PageResult } from '@taizan/contracts'
+import { Audit } from '@taizan/nest-audit'
+import { Auth } from '@taizan/nest-auth'
+import { DataScope, RequirePermission, ScopeWhere } from '@taizan/nest-rbac'
+import type { Request } from 'express'
+
+import { Validate } from '../../common/validate.pipe'
+import { APP_AUDIT_ACTIONS } from '../../registry/audit-actions'
+import { Create{{Pascal}}Dto, List{{Pascal}}QueryDto, Update{{Pascal}}Dto, {{Pascal}}View } from './dto/{{slug}}.dto'
+import { {{Pascal}}Service, type {{Pascal}}MutationResult } from './{{slug}}.service'
+
+@ApiTags('admin/{{slug}}')
+@Controller('api/admin/{{slug}}')
+@Auth('staff')
+export class {{Pascal}}Controller {
+  constructor(@Inject({{Pascal}}Service) private readonly {{camel}}: {{Pascal}}Service) {}
+
+  @Get()
+  @ApiOperation({ summary: '{{name}}列表（分页，按数据范围收窄）' })
+  @ApiOkResponse({ type: {{Pascal}}View, isArray: true })
+  @RequirePermission('{{slug}}:list')
+  // 归属列是 `createdBy`。不写 `tenantField`：租户隔离由 `prisma.tenant` 句柄独立负责，
+  // 在这里再写一遍等于给「禁止手写 tenantId 过滤条件」开了个口子。
+  @DataScope({ ownerField: 'createdBy' })
+  list(
+    @Query(Validate(List{{Pascal}}QueryDto)) query: List{{Pascal}}QueryDto,
+    // `null` 与 `{}` 必须分开：`null` = 不加条件（ALL 范围），`{}` = 一个空对象条件。
+    @ScopeWhere() scope: Record<string, unknown> | null,
+  ): Promise<PageResult<{{Pascal}}View>> {
+    return this.{{camel}}.list(query, scope)
+  }
+
+  /**
+   * 导出。
+   *
+   * **必须声明在 `@Get(':id')` 之前**：Nest 按声明顺序匹配路由，反过来写的话
+   * `/export` 会先命中 `:id`，表现为「导出功能返回 1240300 不存在」。
+   */
+  @Get('export')
+  @ApiOperation({ summary: '导出{{name}}（不分页）' })
+  @ApiOkResponse({ type: {{Pascal}}View, isArray: true })
+  @RequirePermission('{{slug}}:export')
+  @DataScope({ ownerField: 'createdBy' })
+  export(@ScopeWhere() scope: Record<string, unknown> | null): Promise<{{Pascal}}View[]> {
+    return this.{{camel}}.exportAll(scope)
+  }
+
+  @Get(':id')
+  @ApiOperation({ summary: '{{name}}详情' })
+  @ApiOkResponse({ type: {{Pascal}}View })
+  @RequirePermission('{{slug}}:list')
+  get(@Param('id') id: string): Promise<{{Pascal}}View> {
+    return this.{{camel}}.get(id)
+  }
+
+  @Post()
+  @ApiOperation({ summary: '新建{{name}}' })
+  @RequirePermission('{{slug}}:write')
+  @Audit({ action: APP_AUDIT_ACTIONS.{{CONST}}_CREATE, targetType: '{{Pascal}}' })
+  create(@Body(Validate(Create{{Pascal}}Dto)) dto: Create{{Pascal}}Dto): Promise<{{Pascal}}MutationResult> {
+    return this.{{camel}}.create(dto)
+  }
+
+  @Put(':id')
+  @ApiOperation({ summary: '修改{{name}}' })
+  @RequirePermission('{{slug}}:write')
+  @Audit({
+    action: APP_AUDIT_ACTIONS.{{CONST}}_UPDATE,
+    targetType: '{{Pascal}}',
+    // express 5 的 `params` 值类型是 `string | string[]`（重复参数名时是数组）。
+    // 这条路由的 `:id` 不可能重复，但类型上得收窄——`as string` 会把数组也放过去。
+    targetId: (req: Request) => (typeof req.params.id === 'string' ? req.params.id : undefined),
+  })
+  update(
+    @Param('id') id: string,
+    @Body(Validate(Update{{Pascal}}Dto)) dto: Update{{Pascal}}Dto,
+  ): Promise<{{Pascal}}MutationResult> {
+    return this.{{camel}}.update(id, dto)
+  }
+
+  @Delete(':id')
+  @ApiOperation({ summary: '删除{{name}}（软删）' })
+  @RequirePermission('{{slug}}:delete')
+  @Audit({
+    action: APP_AUDIT_ACTIONS.{{CONST}}_DELETE,
+    targetType: '{{Pascal}}',
+    targetId: (req: Request) => (typeof req.params.id === 'string' ? req.params.id : undefined),
+  })
+  remove(@Param('id') id: string): Promise<void> {
+    return this.{{camel}}.remove(id)
+  }
+}

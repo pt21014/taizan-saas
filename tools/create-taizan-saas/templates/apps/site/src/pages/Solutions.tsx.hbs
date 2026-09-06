@@ -1,0 +1,55 @@
+import { usePageTitle } from '../hooks/usePageTitle'
+import { PageHead } from '../components/PageHead'
+import { Cta } from '../components/Cta'
+import { useSiteConfig } from '../context/SiteConfigContext'
+import { NAV } from '../config/NAV'
+
+const SCENES: Array<[string, string, string[]]> = [
+  ['org', '培训机构', ['多校区/多班型商品结构', '员工按权限点分工', '账单与续费统一在一处看']],
+  ['teacher', '个人讲师', ['一个人也能独立开店', '直播/录播都能卖', '分销拉新不需要额外系统']],
+  [
+    'company',
+    '企业内训',
+    ['会员卡对应内训学员名单', '课程有效期与考核绑定', '数据看板给管理层看进度'],
+  ],
+  [
+    'offline',
+    '线下转线上',
+    ['线下课直接搬到店铺上架', '收款走商家自己的微信商户号', '试用期内验证效果再决定要不要续费'],
+  ],
+]
+
+export default function Solutions() {
+  const meta = NAV[3]
+  usePageTitle(meta?.title ?? '解决方案', meta?.description)
+  const { cfg } = useSiteConfig()
+
+  return (
+    <>
+      <PageHead
+        eyebrow="解决方案"
+        title="四类场景，各自的落地方式"
+        desc="不同规模、不同起点，用同一套系统跑，只是配置方式不一样。"
+      />
+
+      <section className="section">
+        <div className="container">
+          <div className="grid grid--2">
+            {SCENES.map(([id, title, items]) => (
+              <div className="card" id={id} key={id}>
+                <h3>{title}</h3>
+                <ul className="list" style=\{{ marginTop: 10 }}>
+                  {items.map((it) => (
+                    <li key={it}>{it}</li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <Cta trialDays={cfg?.trialDays ?? null} />
+    </>
+  )
+}

@@ -1,0 +1,176 @@
+import { useEffect, useState } from 'react'
+import { Link, NavLink, Route, Routes, useLocation } from 'react-router-dom'
+import { BRAND, CONTACT_PHONE_PLAIN } from './config/BRAND'
+import { NAV, LEGAL_NAV, SIGNUP_NAV } from './config/NAV'
+import { SiteConfigProvider } from './context/SiteConfigContext'
+import Home from './pages/Home'
+import Product from './pages/Product'
+import Features from './pages/Features'
+import Solutions from './pages/Solutions'
+import Pricing from './pages/Pricing'
+import Onboarding from './pages/Onboarding'
+import Faq from './pages/Faq'
+import About from './pages/About'
+import Terms from './pages/Terms'
+import Privacy from './pages/Privacy'
+import Signup from './pages/Signup'
+import NotFound from './pages/NotFound'
+
+function SiteHeader() {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const loc = useLocation()
+
+  useEffect(() => {
+    setMenuOpen(false)
+    window.scrollTo(0, 0)
+  }, [loc.pathname])
+
+  return (
+    <header className="nav">
+      <div className="container nav__inner">
+        <Link to="/" className="logo">
+          <span className="logo__mark" />
+          {BRAND.shortName}
+        </Link>
+        <nav className="nav__links" data-open={menuOpen ? '1' : '0'}>
+          {NAV.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              data-on={loc.pathname === item.to ? '1' : '0'}
+              end={item.to === '/'}
+            >
+              {item.label}
+            </NavLink>
+          ))}
+        </nav>
+        <div className="nav__right">
+          <a className="btn btn--ghost" href={BRAND.adminUrl} target="_blank" rel="noreferrer">
+            商家登录
+          </a>
+          <Link className="btn btn--primary" to={SIGNUP_NAV.to}>
+            {SIGNUP_NAV.label}
+          </Link>
+          <button
+            className="nav__toggle"
+            onClick={() => setMenuOpen((v) => !v)}
+            aria-label="展开菜单"
+            type="button"
+          >
+            ☰
+          </button>
+        </div>
+      </div>
+    </header>
+  )
+}
+
+function SiteFooter() {
+  return (
+    <footer className="footer">
+      <div className="container">
+        <div className="footer__grid">
+          <div>
+            <div className="logo">
+              <span className="logo__mark" />
+              {BRAND.productName}
+            </div>
+            <p style={{ maxWidth: 300, marginTop: 12 }}>{BRAND.slogan}</p>
+            <p style={{ marginTop: 14 }}>
+              咨询电话
+              <a
+                href={`tel:${CONTACT_PHONE_PLAIN}`}
+                style={{ color: '#fff', fontWeight: 600, marginLeft: 8, fontSize: 16 }}
+              >
+                {BRAND.contactPhone}
+              </a>
+            </p>
+          </div>
+          <div>
+            <h5>产品</h5>
+            <ul>
+              <li>
+                <Link to="/product">产品介绍</Link>
+              </li>
+              <li>
+                <Link to="/features">功能介绍</Link>
+              </li>
+              <li>
+                <Link to="/pricing">套餐价格</Link>
+              </li>
+              <li>
+                <Link to="/onboarding">开通流程</Link>
+              </li>
+            </ul>
+          </div>
+          <div>
+            <h5>解决方案</h5>
+            <ul>
+              <li>
+                <Link to="/solutions">培训机构</Link>
+              </li>
+              <li>
+                <Link to="/solutions">个人讲师</Link>
+              </li>
+              <li>
+                <Link to="/solutions">企业内训</Link>
+              </li>
+            </ul>
+          </div>
+          <div>
+            <h5>关于</h5>
+            <ul>
+              <li>
+                <Link to="/about">关于我们</Link>
+              </li>
+              <li>
+                <Link to="/faq">常见问题</Link>
+              </li>
+              {LEGAL_NAV.map((item) => (
+                <li key={item.to}>
+                  <Link to={item.to}>{item.label}</Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+        <div className="footer__bottom">
+          <span>
+            © {new Date().getFullYear()} {BRAND.companyName}
+          </span>
+          {/* ICP 备案位：没配的话不渲染整行，而不是显示一个空链接。 */}
+          {BRAND.icpNumber && (
+            <a href={BRAND.icpLink} target="_blank" rel="noreferrer">
+              {BRAND.icpNumber}
+            </a>
+          )}
+        </div>
+      </div>
+    </footer>
+  )
+}
+
+export default function App() {
+  return (
+    <SiteConfigProvider>
+      <SiteHeader />
+      <main>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/product" element={<Product />} />
+          <Route path="/features" element={<Features />} />
+          <Route path="/solutions" element={<Solutions />} />
+          <Route path="/pricing" element={<Pricing />} />
+          <Route path="/onboarding" element={<Onboarding />} />
+          <Route path="/faq" element={<Faq />} />
+          <Route path="/about" element={<About />} />
+          <Route path="/terms" element={<Terms />} />
+          <Route path="/privacy" element={<Privacy />} />
+          <Route path="/signup" element={<Signup />} />
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </main>
+      <SiteFooter />
+    </SiteConfigProvider>
+  )
+}

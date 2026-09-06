@@ -1,0 +1,43 @@
+// 验收用样本：注册表与 schema 双向一致。
+// 用中性表名，不带任何业务语义——业务表名属于项目，不属于框架。
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// 平台域表：租户维度本身，没有 tenantId，不进隔离清单。
+model Tenant {
+  id        String   @id
+  slug      String   @unique
+  createdAt DateTime @default(now())
+}
+
+// 平台域表：全平台共享一份商品，刻意不带 tenantId。
+model Plan {
+  id         String @id
+  priceCents Int
+}
+
+model ScopedAlpha {
+  id       String @id
+  tenantId String
+  name     String
+
+  @@index([tenantId, id])
+}
+
+model ScopedBeta {
+  id       String  @id
+  tenantId String
+  // tenantId 这行注释不该被解析成字段
+  memo     String?
+
+  @@index([tenantId, id])
+}
+
+view ScopedGammaView {
+  id       String @id
+  tenantId String
+  total    Int
+}

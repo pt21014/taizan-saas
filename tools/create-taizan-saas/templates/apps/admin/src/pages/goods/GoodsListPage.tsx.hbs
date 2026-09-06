@@ -1,0 +1,100 @@
+import { Button } from 'antd'
+import { DownloadOutlined } from '@ant-design/icons'
+import {
+  CrudDrawerForm,
+  CrudTable,
+  Perm,
+  dateTimeColumn,
+  moneyColumn,
+  statusTagColumn,
+  useCrudForm,
+  useCrudTable,
+} from '@taizan/admin-ui'
+import { Form, Input, InputNumber, Select } from 'antd'
+import { {{DOMAIN_UPPER}}_STATUS, use{{DomainPascal}}Api, type {{DomainPascal}}, type {{DomainPascal}}Input } from '../../api/{{domainSlug}}'
+
+/** 触发浏览器下载一个 JSON 文件——导出功能不需要专门的后端「生成文件」接口。 */
+function downloadJson(filename: string, rows: unknown): void {
+  const blob = new Blob([JSON.stringify(rows, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+/** {{domainName}}列表：增删改查 + 搜索 + 分页 + 按钮权限 + 只读闸门，一步不多（蓝图 §5.2 的范式）。 */
+export default function {{DomainPascal}}ListPage() {
+  const api = use{{DomainPascal}}Api()
+  const table = useCrudTable<{{DomainPascal}}>({
+    list: api.list,
+    remove: api.remove,
+    rowKey: 'id',
+    syncUrl: true,
+    searchSchema: [{ name: 'keyword', label: '名称' }],
+  })
+  const form = useCrudForm<{{DomainPascal}}Input>({
+    get: api.get,
+    create: api.create,
+    update: api.update,
+    onSuccess: table.refresh,
+  })
+
+  const onExport = () => void api.exportAll().then((rows) => downloadJson('{{domainSlug}}.json', rows))
+
+  return (
+    <>
+      <CrudTable<{{DomainPascal}}>
+        table={table}
+        title="{{domainName}}"
+        create=\{{ label: '新增{{domainName}}', perm: '{{domainSlug}}:write', onClick: () => form.openForm() }}
+        toolbar={
+          <Perm code="{{domainSlug}}:export">
+            <Button icon={<DownloadOutlined />} onClick={onExport}>
+              导出
+            </Button>
+          </Perm>
+        }
+        columns={[
+          { title: '名称', dataIndex: 'name', key: 'name' },
+          moneyColumn({ title: '价格', dataIndex: 'priceCents', sorter: true }),
+          { title: '库存', dataIndex: 'stock', key: 'stock' },
+          statusTagColumn({ title: '状态', dataIndex: 'status', map: {{DOMAIN_UPPER}}_STATUS }),
+          dateTimeColumn({ title: '创建时间', dataIndex: 'createdAt' }),
+        ]}
+        actions={[
+          { key: 'edit', label: '编辑', perm: '{{domainSlug}}:write', onClick: (r) => form.openForm(r.id) },
+          {
+            key: 'del',
+            label: '删除',
+            perm: '{{domainSlug}}:delete',
+            danger: true,
+            confirm: (r) => `确定删除「${r.name}」？`,
+            onClick: (r) => void table.removeRow(r),
+          },
+        ]}
+      />
+      <CrudDrawerForm form={form} title="{{domainName}}">
+        <Form.Item name="name" label="名称" rules={[{ required: true, message: '请填名称' }]}>
+          <Input placeholder="如：可乐 330ml" />
+        </Form.Item>
+        <Form.Item name="priceCents" label="价格（分）" rules={[{ required: true }]}>
+          <InputNumber min={0} precision={0} style=\{{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item name="stock" label="库存" initialValue={0}>
+          <InputNumber min={0} precision={0} style=\{{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item name="status" label="状态" initialValue="DRAFT">
+          <Select
+            options={[
+              { label: '草稿', value: 'DRAFT' },
+              { label: '在售', value: 'ON_SHELF' },
+              { label: '下架', value: 'OFF_SHELF' },
+            ]}
+          />
+        </Form.Item>
+      </CrudDrawerForm>
+    </>
+  )
+}

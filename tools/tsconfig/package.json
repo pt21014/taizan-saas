@@ -1,0 +1,12 @@
+{
+  "name": "@taizan/tsconfig",
+  "version": "0.0.0",
+  "private": true,
+  "description": "全仓共用的 tsconfig 基线：base（所有环境通用）+ node/react/rn（按运行环境覆盖）",
+  "files": [
+    "base.json",
+    "node.json",
+    "react.json",
+    "rn.json"
+  ]
+}

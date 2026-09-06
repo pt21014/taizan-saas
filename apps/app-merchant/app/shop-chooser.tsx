@@ -1,0 +1,67 @@
+import { Card, ListItem, colors, spacing, textVariants, toast } from '@taizan/app-ui'
+import { useLocalSearchParams, router } from 'expo-router'
+import { useState } from 'react'
+import { Text, View } from 'react-native'
+
+import { api } from '../src/api'
+import { bootstrapAndSave } from '../src/bootstrap'
+import { clearPendingLogin, getPendingLogin } from '../src/pendingLogin'
+import type { AdminLoginResult, ShopChoice } from '../src/types'
+
+/** 一号多店时的选店页：带着 `pendingLogin` 里的手机号/口令，加上选中的 `tenantId` 再登一次。 */
+export default function ShopChooserScreen() {
+  const { shops: shopsParam } = useLocalSearchParams<{ shops: string }>()
+  const [pickingId, setPickingId] = useState<string | null>(null)
+  const shops: ShopChoice[] = shopsParam ? (JSON.parse(shopsParam) as ShopChoice[]) : []
+
+  async function pick(tenantId: string) {
+    const pending = getPendingLogin()
+    if (!pending) {
+      toast.show('登录信息已过期，请重新登录', 'error')
+      router.replace('/login')
+      return
+    }
+    setPickingId(tenantId)
+    try {
+      const result = await api.post<AdminLoginResult>('/admin/auth/login', { ...pending, tenantId })
+      if (result.needChooseShop) {
+        // 理论上选了具体 tenantId 后不会再回到这一支；出现说明服务端与前端对不上。
+        toast.show('这家店铺不在你名下', 'error')
+        return
+      }
+      await bootstrapAndSave(result.access)
+      clearPendingLogin()
+      router.replace('/dashboard')
+    } catch {
+      // 已由 createApiClient toast 过了。
+    } finally {
+      setPickingId(null)
+    }
+  }
+
+  return (
+    <View style={{ flex: 1, backgroundColor: colors.bgBase, padding: spacing.lg }}>
+      <Text
+        style={{
+          fontSize: textVariants.sub.fontSize,
+          color: colors.gray[500] ?? '#999',
+          marginBottom: spacing.md,
+        }}
+      >
+        这个账号名下有多家店，请选一家进入
+      </Text>
+      <Card>
+        {shops.map((shop, index) => (
+          <ListItem
+            key={shop.tenantId}
+            first={index === 0}
+            title={shop.name}
+            subtitle={shop.isOwner ? `${shop.slug} · 店主` : shop.slug}
+            onPress={() => void pick(shop.tenantId)}
+            right={pickingId === shop.tenantId ? <Text>进入中…</Text> : undefined}
+          />
+        ))}
+      </Card>
+    </View>
+  )
+}

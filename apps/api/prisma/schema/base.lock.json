@@ -1,0 +1,17 @@
+{
+  "package": "@taizan/prisma-base",
+  "version": "0.1.0",
+  "algorithm": "sha256",
+  "generatedAt": "2026-09-05T22:25:15.884Z",
+  "files": {
+    "00-datasource.prisma": "aebb5875efe6cc98844d5239924e35326b8910f473af13f9fc8c637b1b89f409",
+    "01-tenant.prisma": "2345566ebe4ebca468e31171cab17336f6f7edcaf5f7656140743e69a6fbac67",
+    "02-plan.prisma": "eb583050f9c44a3869f416280945754e2be037e3c9789bc2b173b79fb015d9ba",
+    "03-identity.prisma": "824a9814e6152b28d58e96f6355a9b90685b736fa735bb728f6e5fa5c5d0df01",
+    "04-rbac.prisma": "d7e9ce052cf9e438e1daa74b6008e5e8e6ef1341d93ef7488f295495c52ef7a1",
+    "05-audit.prisma": "de552c3bf565f33e8083ce6b5f3e78011c59fa9d3202c2f1b7cbab3933c87ee8",
+    "06-ops.prisma": "50effd7fc8008b85065506ea7efaaf11eef3b06f811c0ad1973399800e7f15f0",
+    "07-infra.prisma": "915e11bed5de02ed1ae8017f2bb345d26cbefbc03a8bf63b2d501a3a82fde644",
+    "08-notify.prisma": "958cfeddddbd4a0b9f92bfaea8a990231b9d9534e176f46e4fc11a6c59e959c3"
+  }
+}

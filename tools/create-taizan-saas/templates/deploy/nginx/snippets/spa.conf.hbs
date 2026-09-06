@@ -1,0 +1,36 @@
+# 单页应用回退 + 两档缓存策略。宝塔放置位置同 security-headers.conf（方式 A/B 二选一）。
+#
+# 前提：apps/{admin,platform,site} 是 Vite 构建产物——`index.html` 在站点根，
+# 带内容 hash 的 JS/CSS/图片在 `assets/` 下（`deploy/docker/Dockerfile.web` 产出的就是
+# 这个形状）。两条规则缺一不可：
+#   1. index.html 绝不缓存：它是"入口清单"，引用的是**当次构建**产出的带 hash 文件名，
+#      如果 CDN/浏览器缓存住了旧的 index.html，用户会一直加载已经从服务器删掉的旧资源，
+#      表现为白屏或 404，而且用户端"刷新"也不一定能绕过强缓存。
+#   2. 带 hash 的资源可以长缓存 + immutable：文件名本身就是内容指纹，内容一变文件名
+#      跟着变，旧文件名永远不会被覆盖成不同内容，缓存多久都不会读到"过期"的东西。
+
+location = /index.html {
+  add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+  add_header Pragma "no-cache" always;
+}
+
+# 正则整段加引号：花括号 `{8,}` 是数量限定符，不加引号的话 nginx 的配置解析器会把
+# 这个裸 `{` 当成"location 块开始"，后面的 `8,}\.(js|css…` 就变成一条不知所云的
+# "指令"，报 `unknown directive`——这是 nginx.conf 语法而不是正则语法的坑。
+location ~* "\.[0-9a-f]{8,}\.(js|css|png|jpg|jpeg|gif|svg|woff2?|ttf|eot|ico)$" {
+  add_header Cache-Control "public, max-age=31536000, immutable" always;
+  access_log off;
+}
+
+# 没带 hash 的静态文件（favicon.ico、robots.txt 之类）给个短缓存，
+# 别跟上面两条一样极端。
+location ~* \.(ico|txt|json)$ {
+  add_header Cache-Control "public, max-age=3600" always;
+}
+
+# SPA 路由回退：前端路由（/{{domainSlug}}/123 这种）在服务器上并不存在对应文件，
+# 一律回退到 index.html 交给前端路由处理；真正的 404（图片/脚本 404）不受影响，
+# 因为 try_files 只在**上一级**（具体文件/目录）都找不到时才落到这条。
+location / {
+  try_files $uri $uri/ /index.html;
+}

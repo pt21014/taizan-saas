@@ -1,0 +1,277 @@
+import { useState } from 'react'
+import { Checkbox, Form, Input, InputNumber, Modal, Radio, Select, Space, Typography } from 'antd'
+import {
+  CrudDrawerForm,
+  CrudTable,
+  moneyColumn,
+  statusTagColumn,
+  useCrudForm,
+  useCrudTable,
+} from '@taizan/admin-ui'
+import {
+  FEATURE_KEYS,
+  FEATURE_LABELS,
+  PLAN_STATUSES,
+  PLAN_STATUS_TAGS,
+  QUOTA_KINDS,
+  QUOTA_KIND_LABELS,
+  usePlanApi,
+  type CreatePlanInput,
+  type PlanView,
+} from '../api/plan'
+
+type QuotaMode = 'default' | 'unlimited' | 'forbidden' | 'limited'
+
+function quotaModeOf(v: number | null | undefined): QuotaMode {
+  if (v === undefined) return 'default'
+  if (v === null) return 'unlimited'
+  if (v === 0) return 'forbidden'
+  return 'limited'
+}
+
+/**
+ * 配额三态编辑器：「不限」= `null`、「禁止」= `0`、「默认（缺省）」= 这个 key 整个不出现在
+ * 提交的对象里、「限额」= 正整数。改套餐时这四种状态在语义上都不一样（缺省在新建时
+ * 等价于不限，但在修改时是"不动这个维度原来的值"），所以刻意做成四个选项而不是
+ * 拿"限额输入框留空"去悄悄代表某一种状态。
+ */
+function QuotaFieldsEditor({
+  value,
+  onChange,
+}: {
+  value?: Record<string, number | null>
+  onChange?: (v: Record<string, number | null>) => void
+}) {
+  const current = value ?? {}
+  const update = (kind: string, mode: QuotaMode, limit: number) => {
+    const next = { ...current }
+    if (mode === 'default') delete next[kind]
+    else if (mode === 'unlimited') next[kind] = null
+    else if (mode === 'forbidden') next[kind] = 0
+    else next[kind] = limit > 0 ? limit : 1
+    onChange?.(next)
+  }
+  return (
+    <Space direction="vertical" size={8} style=\{{ width: '100%' }}>
+      {QUOTA_KINDS.map((kind) => {
+        const raw = current[kind]
+        const mode = quotaModeOf(raw)
+        const limitValue = typeof raw === 'number' && raw > 0 ? raw : 1
+        return (
+          // data-testid 给 e2e 用：这一行的四个 <Radio.Button> 文案（默认/不限/禁止/限额）
+          // 在四个维度之间是重复的，光靠文案定位不到「哪一行」，必须有个按维度区分的锚点。
+          <Space key={kind} align="center" wrap data-testid={`quota-row-${kind}`}>
+            <Typography.Text style=\{{ width: 160, display: 'inline-block' }}>
+              {QUOTA_KIND_LABELS[kind]}
+            </Typography.Text>
+            <Radio.Group
+              size="small"
+              value={mode}
+              onChange={(e) => update(kind, e.target.value as QuotaMode, limitValue)}
+            >
+              <Radio.Button value="default">默认</Radio.Button>
+              <Radio.Button value="unlimited">不限</Radio.Button>
+              <Radio.Button value="forbidden">禁止</Radio.Button>
+              <Radio.Button value="limited">限额</Radio.Button>
+            </Radio.Group>
+            {mode === 'limited' && (
+              <InputNumber
+                size="small"
+                min={1}
+                value={limitValue}
+                onChange={(n) => update(kind, 'limited', n ?? 1)}
+              />
+            )}
+          </Space>
+        )
+      })}
+    </Space>
+  )
+}
+
+type FeatureMode = 'default' | 'all' | 'none' | 'whitelist'
+
+function featureModeOf(v: string[] | null | undefined): FeatureMode {
+  if (v === undefined) return 'default'
+  if (v === null) return 'all'
+  if (v.length === 0) return 'none'
+  return 'whitelist'
+}
+
+/** 功能白名单三态编辑器：`null`=不限（全部可用）、`[]`=禁止（一个都不给）、缺省=不填/不动。 */
+function FeatureEditor({
+  value,
+  onChange,
+}: {
+  value?: string[] | null
+  onChange?: (v: string[] | null | undefined) => void
+}) {
+  const mode = featureModeOf(value)
+  const setMode = (m: FeatureMode) => {
+    if (m === 'default') onChange?.(undefined)
+    else if (m === 'all') onChange?.(null)
+    else if (m === 'none') onChange?.([])
+    else onChange?.(value && value.length > 0 ? value : [...FEATURE_KEYS])
+  }
+  return (
+    <Space direction="vertical" size={8}>
+      <Radio.Group value={mode} onChange={(e) => setMode(e.target.value as FeatureMode)}>
+        <Radio.Button value="default">默认（新建=全部可用 / 修改=不动）</Radio.Button>
+        <Radio.Button value="all">不限</Radio.Button>
+        <Radio.Button value="none">禁止</Radio.Button>
+        <Radio.Button value="whitelist">白名单</Radio.Button>
+      </Radio.Group>
+      {mode === 'whitelist' && (
+        <Checkbox.Group
+          options={FEATURE_KEYS.map((k) => ({ label: FEATURE_LABELS[k], value: k }))}
+          value={value ?? []}
+          onChange={(vals) => onChange?.(vals as string[])}
+        />
+      )}
+    </Space>
+  )
+}
+
+export default function PlatformPlanList() {
+  const api = usePlanApi()
+  const [sortTarget, setSortTarget] = useState<PlanView | null>(null)
+  const [sortValue, setSortValue] = useState(0)
+
+  const table = useCrudTable<PlanView>({
+    list: api.list,
+    rowKey: 'id',
+    syncUrl: true,
+    searchSchema: [
+      {
+        name: 'status',
+        label: '状态',
+        type: 'select',
+        options: PLAN_STATUSES.map((s) => ({ label: PLAN_STATUS_TAGS[s]?.text ?? s, value: s })),
+      },
+    ],
+  })
+
+  const form = useCrudForm<CreatePlanInput>({
+    get: (id) => api.get(id),
+    create: api.create,
+    update: (id, values) => api.update(id, values),
+    onSuccess: table.refresh,
+  })
+
+  return (
+    <>
+      <CrudTable
+        table={table}
+        title="套餐"
+        create=\{{ label: '新建套餐', onClick: () => form.openForm() }}
+        columns={[
+          { title: 'code', dataIndex: 'code', key: 'code' },
+          { title: '名称', dataIndex: 'name', key: 'name' },
+          moneyColumn<PlanView>({ title: '首开价', dataIndex: 'firstPriceCents' }),
+          moneyColumn<PlanView>({ title: '续费价', dataIndex: 'renewPriceCents' }),
+          { title: '周期（月）', dataIndex: 'periodMonths', key: 'periodMonths', width: 100 },
+          statusTagColumn<PlanView>({ title: '状态', dataIndex: 'status', map: PLAN_STATUS_TAGS }),
+          { title: '排序', dataIndex: 'sort', key: 'sort', width: 80 },
+        ]}
+        actionsWidth={260}
+        actions={[
+          { key: 'edit', label: '编辑', onClick: (r) => form.openForm(r.id) },
+          {
+            key: 'enable',
+            label: '上架',
+            hidden: (r) => r.status === 'ENABLED',
+            onClick: (r) => api.enable(r.id).then(table.refresh),
+          },
+          {
+            key: 'disable',
+            label: '下架',
+            hidden: (r) => r.status !== 'ENABLED',
+            confirm: '下架不影响存量租户，仅停止新开通选用，确定？',
+            onClick: (r) => api.disable(r.id).then(table.refresh),
+          },
+          {
+            key: 'archive',
+            label: '归档',
+            danger: true,
+            hidden: (r) => r.status === 'ARCHIVED',
+            confirm: '归档后永不再售，确定？',
+            onClick: (r) => api.archive(r.id).then(table.refresh),
+          },
+          {
+            key: 'sort',
+            label: '调整排序',
+            onClick: (r) => {
+              setSortTarget(r)
+              setSortValue(r.sort)
+            },
+          },
+        ]}
+      />
+
+      <CrudDrawerForm form={form} title="套餐" width={640}>
+        <Form.Item name="code" label="code" rules={[{ required: true }]}>
+          <Input placeholder="kebab-case，如 gold" />
+        </Form.Item>
+        <Form.Item name="name" label="名称" rules={[{ required: true }]}>
+          <Input placeholder="如：黄金版" />
+        </Form.Item>
+        <Form.Item name="firstPriceCents" label="首开价（分）" rules={[{ required: true }]}>
+          <InputNumber min={0} precision={0} style=\{{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item name="renewPriceCents" label="续费价（分）" rules={[{ required: true }]}>
+          <InputNumber min={0} precision={0} style=\{{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item
+          name="periodMonths"
+          label="计费周期（月）"
+          rules={[{ required: true }]}
+          initialValue={1}
+        >
+          <InputNumber min={1} max={120} style=\{{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item name="appKeys" label="允许接入的端" rules={[{ required: true }]}>
+          <Select
+            mode="tags"
+            placeholder="如 admin、client、app（回车新增）"
+            options={['admin', 'client', 'app'].map((k) => ({ label: k, value: k }))}
+          />
+        </Form.Item>
+        <Form.Item name="trafficMb" label="每月流量额度（MB）" initialValue={0}>
+          <InputNumber min={0} style=\{{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item
+          name="quotas"
+          label="配额"
+          rules={[{ required: true, message: '至少给一份配额表（可以每一项都选默认）' }]}
+          initialValue=\{{}}
+        >
+          <QuotaFieldsEditor />
+        </Form.Item>
+        <Form.Item name="features" label="功能白名单">
+          <FeatureEditor />
+        </Form.Item>
+      </CrudDrawerForm>
+
+      <Modal
+        title={`调整排序 —— ${sortTarget?.name ?? ''}`}
+        open={sortTarget !== null}
+        onCancel={() => setSortTarget(null)}
+        onOk={() => {
+          if (!sortTarget) return
+          void api.sort(sortTarget.id, sortValue).then(() => {
+            table.refresh()
+            setSortTarget(null)
+          })
+        }}
+        okText="确定"
+        cancelText="取消"
+      >
+        <InputNumber
+          value={sortValue}
+          onChange={(n) => setSortValue(n ?? 0)}
+          style=\{{ width: '100%' }}
+        />
+      </Modal>
+    </>
+  )
+}

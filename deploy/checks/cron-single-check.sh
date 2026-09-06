@@ -1,0 +1,211 @@
+#!/bin/bash
+# cron 单实例自检：**验证 PM2 cluster 多实例下，同一个 `@LeaderCron` 任务
+# 同一次调度只真正执行了一次**。
+#
+# 这个问题只能靠翻 `CronRun` 表来回答，翻日志猜不出来——4 个 PM2 worker 各自的
+# stdout 混在一起，肉眼很难看出「这一跳到底是不是被跑了不止一次」。
+# `CronRunRecorder` 把每次 leader tick 落一行到 `CronRun`（key + startedAt +
+# instanceId + ok），这条自检脚本要回答的问题就是：
+#   **同一个 key、同一次调度（同一分钟），会不会出现一条以上的 CronRun。**
+# 如果会，说明 leader 锁没生效（Redis 连不上、`REDIS_URL` 配错、锁实现有 bug），
+# cluster 模式的安全前提（deploy/pm2/ecosystem.config.cjs 里那段大注释讲的道理）
+# 在这台机器上其实没有成立。
+#
+# 判定粒度：按「同一 key + 同一分钟」分组——`@LeaderCron` 的 cron 表达式最细到
+# 分钟级（标准 cron 语法本身也是分钟级，本框架没有秒级调度），同一分钟内出现
+# 一条以上就是异常，不需要更细的秒级窗口。
+#
+# 用 mysql CLI 而不是 node + Prisma：理由同 billing-check.sh 文件头——宝塔服务器
+# 上 mysql 客户端一定在，node_modules/@prisma/client 却可能正处于部署中间态。
+#
+# 只读：全部是 SELECT，不写一个字节，可以跑任意多次。
+#
+# 用法：
+#   bash deploy/checks/cron-single-check.sh                     # 从 .env 读 DATABASE_URL，查最近 24 小时
+#   DATABASE_URL='mysql://u:p@127.0.0.1:3306/taizan' bash deploy/checks/cron-single-check.sh
+#   bash deploy/checks/cron-single-check.sh --env apps/api/.env --since 72
+#   bash deploy/checks/cron-single-check.sh --url mysql://... --key daily-billing-sync
+#   bash deploy/checks/cron-single-check.sh --help
+#
+# 刻意不用 set -e：查到重复执行是这条脚本最想看清楚的正常输出而不是脚本出错，
+# set -e 会在第一处非零返回时中止，把后面「具体是哪几条重复」的明细跳过。
+set -uo pipefail
+
+SINCE_HOURS=24
+KEY_FILTER=""
+
+usage() {
+  cat <<'USAGE'
+用法：bash deploy/checks/cron-single-check.sh [选项]
+
+  查 CronRun 表：同一个 @LeaderCron key、同一分钟内，是否出现一条以上的记录
+  （出现即代表 leader 锁没生效，多个实例同一跳都真正执行了）。只读，不写任何数据。
+
+选项：
+  --env <文件>     从指定的 .env 读取 DATABASE_URL（默认依次找 ./.env、apps/api/.env）
+  --url <连接串>   直接给 DATABASE_URL，形如 mysql://用户:密码@主机:端口/库名
+  --since <小时>   只看最近 N 小时的记录，默认 24
+  --key <key>      只看某一个 @LeaderCron 的 key（不给就看全部）
+  -h, --help       显示本帮助
+
+环境变量：
+  DATABASE_URL    同 --url，优先级低于命令行参数
+
+输出三段：
+  1. 时间窗口内一共跑了哪些 key、跑了多少次、失败了几次
+  2. 逐 key 的重复检查（有重复才展开明细，没有就一行带过）
+  3. 结论
+
+退出码：0 没有任何重复；1 发现重复执行（要人看，leader 锁大概率失效了）；2 脚本自身没跑起来。
+USAGE
+}
+
+die() {
+  echo "❌ $1" >&2
+  [ $# -gt 1 ] && echo "   $2" >&2
+  exit 2
+}
+
+# ── 参数 ────────────────────────────────────────────────────────────────
+ENV_FILE=""
+URL="${DATABASE_URL:-}"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --env) ENV_FILE="${2:-}"; [ -n "$ENV_FILE" ] || die "--env 后面要跟文件路径"; shift 2 ;;
+    --url) URL="${2:-}"; [ -n "$URL" ] || die "--url 后面要跟数据库连接串"; shift 2 ;;
+    --since) SINCE_HOURS="${2:-}"; [ -n "$SINCE_HOURS" ] || die "--since 后面要跟小时数"; shift 2 ;;
+    --key) KEY_FILTER="${2:-}"; [ -n "$KEY_FILTER" ] || die "--key 后面要跟 @LeaderCron 的 key"; shift 2 ;;
+    *) die "认不出的参数：$1" "用 --help 看用法" ;;
+  esac
+done
+
+case "$SINCE_HOURS" in ''|*[!0-9]*) die "--since 必须是正整数（小时数），收到的是「$SINCE_HOURS」" ;; esac
+
+# ── 找 .env（跟 billing-check.sh 同一套写法，保持两个脚本读配置的行为一致） ──
+read_env_value() {
+  grep -E "^[[:space:]]*$2=" "$1" 2>/dev/null | head -1 | cut -d= -f2- | sed -e 's/^["'"'"']//' -e 's/["'"'"']$//'
+}
+
+if [ -z "$URL" ]; then
+  if [ -n "$ENV_FILE" ]; then
+    [ -f "$ENV_FILE" ] || die "找不到 env 文件：$ENV_FILE"
+    URL=$(read_env_value "$ENV_FILE" DATABASE_URL)
+  else
+    for candidate in ./.env ./apps/api/.env; do
+      if [ -f "$candidate" ]; then
+        URL=$(read_env_value "$candidate" DATABASE_URL)
+        [ -n "$URL" ] && { ENV_FILE="$candidate"; break; }
+      fi
+    done
+  fi
+fi
+
+[ -n "$URL" ] || die "没有拿到 DATABASE_URL。" "用 --url 直接给，或用 --env 指定 .env 文件；也可以 export DATABASE_URL=… 再跑。"
+
+# ── 拆连接串（同 billing-check.sh） ──────────────────────────────────────
+proto=${URL%%://*}
+[ "$proto" = "mysql" ] || die "只认 mysql:// 连接串，收到的是「${proto}://…」。" "本项目的 datasource provider 是 mysql（packages/prisma-base/schema/00-datasource.prisma）。"
+
+rest=${URL#*://}
+creds=${rest%%@*}
+hostpart=${rest#*@}
+[ "$creds" = "$rest" ] && die "连接串里没有 @，拆不出主机名。" "正确形状：mysql://用户:密码@主机:端口/库名"
+
+DB_USER=${creds%%:*}
+DB_PASS=${creds#*:}
+[ "$DB_PASS" = "$creds" ] && DB_PASS=""
+
+hostport=${hostpart%%/*}
+dbpath=${hostpart#*/}
+DB_NAME=${dbpath%%\?*}
+DB_HOST=${hostport%%:*}
+DB_PORT=${hostport#*:}
+[ "$DB_PORT" = "$hostport" ] && DB_PORT=3306
+
+[ -n "$DB_NAME" ] || die "连接串里没有库名。" "正确形状：mysql://用户:密码@主机:端口/库名"
+
+command -v mysql >/dev/null 2>&1 || die "找不到 mysql 命令。" "宝塔面板：/www/server/mysql/bin/mysql，可以 export PATH=/www/server/mysql/bin:\$PATH 之后再跑。"
+
+run_sql() {
+  MYSQL_PWD="$DB_PASS" mysql \
+    --host="$DB_HOST" --port="$DB_PORT" --user="$DB_USER" \
+    --database="$DB_NAME" --batch --raw --skip-column-names \
+    --connect-timeout=10 -e "$1" 2>&1
+}
+
+probe=$(run_sql "SELECT 1;")
+if [ $? -ne 0 ]; then
+  case "$probe" in
+    *"Access denied"*)      die "数据库拒绝登录（用户名或密码不对）。" "连接串里的用户是 ${DB_USER}，请核对 .env 的 DATABASE_URL。" ;;
+    *"Unknown database"*)   die "库 ${DB_NAME} 不存在。" "是不是还没建库或者连错了环境？先跑 pnpm prisma migrate deploy。" ;;
+    *"Can't connect"*|*"Connection refused"*)
+                            die "连不上 ${DB_HOST}:${DB_PORT}。" "MySQL 没起，或者防火墙/安全组挡了这个端口。" ;;
+    *)                      die "数据库连接失败。" "$(echo "$probe" | head -2)" ;;
+  esac
+fi
+
+if [ -z "$(run_sql "SHOW TABLES LIKE 'CronRun';")" ]; then
+  die "库 ${DB_NAME} 里没有 CronRun 表。" "这个库还没跑过 migration（空库），先执行 pnpm prisma migrate deploy 再来自检。"
+fi
+
+echo "=========== 0. 被测范围 ==========="
+echo "数据库：${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}${ENV_FILE:+（配置来自 $ENV_FILE）}"
+echo "时间窗口：最近 ${SINCE_HOURS} 小时"
+[ -n "$KEY_FILTER" ] && echo "只看 key：$KEY_FILTER"
+echo ""
+
+KEY_COND=""
+[ -n "$KEY_FILTER" ] && KEY_COND="AND \`key\` = '$(echo "$KEY_FILTER" | sed "s/'/''/g")'"
+
+# ── 1. 概览：这个窗口里各 key 跑了多少次、失败几次 ─────────────────────────
+echo "=========== 1. 概览 ==========="
+overview=$(run_sql "
+  SELECT \`key\`, COUNT(*), SUM(ok = 0), MAX(startedAt)
+  FROM CronRun
+  WHERE startedAt >= DATE_SUB(NOW(), INTERVAL ${SINCE_HOURS} HOUR) ${KEY_COND}
+  GROUP BY \`key\` ORDER BY \`key\`;")
+
+if [ -z "$overview" ]; then
+  echo "（这个时间窗口里没有任何 CronRun 记录——要么还没到第一次调度，要么 CRON_ENABLED 全关着。）"
+else
+  printf '  %-28s %-8s %-8s %s\n' key 次数 失败 最近一次
+  echo "$overview" | while IFS=$'\t' read -r key cnt failed last; do
+    printf '  %-28s %-8s %-8s %s\n' "$key" "$cnt" "$failed" "$last"
+  done
+fi
+echo ""
+
+# ── 2. 逐 key 查「同一分钟出现一条以上」 ───────────────────────────────────
+echo "=========== 2. 同一 key 同一分钟内的重复检查 ==========="
+dups=$(run_sql "
+  SELECT \`key\`, DATE_FORMAT(startedAt, '%Y-%m-%d %H:%i'), COUNT(*), GROUP_CONCAT(instanceId SEPARATOR ' | ')
+  FROM CronRun
+  WHERE startedAt >= DATE_SUB(NOW(), INTERVAL ${SINCE_HOURS} HOUR) ${KEY_COND}
+  GROUP BY \`key\`, DATE_FORMAT(startedAt, '%Y-%m-%d %H:%i')
+  HAVING COUNT(*) > 1
+  ORDER BY \`key\`, 2;")
+
+DUP_COUNT=0
+if [ -z "$dups" ]; then
+  echo "✅ 没有发现「同一 key 同一分钟出现一条以上 CronRun」的情况。"
+else
+  echo "$dups" | while IFS=$'\t' read -r key tick cnt instances; do
+    echo "  ❌ ${key} · ${tick} 这一分钟出现了 ${cnt} 条记录（实例：${instances}）"
+  done
+  DUP_COUNT=$(echo "$dups" | grep -c '')
+fi
+echo ""
+
+# ── 结论 ────────────────────────────────────────────────────────────────
+echo "=========== 结论 ==========="
+if [ -n "${DUP_COUNT:-}" ] && [ "$DUP_COUNT" != "0" ]; then
+  echo "有 ${DUP_COUNT} 处「同一跳被执行了不止一次」，leader 锁大概率没生效。"
+  echo "排查顺序：REDIS_URL 是否正确、Redis 是否可达、是不是有实例的时钟跟别的实例差太多"
+  echo "（锁的 PX 过期时间够不够覆盖任务本身的执行耗时）。"
+  exit 1
+else
+  echo "✅ 时间窗口内每个 key 的每一跳都只有一条 CronRun，leader 锁按预期工作。"
+  exit 0
+fi

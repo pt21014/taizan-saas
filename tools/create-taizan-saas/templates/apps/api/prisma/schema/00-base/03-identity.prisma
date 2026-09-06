@@ -1,0 +1,152 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// 本文件由 @taizan/prisma-base 托管，勿手改；升级请 pnpm taizan:schema-sync
+// ─────────────────────────────────────────────────────────────────────────────
+// 三套身份：平台管理员 / 商家账号（一号多店）/ C 端会员。
+//
+// 一号多店的拆法：登录凭据在 StaffAccount（全局唯一手机号，平台域），
+// 「这个账号在这家店里是谁」在 Staff（租户域）。token.tenantId 就是当前店，
+// 换店 = 重签 token；staff 的角色每请求现查 Staff 并用库里的 roleIds 覆盖 token 里的。
+
+/// 平台管理员。【平台域】
+model PlatformAdmin {
+  id           String        @id @db.VarChar(26)
+  username     String        @unique
+  /// scrypt$N$r$p$salt$hash，见 @taizan/prisma-base 的 seed/password.ts。
+  passwordHash String
+  name         String
+  status       AccountStatus @default(ACTIVE)
+  /// RolePreset.id 数组（平台侧角色）。
+  roleIds      Json
+  /// TOTP 种子的密文；与 mfaKeyId 成对，登记在 src/encrypted-columns.ts。
+  mfaSecretEnc String?       @db.Text
+  /// mfaSecretEnc 的加密密钥版本号。
+  mfaKeyId     String?
+  lastLoginAt  DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@index([status])
+}
+
+/// 商家侧登录账号（一号多店的载体）。【平台域】
+/// 刻意不做软删：手机号是全局唯一的登录凭据，软删会把「已删行」也算进唯一性，
+/// 停用一律走 status = DISABLED。
+model StaffAccount {
+  id           String        @id @db.VarChar(26)
+  /// 全局唯一手机号，跨租户查账号是 raw 逃生口的三个合法用途之一。
+  phone        String        @unique
+  passwordHash String
+  name         String
+  avatar       String?
+  status       AccountStatus @default(ACTIVE)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@index([status])
+}
+
+/// 账号与租户的成员关系（「这个账号在这家店里是谁」）。【租户域】
+model Staff {
+  id           String      @id @db.VarChar(26)
+  tenantId     String      @db.VarChar(26)
+  /// StaffAccount.id。
+  accountId    String      @db.VarChar(26)
+  /// 店内昵称，可与账号名不同。
+  name         String
+  status       StaffStatus @default(ACTIVE)
+  /// Role.id 数组（本租户内的角色）。每请求现查，token 里的副本不作数。
+  roleIds      Json
+  dataScope    DataScope   @default(SELF)
+  /// dataScope = CUSTOM 时的目标集合（部门/门店 id 数组）。
+  scopeTargets Json?
+  /// 店主标记：全店唯一，不可被移除，权限恒为全量。
+  isOwner      Boolean     @default(false)
+  /// 邀请人的 Staff.id。
+  invitedBy    String?     @db.VarChar(26)
+  joinedAt     DateTime    @default(now())
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  deletedAt    DateTime?
+
+  @@unique([tenantId, accountId, deletedAt])
+  @@index([tenantId, id])
+  @@index([accountId])
+  @@index([tenantId, status])
+}
+
+/// 员工邀请码。【租户域】
+model StaffInvite {
+  id        String    @id @db.VarChar(26)
+  tenantId  String    @db.VarChar(26)
+  /// 限定手机号；null = 任何人凭链接可入。
+  phone     String?
+  /// 邀请令牌，全局唯一，一次性核销（usedAt 落值即失效）。
+  token     String    @unique
+  roleIds   Json
+  expiresAt DateTime
+  usedAt    DateTime?
+  /// 核销者的 StaffAccount.id。
+  usedBy    String?   @db.VarChar(26)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([tenantId, id])
+  @@index([tenantId, expiresAt])
+}
+
+/// C 端会员。【租户域】——会员归属单个租户，不跨店共享。
+model Member {
+  id          String       @id @db.VarChar(26)
+  tenantId    String       @db.VarChar(26)
+  phone       String?
+  /// 微信开放平台 unionId（同主体下多应用打通）。
+  unionId     String?
+  /// 当前应用的 openId。
+  openId      String?
+  nickname    String?
+  avatar      String?
+  status      MemberStatus @default(ACTIVE)
+  lastLoginAt DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  deletedAt   DateTime?
+
+  @@unique([tenantId, phone, deletedAt])
+  @@unique([tenantId, unionId, deletedAt])
+  @@unique([tenantId, openId, deletedAt])
+  @@index([tenantId, id])
+  @@index([tenantId, status])
+}
+
+/// 账号级启停状态（PlatformAdmin / StaffAccount 共用）。
+enum AccountStatus {
+  ACTIVE
+  DISABLED
+}
+
+/// 成员在店内的状态。
+enum StaffStatus {
+  ACTIVE
+  /// 停用：保留成员关系但不能登录本店。
+  DISABLED
+  /// 已离店：软删之外的一档，用于「主动退出」与「被移除」的区分展示。
+  LEFT
+}
+
+/// 会员状态。
+enum MemberStatus {
+  ACTIVE
+  DISABLED
+}
+
+/// 数据权限范围。
+enum DataScope {
+  /// 全店数据。
+  ALL
+  /// 本部门/本门店及下级。
+  SUB_TREE
+  /// 仅本人。
+  SELF
+  /// 自定义集合，见 Staff.scopeTargets。
+  CUSTOM
+}

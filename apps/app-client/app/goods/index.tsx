@@ -1,0 +1,77 @@
+import {
+  Card,
+  EmptyState,
+  ErrorState,
+  ListItem,
+  SkeletonList,
+  colors,
+  formatWithTrace,
+} from '@taizan/app-ui'
+import { ApiError, type PageResult } from '@taizan/contracts'
+import { router } from 'expo-router'
+import { useCallback, useEffect, useState } from 'react'
+import { FlatList, Text, View } from 'react-native'
+
+import { api } from '../../src/api'
+import type { GoodsView } from '../../src/types'
+
+/** `GET /api/client/goods`：`@Auth('member')`，只看得到自己这家店已上架的商品。 */
+export default function GoodsListScreen() {
+  const [items, setItems] = useState<GoodsView[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(() => {
+    setLoading(true)
+    setError(null)
+    api
+      .get<PageResult<GoodsView>>('/client/goods', { page: 1, pageSize: 20 })
+      .then((res) => setItems(res.items))
+      .catch((e: unknown) => setError(e instanceof ApiError ? formatWithTrace(e) : '加载失败'))
+      .finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => load(), [load])
+
+  return (
+    <View style={{ flex: 1, backgroundColor: colors.bgBase }}>
+      {loading ? (
+        <SkeletonList rows={6} />
+      ) : error ? (
+        <ErrorState message={error} onRetry={load} />
+      ) : !items || items.length === 0 ? (
+        <EmptyState title="这家店还没有上架商品" />
+      ) : (
+        <Card style={{ margin: 16 }}>
+          <FlatList
+            data={items}
+            keyExtractor={(item) => item.id}
+            renderItem={({ item, index }) => (
+              <ListItem
+                first={index === 0}
+                title={item.name}
+                subtitle={`库存 ${item.stock}`}
+                right={
+                  <Text style={{ color: colors.error, fontWeight: '700' }}>
+                    ¥{(item.priceCents / 100).toFixed(2)}
+                  </Text>
+                }
+                onPress={() =>
+                  router.push({
+                    pathname: '/goods/[id]',
+                    params: {
+                      id: item.id,
+                      name: item.name,
+                      priceCents: String(item.priceCents),
+                      stock: String(item.stock),
+                    },
+                  })
+                }
+              />
+            )}
+          />
+        </Card>
+      )}
+    </View>
+  )
+}

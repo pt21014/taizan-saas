@@ -1,0 +1,771 @@
+/**
+ * **平台收费闭环 e2e**（T1-5）—— 真 MySQL + Redis + `PAY_FAKE_ENABLED=true`。
+ *
+ * ```
+ * pnpm dev:infra
+ * pnpm -F {{scope}}/api prisma:migrate
+ * pnpm -F {{scope}}/api test:e2e
+ * ```
+ *
+ * ## 为什么要跑真回调而不是直接调处理器
+ *
+ * `FakePaymentTestKit.simulatePaid()` 造一份**带真 HMAC 签名**的报文，POST 进本 app
+ * 真实的 `/api/public/pay/wechat/notify`。验签 → 幂等（`transactionId`）→ 归一化 →
+ * 按 `outTradeNo` 前缀路由，一段都不跳。直接调 `handler.onPaid()` 恰恰跳过了这四段，
+ * 而它们是这条链路上最容易错的部分——尤其 `rawBody`：`main.ts` 少写一个
+ * `{ rawBody: true }`，线上的表现是「所有回调验签失败」，而直接调处理器的测试全绿。
+ *
+ * ## 用例清单
+ *
+ * | # | 断言 |
+ * |---|---|
+ * | ① | 昨天到期的店：`POST /api/admin/{{domainSlug}}` → 1440301，`POST /api/admin/billing/orders` → 通，且拿到支付参数 |
+ * | ② | 同一个 `outTradeNo` 回调**两次**：只续期一次、`planExpireAt` 精确、status ACTIVE、`AuditLog` 一条、站内信一条、随后建商品不再 1440301 |
+ * | ③ | 平台 `mark-paid` 一笔 OFFLINE 单：DB 字段形状与回调路径**逐字段一致** |
+ * | ④ | 金额不符的伪回调：不兑现，`PlatformAuditLog` 有一条 FAIL |
+ * | ⑤ | 退款回退到 `expireBeforeAt`；续过费之后再退上一笔 → `applied: false` |
+ * | ⑥ | `PENDING` 单 createdAt 改到 31 分钟前 → `cancelExpired()` → CANCELLED |
+ * | ⑦ | 平台 `renew` 接口产出的 `PlanOrder` 与 ③ 形状一致（同一条 fulfill 路径） |
+ *
+ * ## 站内信：既断言调用、也断言真库（T2-7 修了 `@taizan/nest-notify` 的枚举 bug）
+ *
+ * `@taizan/nest-notify` 曾经往 `NotifyRecord.channel` 写它自己的 `NotifyChannelKind`
+ * （`INBOX` / `MP_TEMPLATE`），而 `08-notify.prisma` 的枚举是 `IN_APP` / `WECHAT_MP`——
+ * 两个名字对不上，`prisma.notifyRecord.create()` 会被 Prisma 直接判为非法枚举值，
+ * INBOX 通道一行记录都落不了库（`packages/nest-notify/src/channel-map.ts` 已经把
+ * 这个转换收口）。本文件继续用 spy 拦 `NotifyService.send`（证明「确实发起了一次」），
+ * 并新增对 `NotifyRecord` 真库的断言（证明「真的落库了，且 channel 是 IN_APP」）——
+ * 两者都要断言：spy 挡不住"发起了但落库失败"，真库断言挡不住"落库了但没调用"
+ * （比如调用方悄悄换了个不发送的分支）。
+ *
+ * @packageDocumentation
+ */
+
+import 'reflect-metadata'
+import 'dotenv/config'
+
+import type { INestApplication } from '@nestjs/common'
+import { Test } from '@nestjs/testing'
+import { PrismaClient } from '@prisma/client'
+import { computeRenewal } from '@taizan/billing-rules'
+import { ulid } from '@taizan/contracts'
+import { BILLING_OPTIONS, PLATFORM_GATEWAY, type PlatformGateway } from '@taizan/nest-billing'
+import { NotifyService } from '@taizan/nest-notify'
+import { FakePaymentTestKit } from '@taizan/nest-payment'
+import { seedBase } from '@taizan/prisma-base'
+import request from 'supertest'
+import { afterAll, beforeAll, describe, expect, it, vi, type MockInstance } from 'vitest'
+
+import { AppModule } from '../src/bootstrap/app.module'
+import { configureApp } from '../src/bootstrap/configure-app'
+import {
+  PLAN_ORDER_FULFILLED_TEMPLATE,
+  PlanOrderService,
+} from '../src/modules/platform/plan-order/plan-order.service'
+import { findFirstUpsertDelegate } from '../src/seed-delegates'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 夹具
+// ─────────────────────────────────────────────────────────────────────────────
+
+const RUN = ulid().slice(-8).toLowerCase()
+const OWNER_PASSWORD = 'e2e-password-123'
+const PHONE_BASE = [...RUN]
+  .map((c) => c.charCodeAt(0) % 10)
+  .join('')
+  .slice(0, 6)
+
+function phoneFor(n: number): string {
+  return `136${PHONE_BASE}${String(n).padStart(2, '0')}`
+}
+
+/**
+ * 本文件的登录请求专用的「客户端 IP」。
+ *
+ * `login` 档限流是**按客户端 IP** 计数的（5 分钟 10 次失败），而 e2e 的每个文件都从
+ * `127.0.0.1` 打过来——`vitest.e2e.config.ts` 又刻意 `fileParallelism: false` 串行跑，
+ * 于是几个文件共用同一个桶：前面的文件（它们要断言「口令错了会被拒」「token 撤销后失效」）
+ * 把额度用掉，后面的文件就会拿到 `1042900` 而不是它想断言的东西——一种典型的
+ * 「测试之间通过外部状态互相污染」。
+ *
+ * 应用开着 `trust proxy`（`TRUSTED_PROXY_HOPS=1`），所以带一个 `X-Forwarded-For`
+ * 就能让本文件的登录落进自己的桶里，既不消耗别人的额度、也不受别人影响。
+ * 这不是在绕过限流——限流本身由 `test/ratelimit.e2e-spec.ts` 专门验证。
+ */
+const LOGIN_IP = `10.99.${[...RUN].reduce((a, c) => (a + c.charCodeAt(0)) % 200, 7) + 1}.11`
+
+let app: INestApplication
+let prisma: PrismaClient
+let gateway: PlatformGateway
+let kit: FakePaymentTestKit
+let planOrders: PlanOrderService
+let notifySpy: MockInstance<NotifyService['send']>
+let platformToken = ''
+let planId = ''
+
+/** 套餐定价：首开 199 元 / 续费 99 元 / 一个周期 1 个月。 */
+const FIRST_PRICE_CENTS = 19900
+const RENEW_PRICE_CENTS = 9900
+const PERIOD_MONTHS = 1
+
+function http(): Parameters<typeof request>[0] {
+  return app.getHttpServer() as Parameters<typeof request>[0]
+}
+
+function expectOk<T>(body: unknown): T {
+  const envelope = body as { code: number; message: string; data: T }
+  expect(envelope.code, `期望 code=0，实际：${JSON.stringify(envelope)}`).toBe(0)
+  return envelope.data
+}
+
+function codeOf(body: unknown): number {
+  return (body as { code: number }).code
+}
+
+interface Shop {
+  tenantId: string
+  slug: string
+  /** 店主 token；`createShop(n, { login: false })` 时是空串。 */
+  token: string
+}
+
+/**
+ * 开一家店，按需以店主身份登录。
+ *
+ * `login` 默认 `false` **是被限流逼出来的、也是对的**：`POST /api/admin/auth/login`
+ * 挂着 `login` 档限流（口令爆破与刷商品列表不是一个量级的威胁），每开一家店都顺手
+ * 登一次，跑到第五家就会拿到 `1042900` 而不是本用例想断言的东西。只有真的要用
+ * 商家 token 的用例（自助下单、建商品）才登录，平台侧的用例用 `platformToken` 就够了。
+ */
+async function createShop(index: number, opts: { login?: boolean } = {}): Promise<Shop> {
+  const slug = `e2e-po-${index}-${RUN}`
+  const phone = phoneFor(index)
+  const created = await request(http())
+    .post('/api/platform/tenants')
+    .set('Authorization', `Bearer ${platformToken}`)
+    .send({
+      slug,
+      name: `E2E 收费闭环 ${index} ${RUN}`,
+      ownerPhone: phone,
+      ownerPassword: OWNER_PASSWORD,
+      trialDays: 30,
+    })
+  const data = expectOk<{ tenant: { id: string; slug: string } }>(created.body)
+  if (opts.login !== true) {
+    return { tenantId: data.tenant.id, slug: data.tenant.slug, token: '' }
+  }
+
+  const login = await request(http())
+    .post('/api/admin/auth/login')
+    .set('X-Forwarded-For', LOGIN_IP)
+    .send({ phone, password: OWNER_PASSWORD, tenantId: data.tenant.id })
+  const session = expectOk<{ access: string }>(login.body)
+  return { tenantId: data.tenant.id, slug: data.tenant.slug, token: session.access }
+}
+
+/** 把一家店改成「挂着套餐、昨天到期」。改完必须 invalidate，否则闸门还在 30 秒缓存里。 */
+async function makeExpired(tenantId: string): Promise<void> {
+  await prisma.tenant.update({
+    where: { id: tenantId },
+    data: {
+      status: 'ACTIVE',
+      planId,
+      planExpireAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+      trialEndAt: null,
+      graceDays: 0,
+    },
+  })
+  gateway.invalidate(tenantId)
+}
+
+function authedPlatform() {
+  return {
+    post: (url: string) =>
+      request(http()).post(url).set('Authorization', `Bearer ${platformToken}`),
+    patch: (url: string) =>
+      request(http()).patch(url).set('Authorization', `Bearer ${platformToken}`),
+  }
+}
+
+/** 轮询等一个条件（审计与通知是旁路写入，HTTP 应答返回时不保证已经落库）。 */
+async function waitFor(check: () => Promise<boolean>, timeoutMs = 8000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (await check()) return
+    if (Date.now() > deadline) throw new Error(`等待超时（${timeoutMs}ms）`)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+}
+
+beforeAll(async () => {
+  prisma = new PrismaClient()
+  await seedBase(
+    {
+      platformAdmin: prisma.platformAdmin,
+      plan: prisma.plan,
+      tenant: prisma.tenant,
+      staffAccount: prisma.staffAccount,
+      staff: findFirstUpsertDelegate(prisma.staff),
+      role: findFirstUpsertDelegate(prisma.role),
+      rolePreset: prisma.rolePreset,
+    },
+    { withDemoTenant: false },
+  )
+
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    // 到期闸门必须真的拦人，否则用例 ① 的 1440301 永远出不来。
+    // 走 override 而不是改 env：`BillingModule.forRoot()` 在**模块求值时**读
+    // `process.env`，而 ESM 的 import 是提升的——在测试文件里改 env 已经晚了。
+    .overrideProvider(BILLING_OPTIONS)
+    .useValue({ enforce: true, registerClientMiddleware: true })
+    .compile()
+
+  // `rawBody: true` 与 `main.ts` 保持一致。少了它，回调控制器拿不到原始字节，
+  // `FakePaymentTestKit` 打进来的每一条都会验签失败——而失败长得像「签名错误」。
+  app = moduleRef.createNestApplication({ logger: false, rawBody: true })
+  configureApp(app)
+  await app.init()
+
+  gateway = app.get<PlatformGateway>(PLATFORM_GATEWAY)
+  kit = app.get(FakePaymentTestKit)
+  planOrders = app.get(PlanOrderService)
+  notifySpy = vi.spyOn(app.get(NotifyService), 'send')
+
+  const login = await request(http())
+    .post('/api/platform/auth/login')
+    .set('X-Forwarded-For', LOGIN_IP)
+    .send({ username: 'admin', password: 'admin123' })
+  platformToken = expectOk<{ access: string }>(login.body).access
+
+  const plan = await prisma.plan.create({
+    data: {
+      id: ulid(),
+      code: `e2e-po-plan-${RUN}`,
+      name: `E2E 收费套餐 ${RUN}`,
+      firstPriceCents: FIRST_PRICE_CENTS,
+      renewPriceCents: RENEW_PRICE_CENTS,
+      periodMonths: PERIOD_MONTHS,
+      quotas: {},
+      appKeys: ['admin', 'client'],
+      trafficMb: 0,
+      status: 'ENABLED',
+    },
+  })
+  planId = plan.id
+})
+
+afterAll(async () => {
+  await app?.close()
+  await prisma?.$disconnect()
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ① 到期的店必须能下单（续费白名单）
+// ② 回调两次只续期一次
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('①② 到期租户自助下单 → 支付回调兑现（重复回调只算一次）', () => {
+  let shop: Shop
+  let outTradeNo = ''
+  let orderId = ''
+  let expireBefore: Date | null = null
+
+  beforeAll(async () => {
+    shop = await createShop(1, { login: true })
+    await makeExpired(shop.tenantId)
+    const row = await prisma.tenant.findUniqueOrThrow({ where: { id: shop.tenantId } })
+    expireBefore = row.planExpireAt
+    notifySpy.mockClear()
+  })
+
+  it('① 到期后写操作被闸门拦下（1440301）', async () => {
+    const res = await request(http())
+      .post('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ name: `到期后不该建成 ${RUN}`, priceCents: 100 })
+    expect(codeOf(res.body)).toBe(1440301)
+  })
+
+  it('① 同一时刻 POST /api/admin/billing/orders 照常通，并拿到支付参数', async () => {
+    const res = await request(http())
+      .post('/api/admin/billing/orders')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ planId, periods: 2 })
+    const data = expectOk<{
+      order: { id: string; outTradeNo: string; amountCents: number; status: string }
+      payParams: Record<string, unknown>
+    }>(res.body)
+
+    outTradeNo = data.order.outTradeNo
+    orderId = data.order.id
+    expect(data.order.status).toBe('PENDING')
+    // 这家店从没兑现过订单 → 首开价 × 2 期。
+    expect(data.order.amountCents).toBe(FIRST_PRICE_CENTS * 2)
+    expect(outTradeNo.startsWith('PLAN-'), `单号必须带 PLAN 前缀，实际 ${outTradeNo}`).toBe(true)
+    expect(data.payParams.prepayId).toBe(`FAKEPREPAY-${outTradeNo}`)
+  })
+
+  it('② 第一次回调：渠道拿到 SUCCESS 应答', async () => {
+    const res = await kit.simulatePaid(outTradeNo)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ code: 'SUCCESS', message: '成功' })
+  })
+
+  it('② 订单变 FULFILLED，两个到期日快照都落了库', async () => {
+    const order = await prisma.planOrder.findUniqueOrThrow({ where: { id: orderId } })
+    expect(order.status).toBe('FULFILLED')
+    expect(order.transactionId).toBeTruthy()
+    expect(order.paidAt).not.toBeNull()
+    expect(order.fulfilledAt).not.toBeNull()
+    expect(order.expireBeforeAt?.toISOString()).toBe(expireBefore?.toISOString())
+    expect(order.expireAfterAt).not.toBeNull()
+  })
+
+  it('② 租户到期日 = max(原到期, now) + 2×1 个月的当天末，且 status 转 ACTIVE', async () => {
+    const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: shop.tenantId } })
+    const order = await prisma.planOrder.findUniqueOrThrow({ where: { id: orderId } })
+    // 原到期日在昨天 → 基准取 now，加 2 个月，落当天 23:59:59.999（+08:00）。
+    const expected = computeRenewal({
+      currentExpireAt: expireBefore,
+      now: order.fulfilledAt ?? new Date(),
+      periods: 2,
+      periodMonths: PERIOD_MONTHS,
+    }).expireAfterAt
+    expect(tenant.planExpireAt?.toISOString()).toBe(expected.toISOString())
+    expect(tenant.planExpireAt?.toISOString()).toBe(order.expireAfterAt?.toISOString())
+    expect(tenant.planId).toBe(planId)
+    expect(tenant.status).toBe('ACTIVE')
+    // 「当天末」这条不可退让：落成 00:00 的话商家到期当天就打不开店了。
+    expect(tenant.planExpireAt?.toISOString().endsWith('15:59:59.999Z')).toBe(true)
+  })
+
+  it('② 审计恰好一条 plan-order.fulfill（租户域 AuditLog）', async () => {
+    await waitFor(
+      async () =>
+        (await prisma.auditLog.count({
+          where: { tenantId: shop.tenantId, action: 'plan-order.fulfill' },
+        })) === 1,
+    )
+    const log = await prisma.auditLog.findFirstOrThrow({
+      where: { tenantId: shop.tenantId, action: 'plan-order.fulfill' },
+    })
+    expect(log.actorType).toBe('SYSTEM')
+    expect(log.targetId).toBe(orderId)
+    expect((log.after as Record<string, unknown>).via).toBe('CALLBACK')
+  })
+
+  it('② 站内信发了一次，且真的落进了 NotifyRecord（channel=IN_APP）', async () => {
+    const inbox = notifySpy.mock.calls.filter(
+      ([req]) => req.templateKey === PLAN_ORDER_FULFILLED_TEMPLATE,
+    )
+    expect(inbox).toHaveLength(1)
+    expect(inbox[0]?.[0].channels).toEqual(['INBOX'])
+    expect(inbox[0]?.[0].tenantId).toBe(shop.tenantId)
+
+    await waitFor(
+      async () =>
+        (await prisma.notifyRecord.count({
+          where: {
+            tenantId: shop.tenantId,
+            templateKey: PLAN_ORDER_FULFILLED_TEMPLATE,
+          },
+        })) === 1,
+    )
+    const record = await prisma.notifyRecord.findFirstOrThrow({
+      where: { tenantId: shop.tenantId, templateKey: PLAN_ORDER_FULFILLED_TEMPLATE },
+    })
+    expect(record.channel).toBe('IN_APP')
+    expect(record.status).toBe('SENT')
+  })
+
+  it('② 续完费，POST /api/admin/{{domainSlug}} 不再 1440301', async () => {
+    const res = await request(http())
+      .post('/api/admin/{{domainSlug}}')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ name: `续费后建得成 ${RUN}`, priceCents: 100, stock: 1, status: 'ON_SHELF' })
+    expectOk<{ {{domainSlug}}: { id: string } }>(res.body)
+  })
+
+  it('② 第二次回调（渠道重推）：照样 SUCCESS，但一个字段都没变、审计还是一条', async () => {
+    const before = await prisma.tenant.findUniqueOrThrow({ where: { id: shop.tenantId } })
+    const beforeOrder = await prisma.planOrder.findUniqueOrThrow({ where: { id: orderId } })
+
+    const res = await kit.simulatePaid(outTradeNo)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ code: 'SUCCESS', message: '成功' })
+
+    const after = await prisma.tenant.findUniqueOrThrow({ where: { id: shop.tenantId } })
+    const afterOrder = await prisma.planOrder.findUniqueOrThrow({ where: { id: orderId } })
+    expect(after.planExpireAt?.toISOString()).toBe(before.planExpireAt?.toISOString())
+    expect(afterOrder.fulfilledAt?.toISOString()).toBe(beforeOrder.fulfilledAt?.toISOString())
+    expect(
+      await prisma.auditLog.count({
+        where: { tenantId: shop.tenantId, action: 'plan-order.fulfill' },
+      }),
+    ).toBe(1)
+  })
+
+  it('② 账单接口看得到这一单', async () => {
+    const res = await request(http())
+      .get('/api/admin/billing/orders')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .expect(200)
+    const page = expectOk<{ total: number; items: { id: string; status: string }[] }>(res.body)
+    expect(page.total).toBe(1)
+    expect(page.items[0]?.id).toBe(orderId)
+    expect(page.items[0]?.status).toBe('FULFILLED')
+  })
+
+  it('② 可购套餐列表里有我们这一档', async () => {
+    const res = await request(http())
+      .get('/api/admin/billing/plans')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .expect(200)
+    const plans = expectOk<{ id: string; firstPriceCents: number }[]>(res.body)
+    expect(plans.some((p) => p.id === planId)).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ③ 线下核销与回调路径产出完全一致
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 把一行订单抽成「与兑现路径无关」的形状，用来逐字段比对两条路。 */
+function fulfillShape(row: {
+  status: string
+  type: string
+  periods: number
+  amountCents: number
+  paidAt: Date | null
+  fulfilledAt: Date | null
+  expireAfterAt: Date | null
+  planId: string
+}): Record<string, unknown> {
+  return {
+    status: row.status,
+    type: row.type,
+    periods: row.periods,
+    amountCents: row.amountCents,
+    planId: row.planId,
+    paidAtSet: row.paidAt !== null,
+    fulfilledAtSet: row.fulfilledAt !== null,
+    expireAfterAtSet: row.expireAfterAt !== null,
+  }
+}
+
+describe('③ 平台线下「标记已付」走同一个 fulfill', () => {
+  let shop: Shop
+  let orderId = ''
+
+  beforeAll(async () => {
+    shop = await createShop(3)
+    await makeExpired(shop.tenantId)
+    notifySpy.mockClear()
+    const res = await authedPlatform()
+      .post('/api/platform/plan-orders')
+      .send({ tenantId: shop.tenantId, planId, periods: 2, channel: 'OFFLINE' })
+    orderId = expectOk<{ id: string; status: string }>(res.body).id
+  })
+
+  it('下单只落 PENDING，租户的到期日一个字都没动', async () => {
+    const order = await prisma.planOrder.findUniqueOrThrow({ where: { id: orderId } })
+    const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: shop.tenantId } })
+    expect(order.status).toBe('PENDING')
+    expect(order.payChannel).toBe('OFFLINE')
+    expect(tenant.planExpireAt!.getTime()).toBeLessThan(Date.now())
+  })
+
+  it('mark-paid 之后，DB 结果与回调路径逐字段一致（只有渠道与操作人不同）', async () => {
+    const res = await authedPlatform().post(`/api/platform/plan-orders/${orderId}/mark-paid`)
+    const out = expectOk<{ fresh: boolean }>(res.body)
+    expect(out.fresh).toBe(true)
+
+    const offline = await prisma.planOrder.findUniqueOrThrow({ where: { id: orderId } })
+    // 同一批入参（同套餐、2 期、同为「到期后首次付费」）→ 形状必须逐字段相等。
+    expect(fulfillShape(offline)).toEqual({
+      status: 'FULFILLED',
+      type: 'OPEN',
+      periods: 2,
+      amountCents: FIRST_PRICE_CENTS * 2,
+      planId,
+      paidAtSet: true,
+      fulfilledAtSet: true,
+      expireAfterAtSet: true,
+    })
+    // 两条路唯一该不一样的地方：渠道流水号（线下没有）与操作人（回调没有）。
+    expect(offline.transactionId).toBeNull()
+    expect(offline.operatorId).toBeTruthy()
+
+    const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: shop.tenantId } })
+    expect(tenant.planExpireAt?.toISOString()).toBe(offline.expireAfterAt?.toISOString())
+    expect(tenant.status).toBe('ACTIVE')
+  })
+
+  it('线下这条也写了审计、也发了站内信（当初漏掉的就是这两件），且真的落了库', async () => {
+    await waitFor(
+      async () =>
+        (await prisma.auditLog.count({
+          where: { tenantId: shop.tenantId, action: 'plan-order.fulfill' },
+        })) === 1,
+    )
+    const log = await prisma.auditLog.findFirstOrThrow({
+      where: { tenantId: shop.tenantId, action: 'plan-order.fulfill' },
+    })
+    expect(log.actorType).toBe('PLATFORM_ADMIN')
+    expect((log.after as Record<string, unknown>).via).toBe('OFFLINE')
+    expect(
+      notifySpy.mock.calls.filter(([req]) => req.templateKey === PLAN_ORDER_FULFILLED_TEMPLATE),
+    ).toHaveLength(1)
+
+    await waitFor(
+      async () =>
+        (await prisma.notifyRecord.count({
+          where: { tenantId: shop.tenantId, templateKey: PLAN_ORDER_FULFILLED_TEMPLATE },
+        })) === 1,
+    )
+    const record = await prisma.notifyRecord.findFirstOrThrow({
+      where: { tenantId: shop.tenantId, templateKey: PLAN_ORDER_FULFILLED_TEMPLATE },
+    })
+    expect(record.channel).toBe('IN_APP')
+  })
+
+  it('重复点「标记已付」是幂等的（fresh=false，到期日不再往后跳一年）', async () => {
+    const before = await prisma.tenant.findUniqueOrThrow({ where: { id: shop.tenantId } })
+    const res = await authedPlatform().post(`/api/platform/plan-orders/${orderId}/mark-paid`)
+    expect(expectOk<{ fresh: boolean }>(res.body).fresh).toBe(false)
+    const after = await prisma.tenant.findUniqueOrThrow({ where: { id: shop.tenantId } })
+    expect(after.planExpireAt?.toISOString()).toBe(before.planExpireAt?.toISOString())
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ④ 金额不符
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('④ 金额不符的回调：不兑现、有审计 FAIL、但照常应答成功', () => {
+  let shop: Shop
+  let outTradeNo = ''
+  let orderId = ''
+
+  beforeAll(async () => {
+    shop = await createShop(4, { login: true })
+    await makeExpired(shop.tenantId)
+    const res = await request(http())
+      .post('/api/admin/billing/orders')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ planId, periods: 1 })
+    const data = expectOk<{ order: { id: string; outTradeNo: string } }>(res.body)
+    outTradeNo = data.order.outTradeNo
+    orderId = data.order.id
+  })
+
+  it('付 1 分钱买一年：应答仍是 SUCCESS（永久性错误重推不会自愈，别把接口打满）', async () => {
+    const res = await kit.simulatePaid(outTradeNo, { amountCents: 1 })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ code: 'SUCCESS', message: '成功' })
+  })
+
+  it('订单还是 PENDING，租户仍然到期', async () => {
+    const order = await prisma.planOrder.findUniqueOrThrow({ where: { id: orderId } })
+    expect(order.status).toBe('PENDING')
+    expect(order.fulfilledAt).toBeNull()
+    const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: shop.tenantId } })
+    expect(tenant.planExpireAt!.getTime()).toBeLessThan(Date.now())
+  })
+
+  it('PlatformAuditLog 有一条 plan-order.callback 的 FAIL，钱的账留住了', async () => {
+    await waitFor(
+      async () =>
+        (await prisma.platformAuditLog.count({
+          where: { action: 'plan-order.callback', targetId: orderId, result: 'FAIL' },
+        })) === 1,
+    )
+    const log = await prisma.platformAuditLog.findFirstOrThrow({
+      where: { action: 'plan-order.callback', targetId: orderId },
+    })
+    expect(log.targetTenantId).toBe(shop.tenantId)
+    expect(String((log.after as Record<string, unknown>).reason)).toContain('金额与订单不符')
+  })
+
+  it('伪造签名的回调被挡在 400，一个字节都没落库', async () => {
+    const before = await prisma.planOrder.findUniqueOrThrow({ where: { id: orderId } })
+    const res = await kit.simulatePaid(outTradeNo, { secret: 'wrong-secret' })
+    expect(res.status).toBe(400)
+    const after = await prisma.planOrder.findUniqueOrThrow({ where: { id: orderId } })
+    expect(after.status).toBe(before.status)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑤ 退款
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑤ 退款回退到期日；续过费之后交人工', () => {
+  let shop: Shop
+  let firstOrderId = ''
+  let expireBefore: Date | null = null
+
+  beforeAll(async () => {
+    shop = await createShop(5, { login: true })
+    await makeExpired(shop.tenantId)
+    const row = await prisma.tenant.findUniqueOrThrow({ where: { id: shop.tenantId } })
+    expireBefore = row.planExpireAt
+
+    const created = await request(http())
+      .post('/api/admin/billing/orders')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ planId, periods: 1 })
+    const data = expectOk<{ order: { id: string; outTradeNo: string } }>(created.body)
+    firstOrderId = data.order.id
+    await kit.simulatePaid(data.order.outTradeNo)
+  })
+
+  it('退款后到期日回到 expireBeforeAt，订单转 REFUNDED', async () => {
+    const res = await authedPlatform()
+      .post(`/api/platform/plan-orders/${firstOrderId}/refund`)
+      .send({ reason: 'e2e 退款验证' })
+    const out = expectOk<{ applied: boolean }>(res.body)
+    expect(out.applied).toBe(true)
+
+    const order = await prisma.planOrder.findUniqueOrThrow({ where: { id: firstOrderId } })
+    expect(order.status).toBe('REFUNDED')
+    const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: shop.tenantId } })
+    expect(tenant.planExpireAt?.toISOString()).toBe(expireBefore?.toISOString())
+  })
+
+  it('退款也写了审计（plan-order.refund）', async () => {
+    await waitFor(
+      async () =>
+        (await prisma.auditLog.count({
+          where: { tenantId: shop.tenantId, action: 'plan-order.refund' },
+        })) >= 1,
+    )
+  })
+
+  it('续过费之后再退上一笔 → applied:false / SUPERSEDED，什么都不动', async () => {
+    // 先把上一笔恢复成 FULFILLED（模拟「退款流程还没走完，中间又续了一次费」）。
+    await prisma.planOrder.update({
+      where: { id: firstOrderId },
+      data: { status: 'FULFILLED' },
+    })
+    // 再买一单并兑现，把到期日推到更远。
+    const created = await request(http())
+      .post('/api/admin/billing/orders')
+      .set('Authorization', `Bearer ${shop.token}`)
+      .send({ planId, periods: 6 })
+    const second = expectOk<{ order: { outTradeNo: string } }>(created.body)
+    await kit.simulatePaid(second.order.outTradeNo)
+
+    const beforeTenant = await prisma.tenant.findUniqueOrThrow({ where: { id: shop.tenantId } })
+    const res = await authedPlatform()
+      .post(`/api/platform/plan-orders/${firstOrderId}/refund`)
+      .send({ reason: '续过费之后再退，应交人工' })
+    const out = expectOk<{ applied: boolean; reason?: string }>(res.body)
+    expect(out.applied).toBe(false)
+    expect(out.reason).toBe('SUPERSEDED')
+
+    const order = await prisma.planOrder.findUniqueOrThrow({ where: { id: firstOrderId } })
+    expect(order.status, '交人工 = 什么都不动，订单状态也不动').toBe('FULFILLED')
+    const afterTenant = await prisma.tenant.findUniqueOrThrow({ where: { id: shop.tenantId } })
+    expect(afterTenant.planExpireAt?.toISOString()).toBe(beforeTenant.planExpireAt?.toISOString())
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑥ 超时取消
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑥ PENDING 单超过 30 分钟被 cron 取消', () => {
+  let shop: Shop
+  let staleId = ''
+  let freshId = ''
+
+  beforeAll(async () => {
+    shop = await createShop(6)
+    const stale = await authedPlatform()
+      .post('/api/platform/plan-orders')
+      .send({ tenantId: shop.tenantId, planId, periods: 1, channel: 'OFFLINE' })
+    staleId = expectOk<{ id: string }>(stale.body).id
+    const fresh = await authedPlatform()
+      .post('/api/platform/plan-orders')
+      .send({ tenantId: shop.tenantId, planId, periods: 1, channel: 'OFFLINE' })
+    freshId = expectOk<{ id: string }>(fresh.body).id
+
+    // 把其中一张的 createdAt 挪到 31 分钟前。
+    await prisma.planOrder.update({
+      where: { id: staleId },
+      data: { createdAt: new Date(Date.now() - 31 * 60 * 1000) },
+    })
+  })
+
+  it('cancelExpired 只收走超时的那一张，刚下的单不动', async () => {
+    const count = await planOrders.cancelExpired()
+    expect(count).toBeGreaterThanOrEqual(1)
+    expect((await prisma.planOrder.findUniqueOrThrow({ where: { id: staleId } })).status).toBe(
+      'CANCELLED',
+    )
+    expect((await prisma.planOrder.findUniqueOrThrow({ where: { id: freshId } })).status).toBe(
+      'PENDING',
+    )
+  })
+
+  it('已取消的单不能再被兑现（状态机没有 CANCELLED → PAID 这条边）', async () => {
+    const res = await authedPlatform().post(`/api/platform/plan-orders/${staleId}/mark-paid`)
+    expect(codeOf(res.body)).not.toBe(0)
+    expect((await prisma.planOrder.findUniqueOrThrow({ where: { id: staleId } })).status).toBe(
+      'CANCELLED',
+    )
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑦ 平台续期接口也是同一条路
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('⑦ /api/platform/tenants/:id/renew 产出的订单与 ③ 形状一致', () => {
+  let shop: Shop
+
+  beforeAll(async () => {
+    shop = await createShop(7)
+    await makeExpired(shop.tenantId)
+  })
+
+  it('renew 落的是一张 FULFILLED 的 OFFLINE 单，且带齐两个到期日快照', async () => {
+    const res = await authedPlatform()
+      .patch(`/api/platform/tenants/${shop.tenantId}/renew`)
+      .send({ periods: 2 })
+    const out = expectOk<{
+      tenant: { planExpireAt: string; status: string }
+      order: { id: string; outTradeNo: string; amountCents: number }
+    }>(res.body)
+
+    const order = await prisma.planOrder.findUniqueOrThrow({ where: { id: out.order.id } })
+    expect(fulfillShape(order)).toEqual({
+      status: 'FULFILLED',
+      type: 'OPEN',
+      periods: 2,
+      amountCents: FIRST_PRICE_CENTS * 2,
+      planId,
+      paidAtSet: true,
+      fulfilledAtSet: true,
+      expireAfterAtSet: true,
+    })
+    expect(order.payChannel).toBe('OFFLINE')
+    expect(order.operatorId).toBeTruthy()
+    // T1-5 之前 renew 自己拼的单号是 `renew-<ULID>`，回调根本路由不到它。
+    expect(order.outTradeNo.startsWith('PLAN-')).toBe(true)
+    expect(order.expireBeforeAt).not.toBeNull()
+
+    expect(out.tenant.planExpireAt).toBe(order.expireAfterAt?.toISOString())
+    expect(out.tenant.status).toBe('ACTIVE')
+  })
+
+  it('renew 也留下了 plan-order.fulfill 审计（和 ③ 同一条路径，所以同一条记录）', async () => {
+    await waitFor(
+      async () =>
+        (await prisma.auditLog.count({
+          where: { tenantId: shop.tenantId, action: 'plan-order.fulfill' },
+        })) === 1,
+    )
+  })
+})

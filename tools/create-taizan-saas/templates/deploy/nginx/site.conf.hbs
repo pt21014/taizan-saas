@@ -1,0 +1,55 @@
+# 官网 + 自助注册静态站点（www.{{rootDomain}}）——apps/site 的 Vite 构建产物。
+#
+# 宝塔面板放置位置：面板 → 网站 → 添加站点（纯静态，PHP 选"纯静态"）→
+# 站点根目录指到 apps/site 的构建产物部署目录（deploy/scripts/remote-deploy.sh
+# 会把 `deploy/docker/Dockerfile.web --build-arg APP=site` 的产物，或者
+# `pnpm --filter {{scope}}/site build` 本地构建的 `apps/site/dist/`，铺到这里）→
+# 该站点 → 设置 → 配置文件，把生成的 server{} 块整体替换成本文件内容。
+#
+# 本文件写于 apps/site **落地之前**（仓库目前只有 apps/api、apps/client），
+# 按 T4-3 蓝图给定的"标准 Vite SPA + 同源 /api/ 反代"形状预先写好；等 site 落地后
+# 直接可用，不需要因为这个站点长出来了而改动 nginx 配置。
+
+server {
+    listen 80;
+    listen 443 ssl;
+    http2 on;
+    server_name www.{{rootDomain}};
+    root /www/wwwroot/www.{{rootDomain}};
+    index index.html;
+
+    ssl_certificate     /www/server/panel/vhost/cert/www.{{rootDomain}}/fullchain.pem;
+    ssl_certificate_key /www/server/panel/vhost/cert/www.{{rootDomain}}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    error_page 497 https://$host$request_uri;
+
+    include /www/server/panel/vhost/nginx/{{projectName}}-snippets/security-headers.conf;
+    include /www/server/panel/vhost/nginx/{{projectName}}-snippets/gzip.conf;
+
+    # 同源反代：前端一律打相对路径 `/api/...`，不需要处理跨域、不需要在前端配置里
+    # 硬编码 API 域名。官网主要打 `/api/public/*`（免登录免租户：自助注册、
+    # site-config），自助注册接口本身有登录/验证码同等级别的限流（@RateLimited），
+    # 一样依赖下面这行 X-Forwarded-For，否则"一个 IP 一天只能注册 N 家店"的限流
+    # 会被同一个理由绕过——所有访客都长得像 nginx 自己。
+    location /api/ {
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        # 同 api.conf：缺了这一行，限流会把所有访客算成同一个人。
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Trace-Id $http_x_trace_id;
+        proxy_read_timeout 60s;
+        proxy_pass http://127.0.0.1:{{apiPort}};
+    }
+
+    location = /health {
+        access_log off;
+        proxy_pass http://127.0.0.1:{{apiPort}};
+        proxy_set_header Host $host;
+    }
+
+    include /www/server/panel/vhost/nginx/{{projectName}}-snippets/spa.conf;
+
+    access_log /www/wwwlogs/www.{{rootDomain}}.log;
+    error_log  /www/wwwlogs/www.{{rootDomain}}.error.log;
+}

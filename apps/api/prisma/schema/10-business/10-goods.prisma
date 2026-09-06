@@ -1,0 +1,72 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// example-goods —— 示例业务模块的表（蓝图 §7 扩展点①「加表」）。
+//
+// 这个文件是「业务片段长什么样」的样板，生成器可选删除。它演示了 §3.1 里
+// 所有对业务表的硬约定，每一条都有对应的静态断言看着（`test/arch/*.spec.ts`）：
+//
+//   · 主键 `String @id @db.VarChar(26)`，值是应用层生成的 ULID（不写 @default）；
+//   · `tenantId String` **NOT NULL**，且必须登记进 `src/tenancy/tenant-models.ts`；
+//   · 状态一律 enum，禁止裸 Int/String；
+//   · 金额一律 Int 且列名以 `Cents` 结尾，禁用 Decimal；
+//   · 软删列 `deletedAt DateTime?`；
+//   · 每张租户表必有 `@@index([tenantId, id])`；
+//   · 业务唯一索引必须带 `deletedAt` 维度（否则软删后同名记录建不回来）。
+//
+// 唯一索引带 deletedAt 的已知代价见 @taizan/prisma-base README §7：MySQL 把 NULL
+// 视为互不相同，所以 `@@unique([tenantId, name, deletedAt])` 在活跃行（deletedAt IS NULL）
+// 之间**不构成硬唯一**，活跃唯一性要由应用层兜（见 goods.service.ts 的 assertNameUnique）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 商品。示例业务实体，租户域。
+model Goods {
+  id         String      @id @db.VarChar(26)
+  tenantId   String      @db.VarChar(26)
+  name       String
+  /// 售价，单位「分」。金额一律 Int + `Cents` 后缀，禁用 Decimal（对账口径只能有一个）。
+  priceCents Int
+  status     GoodsStatus @default(DRAFT)
+  /// 库存件数。允许为 0（卖完了），不允许为负，由 goods.rules.ts 的纯函数校验。
+  stock      Int         @default(0)
+  /// 创建人（Staff.id）。**数据范围（@DataScope）的归属列**——`dataScope = SELF` 的
+  /// 员工只看得到自己建的商品。可空：历史行、seed 造的数据、以及将来由队列/平台侧
+  /// 代建的行都没有「人」，那时它落 null，`buildScopeWhere` 的等值条件自然把它排除。
+  createdBy  String?     @db.VarChar(26)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  deletedAt  DateTime?
+
+  @@unique([tenantId, name, deletedAt])
+  @@index([tenantId, id])
+  @@index([tenantId, status])
+  /// 数据范围收窄（`createdBy = 我`）是列表页的常规查询，没有索引它就是全表扫。
+  @@index([tenantId, createdBy])
+}
+
+/// 商品规格。演示「同一个业务模块里的第二张表也要登记进 TENANT_MODELS」。
+model GoodsSku {
+  id         String    @id @db.VarChar(26)
+  tenantId   String    @db.VarChar(26)
+  /// Goods.id。**刻意不建外键**（§3.1：业务表不建 relation，将来平台侧要能平移成独立服务）。
+  goodsId    String    @db.VarChar(26)
+  name       String
+  priceCents Int
+  stock      Int       @default(0)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  deletedAt  DateTime?
+
+  @@unique([tenantId, goodsId, name, deletedAt])
+  @@index([tenantId, id])
+  @@index([tenantId, goodsId])
+}
+
+/// 商品上下架状态。三态而不是一个 Boolean：`DRAFT` 与 `OFF_SHELF` 对商家是两件事
+/// （没写完 vs 主动下架），合并之后运营看不出「有多少商品是漏发布的」。
+enum GoodsStatus {
+  /// 草稿，C 端不可见。
+  DRAFT
+  /// 已上架，C 端可见可买。
+  ON_SHELF
+  /// 已下架，C 端不可见但保留数据。
+  OFF_SHELF
+}

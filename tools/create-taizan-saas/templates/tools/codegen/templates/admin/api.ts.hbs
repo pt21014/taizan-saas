@@ -1,0 +1,41 @@
+import type { CrudListQuery, StatusTagConfig } from '@taizan/admin-ui'
+import type { PageResult } from '@taizan/contracts'
+import { useSession } from '../session'
+
+/** 一行{{name}}（对齐 `apps/api/src/modules/{{slug}}/dto/{{slug}}.dto.ts` 的 `{{Pascal}}View`）。 */
+export interface {{Pascal}} {
+  id: string
+  name: string
+  priceCents: number
+  status: 'DRAFT' | 'ACTIVE' | 'ARCHIVED'
+  remark: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** 新建/编辑时提交的字段（对齐 `Create{{Pascal}}Dto`/`Update{{Pascal}}Dto`）。 */
+export type {{Pascal}}Input = Pick<{{Pascal}}, 'name' | 'priceCents' | 'status' | 'remark'>
+
+/** 状态列的枚举 → Tag 配置。 */
+export const {{CONST}}_STATUS: Record<{{Pascal}}['status'], StatusTagConfig> = {
+  ACTIVE: { text: '启用中', color: 'success' },
+  ARCHIVED: { text: '已归档' },
+  DRAFT: { text: '草稿', color: 'processing' },
+}
+
+/**
+ * {{name}}模块的接口层：六个函数对齐 `{{Pascal}}Controller`。
+ * 页面里不直接拼 URL，是为了让业务页面只剩下「长什么样」这一件事。
+ */
+export function use{{Pascal}}Api() {
+  const req = useSession((s) => s.request)
+  return {
+    list: (query: CrudListQuery) => req.get<PageResult<{{Pascal}}>>('/api/admin/{{slug}}', query),
+    get: (id: string) => req.get<{{Pascal}}>('/api/admin/{{slug}}/' + id),
+    create: (values: {{Pascal}}Input) => req.post('/api/admin/{{slug}}', values),
+    update: (id: string, values: {{Pascal}}Input) => req.put('/api/admin/{{slug}}/' + id, values),
+    remove: (row: {{Pascal}}) => req.delete<void>('/api/admin/{{slug}}/' + row.id),
+    /** 导出（`GET /api/admin/{{slug}}/export`，`{{slug}}:export` 权限点）：不分页，返回全量。 */
+    exportAll: () => req.get<{{Pascal}}[]>('/api/admin/{{slug}}/export'),
+  }
+}

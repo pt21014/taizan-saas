@@ -1,0 +1,258 @@
+/**
+ * `/api/admin/billing` 的数据组装。
+ *
+ * 一条规则都不在这里判：到期与否走 `@taizan/billing-rules` 的 `evaluateTenantGate`，
+ * 配额走 `QuotaService`。本文件只是把闸门视图翻译成前端要的形状。
+ *
+ * @packageDocumentation
+ */
+
+import { Inject, Injectable } from '@nestjs/common'
+import { evaluateTenantGate } from '@taizan/billing-rules'
+import { ErrorCode, type PageResult } from '@taizan/contracts'
+import type { AuthPrincipal } from '@taizan/nest-auth'
+import { PLATFORM_GATEWAY, QuotaService, gateInputOf } from '@taizan/nest-billing'
+import type { PlatformGateway } from '@taizan/nest-billing'
+import { BizException } from '@taizan/nest-core'
+import { PaymentService } from '@taizan/nest-payment'
+
+import { PlanOrderService } from '../../platform/plan-order/plan-order.service'
+import type {
+  CreateSelfPlanOrderDto,
+  ListSelfPlanOrderQueryDto,
+} from '../../platform/plan-order/dto/plan-order.dto'
+import { BOOTSTRAP_QUOTA_KINDS } from '../../../registry/quota-kinds'
+
+/** 一档配额的用量。 */
+export interface BillingQuotaView {
+  kind: string
+  used: number
+  /** `null` = 不限量。 */
+  limit: number | null
+  /** `null` = 不限量。 */
+  remaining: number | null
+}
+
+/** `GET /api/admin/billing` 的响应。 */
+export interface BillingOverview {
+  planCode: string | null
+  planName: string | null
+  /** ISO 字符串；`null` = 还没有套餐。 */
+  planExpireAt: string | null
+  /** 距到期还有几个日历日：正数还剩、`0` 今天到期、负数已过期；`null` = 算不出。 */
+  daysLeft: number | null
+  /** 生命周期阶段（`TRIAL` / `ACTIVE` / `GRACE` / `EXPIRED` / …）。 */
+  phase: string
+  /** 后台是否已转只读。**按 `enforcing: true` 算**，理由见 bootstrap.service.ts。 */
+  readonly: boolean
+  /** 套餐功能开关三态：`null` = 全部可用，`[]` = 一个都不给。 */
+  features: string[] | null
+  quotas: BillingQuotaView[]
+}
+
+@Injectable()
+export class AdminBillingService {
+  constructor(
+    @Inject(PLATFORM_GATEWAY) private readonly gateway: PlatformGateway,
+    @Inject(QuotaService) private readonly quota: QuotaService,
+    /**
+     * 商家自助下单复用平台侧那一个 `PlanOrderService`，不在商家侧另建一份。
+     *
+     * 两个理由：① 「把钱变成权益」只能有一条 `fulfill()`（蓝图 §4.6）；
+     * ② `Plan` 是**平台域**表（没登记进 `TENANT_MODELS`，而本应用 `onUnregistered`
+     * 是 `'throw'`），商家侧用 `prisma.tenant.plan` 读它会当场抛 `MODEL_NOT_REGISTERED`
+     * ——读平台域表的代码就该待在 raw 白名单覆盖的 `src/modules/platform/` 里。
+     */
+    @Inject(PlanOrderService) private readonly planOrders: PlanOrderService,
+    @Inject(PaymentService) private readonly payment: PaymentService,
+  ) {}
+
+  async overview(principal: AuthPrincipal): Promise<BillingOverview> {
+    const tenantId = principal.tenantId
+    if (tenantId === undefined) {
+      throw new BizException(ErrorCode.UNAUTHENTICATED, '登录状态已失效，请重新登录')
+    }
+
+    const view = await this.gateway.getTenant(tenantId)
+    if (view === null) {
+      throw new BizException(ErrorCode.TENANT_NOT_FOUND, '当前店铺不存在或已被注销')
+    }
+
+    const gate = evaluateTenantGate(gateInputOf(view, new Date(), true))
+    const quotas = await Promise.all(
+      BOOTSTRAP_QUOTA_KINDS.map(async (kind) => {
+        const usage = await this.quota.usage(kind)
+        return { kind, used: usage.used, limit: usage.limit, remaining: usage.remaining }
+      }),
+    )
+
+    return {
+      planCode: view.planCode,
+      planName: view.planName,
+      planExpireAt: view.planExpireAt?.toISOString() ?? null,
+      daysLeft: gate.daysLeft,
+      phase: gate.phase,
+      readonly: !gate.adminWritable,
+      features: view.features,
+      quotas,
+    }
+  }
+
+  /**
+   * 可购套餐。到期的店也看得到——它正是这一屏最需要的读者。
+   */
+  async plans(): Promise<PurchasablePlanView[]> {
+    const rows = await this.planOrders.listPurchasablePlans()
+    return rows.map((plan) => ({
+      id: plan.id,
+      code: plan.code,
+      name: plan.name,
+      firstPriceCents: plan.firstPriceCents,
+      renewPriceCents: plan.renewPriceCents,
+      periodMonths: plan.periodMonths,
+      trafficMb: plan.trafficMb,
+      quotas: plan.quotas as Record<string, number | null>,
+      features: (plan.features as string[] | null) ?? null,
+    }))
+  }
+
+  /** 本店的账单（`PlanOrder` 分页）。 */
+  async orders(
+    principal: AuthPrincipal,
+    query: ListSelfPlanOrderQueryDto,
+  ): Promise<PageResult<PlanOrderBillView>> {
+    const tenantId = this.requireTenantId(principal)
+    const page = await this.planOrders.listByTenant(tenantId, query)
+    return { ...page, items: page.items.map(toBillView) }
+  }
+
+  /**
+   * 商家自助下单：落一张 `PENDING`，再向渠道要一份支付参数下发给前端。
+   *
+   * ## 这条路由为什么必须在到期后仍然可写
+   *
+   * `/api/admin/billing` 是 `ALWAYS_WRITABLE_PREFIXES` 三条之一。锁掉它就是
+   * 「到期 → 后台只读 → 续不了费 → 永远到期」的死循环，而平台恰恰是想收钱的那一方。
+   * `test/plan-order.e2e-spec.ts` 的第一个用例证明的就是这件事：一家 `planExpireAt`
+   * 在昨天的店，`POST /api/admin/goods` 拿 1440301，这条路由照常返回支付参数。
+   *
+   * ## 为什么下单和取支付参数是同一次调用
+   *
+   * 分成两步（先建单、再单独调「去支付」）会产生一批「建了单从没去付」的僵尸单，
+   * 而 `payParams` 本身是有时效的（微信 prepay_id 两小时）。一次调用拿到的
+   * `payParams` **原样下发给前端、不许改任何一个字段**——改了签名就废。
+   *
+   * @throws `BizException` 1040000 套餐不存在/已归档；1240400 登录态里没有租户
+   */
+  async createOrder(
+    principal: AuthPrincipal,
+    dto: CreateSelfPlanOrderDto,
+  ): Promise<CreateSelfOrderResult> {
+    const tenantId = this.requireTenantId(principal)
+    const view = await this.gateway.getTenant(tenantId)
+    if (view === null) {
+      throw new BizException(ErrorCode.TENANT_NOT_FOUND, '当前店铺不存在或已被注销')
+    }
+
+    const order = await this.planOrders.create({
+      tenantId,
+      planId: dto.planId,
+      periods: dto.periods,
+      channel: 'WECHAT',
+    })
+
+    // 不传 `tenantId` = **平台自身收款**：套餐钱进平台的账，用的是 `PlatformSetting`
+    // 里的平台商户号，而不是这家店自己的。传了的话回调地址会带上 `?tenant=`，
+    // 验签会去找这家店的 apiV3Key——那笔钱就成了商家收自己的钱。
+    const pay = await this.payment.createOrder({
+      channel: 'WECHAT',
+      outTradeNo: order.outTradeNo,
+      amountCents: order.amountCents,
+      description: `套餐续费 ${order.periods} 期`,
+      payer: dto.openId ? { kind: 'openid', value: dto.openId } : { kind: 'none' },
+    })
+
+    return {
+      order: toBillView(order),
+      payParams: pay.payParams,
+      ...(pay.prepayRef === undefined ? {} : { prepayRef: pay.prepayRef }),
+    }
+  }
+
+  private requireTenantId(principal: AuthPrincipal): string {
+    const tenantId = principal.tenantId
+    if (tenantId === undefined) {
+      throw new BizException(ErrorCode.UNAUTHENTICATED, '登录状态已失效，请重新登录')
+    }
+    return tenantId
+  }
+}
+
+/** 可购套餐的下发形状。 */
+export interface PurchasablePlanView {
+  id: string
+  code: string
+  name: string
+  firstPriceCents: number
+  renewPriceCents: number
+  periodMonths: number
+  trafficMb: number
+  /** 配额三态：`null` 不限量 / `0` 一个都不给 / 正整数为上限。 */
+  quotas: Record<string, number | null>
+  /** 功能开关三态：`null` 全部可用 / `[]` 一个都不给。 */
+  features: string[] | null
+}
+
+/** 商家账单里的一行。 */
+export interface PlanOrderBillView {
+  id: string
+  planId: string
+  type: string
+  periods: number
+  amountCents: number
+  status: string
+  payChannel: string | null
+  outTradeNo: string
+  paidAt: string | null
+  fulfilledAt: string | null
+  expireAfterAt: string | null
+  createdAt: string
+}
+
+/** 自助下单的产出：订单 + 原样下发给前端的支付参数。 */
+export interface CreateSelfOrderResult {
+  order: PlanOrderBillView
+  /** **原样下发，不许改任何一个字段**——改了签名就废。 */
+  payParams: Record<string, unknown>
+  prepayRef?: string
+}
+
+function toBillView(row: {
+  id: string
+  planId: string
+  type: string
+  periods: number
+  amountCents: number
+  status: string
+  payChannel: string | null
+  outTradeNo: string
+  paidAt: Date | null
+  fulfilledAt: Date | null
+  expireAfterAt: Date | null
+  createdAt: Date
+}): PlanOrderBillView {
+  return {
+    id: row.id,
+    planId: row.planId,
+    type: row.type,
+    periods: row.periods,
+    amountCents: row.amountCents,
+    status: row.status,
+    payChannel: row.payChannel,
+    outTradeNo: row.outTradeNo,
+    paidAt: row.paidAt?.toISOString() ?? null,
+    fulfilledAt: row.fulfilledAt?.toISOString() ?? null,
+    expireAfterAt: row.expireAfterAt?.toISOString() ?? null,
+    createdAt: row.createdAt.toISOString(),
+  }
+}

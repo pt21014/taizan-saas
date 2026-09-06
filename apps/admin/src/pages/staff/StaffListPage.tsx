@@ -1,0 +1,263 @@
+import { useEffect, useState } from 'react'
+import { Button, Drawer, Form, Input, InputNumber, Select, Space, Typography, message } from 'antd'
+import {
+  CrudDrawerForm,
+  CrudTable,
+  dateTimeColumn,
+  statusTagColumn,
+  useCrudForm,
+  useCrudTable,
+  useSession,
+} from '@taizan/admin-ui'
+import { useRolesApi } from '../../api/roles'
+import {
+  STAFF_STATUS,
+  useStaffApi,
+  type Staff,
+  type StaffInviteView,
+  type StaffUpdateInput,
+} from '../../api/staff'
+
+/** 邀请落地页地址：与 `App.tsx` 注册的 `/invites/:token` 路由一一对应。 */
+function inviteLink(token: string): string {
+  return `${window.location.origin}/invites/${token}`
+}
+
+/**
+ * 「邀请员工」抽屉：生成邀请链接 + 可复制，与「编辑」用的 `<CrudDrawerForm>` 不是一回事
+ * ——邀请没有「编辑已有记录」这个概念，提交成功后要展示的是一段链接而不是关抽屉刷新表格
+ * （被邀请人接受之前，员工列表里本来就不会多一行）。
+ */
+function InviteDrawer({
+  open,
+  onClose,
+  roleOptions,
+}: {
+  open: boolean
+  onClose: () => void
+  roleOptions: { label: string; value: string }[]
+}) {
+  const api = useStaffApi()
+  const [form] = Form.useForm<{ phone?: string; roleIds?: string[]; expiresInHours?: number }>()
+  const [submitting, setSubmitting] = useState(false)
+  const [invite, setInvite] = useState<StaffInviteView | null>(null)
+
+  const handleClose = () => {
+    if (submitting) return
+    form.resetFields()
+    setInvite(null)
+    onClose()
+  }
+
+  const handleSubmit = async () => {
+    const values = await form.validateFields()
+    setSubmitting(true)
+    try {
+      const result = await api.createInvite({
+        phone: values.phone === '' ? undefined : values.phone,
+        roleIds: values.roleIds ?? [],
+        expiresInHours: values.expiresInHours,
+      })
+      setInvite(result)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <Drawer title="邀请员工" width={480} open={open} onClose={handleClose} destroyOnClose>
+      {invite === null ? (
+        <Form form={form} layout="vertical">
+          <Form.Item
+            name="phone"
+            label="限定手机号"
+            tooltip="不填 = 任何人拿到链接都能加入这家店；填了则只有这个手机号能核销"
+            rules={[{ pattern: /^1\d{10}$/, message: '请输入正确的 11 位手机号' }]}
+          >
+            <Input maxLength={11} placeholder="留空则不限定" />
+          </Form.Item>
+          <Form.Item name="roleIds" label="入职后挂哪些角色" tooltip="可以先不选，角色回头再配">
+            <Select mode="multiple" options={roleOptions} placeholder="不选则先不挂角色" />
+          </Form.Item>
+          <Form.Item
+            name="expiresInHours"
+            label="有效期（小时）"
+            initialValue={72}
+            tooltip="默认 72 小时，最长 720 小时（30 天）"
+          >
+            <InputNumber min={1} max={720} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item>
+            <Button type="primary" loading={submitting} onClick={() => void handleSubmit()}>
+              生成邀请链接
+            </Button>
+          </Form.Item>
+        </Form>
+      ) : (
+        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          <Typography.Text>邀请链接已生成，发给被邀请人即可（有效期至下方时间）：</Typography.Text>
+          <Input
+            readOnly
+            aria-label="邀请链接"
+            value={inviteLink(invite.token)}
+            onFocus={(e) => e.currentTarget.select()}
+          />
+          <Typography.Paragraph
+            copyable={{ text: inviteLink(invite.token), tooltips: ['复制', '已复制'] }}
+            style={{
+              background: 'rgba(0,0,0,0.03)',
+              padding: '8px 12px',
+              borderRadius: 4,
+              wordBreak: 'break-all',
+              marginBottom: 0,
+            }}
+          >
+            {inviteLink(invite.token)}
+          </Typography.Paragraph>
+          <Typography.Text type="secondary">
+            过期时间：{new Date(invite.expiresAt).toLocaleString()}
+            {invite.phone ? `；仅限手机号 ${invite.phone}` : '；不限手机号'}
+          </Typography.Text>
+          <Button
+            onClick={() => {
+              void navigator.clipboard.writeText(inviteLink(invite.token))
+              void message.success('已复制邀请链接')
+            }}
+          >
+            再复制一次
+          </Button>
+          <Button type="primary" onClick={handleClose}>
+            完成
+          </Button>
+        </Space>
+      )}
+    </Drawer>
+  )
+}
+
+/**
+ * 员工列表：邀请（生成链接）/ 停用-启用 / 改角色 / 店主转让。
+ *
+ * `StaffController` 没有 `GET /:id` 也没有「新建」——员工只能通过邀请加入，
+ * 所以这一页不用 `useCrudTable` 的 `remove`，编辑表单也走 `openWith()` 直接拿列表行
+ * 数据回填，不额外打一次接口。
+ */
+export default function StaffListPage() {
+  const api = useStaffApi()
+  const rolesApi = useRolesApi()
+  const identity = useSession((s) => s.identity)
+  const bootstrap = useSession((s) => s.bootstrap)
+  const [inviteOpen, setInviteOpen] = useState(false)
+  const [roleOptions, setRoleOptions] = useState<{ label: string; value: string }[]>([])
+
+  useEffect(() => {
+    void rolesApi
+      .list({ page: 1, pageSize: 200 })
+      .then((res) => setRoleOptions(res.items.map((r) => ({ label: r.name, value: r.id }))))
+  }, [])
+
+  const table = useCrudTable<Staff>({
+    list: api.list,
+    rowKey: 'id',
+    searchSchema: [
+      { name: 'keyword', label: '姓名/手机号' },
+      {
+        name: 'status',
+        label: '状态',
+        type: 'select',
+        options: [
+          { label: '在职', value: 'ACTIVE' },
+          { label: '已停用', value: 'DISABLED' },
+        ],
+      },
+    ],
+  })
+  const form = useCrudForm<StaffUpdateInput>({
+    // 员工只能通过邀请加入，这张表单永远不会以「新建」态被打开（不接 create 按钮）；
+    // 留一个会拒绝的实现只是为了满足 useCrudForm 的类型要求。
+    create: () => Promise.reject(new Error('员工只能通过邀请加入，不支持直接新建')),
+    update: (id, values) => api.update(id, values),
+    onSuccess: table.refresh,
+    successMessage: { update: '已保存' },
+  })
+
+  return (
+    <>
+      <CrudTable<Staff>
+        table={table}
+        title="员工"
+        toolbar={
+          <Button type="primary" onClick={() => setInviteOpen(true)}>
+            邀请员工
+          </Button>
+        }
+        columns={[
+          { title: '姓名', dataIndex: 'name', key: 'name' },
+          { title: '手机号', dataIndex: 'phone', key: 'phone' },
+          {
+            title: '角色',
+            dataIndex: 'roleNames',
+            key: 'roleNames',
+            render: (names: string[], row) =>
+              row.isOwner ? '店主（全量权限）' : names.join('、') || '-',
+          },
+          statusTagColumn({ title: '状态', dataIndex: 'status', map: STAFF_STATUS }),
+          dateTimeColumn({ title: '加入时间', dataIndex: 'joinedAt' }),
+        ]}
+        actions={[
+          {
+            key: 'edit',
+            label: '改角色',
+            perm: 'staff:write',
+            hidden: (r) => r.isOwner,
+            onClick: (r) => form.openWith(r.id, { name: r.name, roleIds: r.roleIds }),
+          },
+          {
+            key: 'disable',
+            label: '停用',
+            perm: 'staff:disable',
+            hidden: (r) => r.isOwner || r.status !== 'ACTIVE',
+            confirm: (r) => `确定停用「${r.name}」？停用后他约 30 秒内会被强制下线。`,
+            onClick: (r) => void api.disable(r).then(table.refresh),
+          },
+          {
+            key: 'enable',
+            label: '启用',
+            perm: 'staff:disable',
+            hidden: (r) => r.isOwner || r.status !== 'DISABLED',
+            confirm: (r) => `确定启用「${r.name}」？`,
+            onClick: (r) => void api.enable(r).then(table.refresh),
+          },
+          {
+            key: 'transfer',
+            label: '转让店主',
+            danger: true,
+            perm: 'staff:transfer-owner',
+            // 只有当前店主自己能看到这个按钮；能不能真的点得动由后端再判一次 principal.isOwner。
+            hidden: (r) => identity?.isOwner !== true || r.isOwner || r.status !== 'ACTIVE',
+            confirm: (r) => `确定把这家店转让给「${r.name}」？转让后你会降为普通员工/店长角色。`,
+            onClick: (r) =>
+              void api.transferOwner({ staffId: r.id }).then(async () => {
+                void message.success('已转让店铺')
+                await bootstrap()
+                table.refresh()
+              }),
+          },
+        ]}
+      />
+      <CrudDrawerForm form={form} title={() => '改角色 / 昵称'}>
+        <Form.Item name="name" label="店内昵称">
+          <Input placeholder="不填则保持原样" />
+        </Form.Item>
+        <Form.Item name="roleIds" label="角色">
+          <Select mode="multiple" options={roleOptions} placeholder="不改则保持原样" />
+        </Form.Item>
+      </CrudDrawerForm>
+      <InviteDrawer
+        open={inviteOpen}
+        onClose={() => setInviteOpen(false)}
+        roleOptions={roleOptions}
+      />
+    </>
+  )
+}

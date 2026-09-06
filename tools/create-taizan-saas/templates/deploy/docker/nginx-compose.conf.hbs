@@ -1,0 +1,83 @@
+# docker-compose.prod.yml 里 `nginx` 服务用的配置：只反代 API。
+#
+# 这份跟 deploy/nginx/api.conf **不是同一份**，虽然规则一致——原因是宿主：
+# api.conf 是写给宝塔面板（裸机部署，upstream 是 127.0.0.1:{{apiPort}}）的整段 vhost；
+# 这份是写给 docker-compose 网络（upstream 是 compose 服务名 `api`，Docker 内嵌
+# DNS 会把这个名字解析成全部副本的 IP，nginx 按这些 IP 轮询）的独立 nginx.conf
+# （不是某个站点的 server 片段，是整份配置文件）。
+# 两处的安全规则（XFF、健康检查静默、payload 大小、支付回调不缓冲改写）必须一致，
+# 改一处记得改另一处——这也是 deploy/README.md 里特意把两条路径的差异写清楚的原因。
+worker_processes auto;
+
+events {
+  worker_connections 1024;
+}
+
+http {
+  include       /etc/nginx/mime.types;
+  default_type  application/octet-stream;
+  sendfile      on;
+
+  # 只在这里定义一次日志格式，带 traceId 方便和应用日志对齐排查
+  log_format main '$remote_addr - [$time_local] "$request" $status $body_bytes_sent '
+                   '"$http_referer" "$http_user_agent" trace=$upstream_http_x_trace_id rt=$request_time';
+  access_log /var/log/nginx/access.log main;
+  error_log  /var/log/nginx/error.log warn;
+
+  gzip on;
+  gzip_types application/json application/javascript text/css text/plain;
+  gzip_min_length 1024;
+
+  client_max_body_size 20m;
+
+  # `api` 是 compose 里的服务名。**不用**普通的 `upstream { server api:{{apiPort}}; }`
+  # 写法——那种写法只在 nginx 启动/reload 那一刻解析一次 `api` 这个名字，此后就
+  # 固定成那时候查到的 IP 列表。两个后果：
+  #   1. `docker compose up -d --scale api=N` 扩容之后，已经在跑的 nginx 手里
+  #      还是旧的 IP 列表，得手动 `docker compose exec nginx nginx -s reload`；
+  #   2. 更麻烦的是**先起 nginx、api 还没就绪**这种正常的启动竞态——`api` 这个
+  #      名字在 nginx 启动那一刻还没有任何容器注册，DNS 查询直接失败，
+  #      `nginx -t`/启动就地报 `host not found in upstream`，整个 nginx 起不来，
+  #      而不是等 api 起来后重试。
+  # 用 `resolver` 指向 Docker 内嵌 DNS（固定地址 127.0.0.11）+ 变量形式的
+  # `proxy_pass`，把域名解析推迟到**每次请求发生时**，而不是配置加载时——
+  # nginx 不再要求启动那一刻就能查到 `api`，扩缩容也不需要手动 reload。
+  resolver 127.0.0.11 valid=10s;
+
+  server {
+    listen 80;
+    server_name _;
+
+    # 健康检查不进访问日志，避免每 15s 一条心跳把真实流量淹没在日志里
+    location = /health {
+      access_log off;
+      set $upstream_api api;
+      proxy_pass http://$upstream_api:{{apiPort}};
+      proxy_set_header Host $host;
+    }
+
+    location / {
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+
+      # 【必须】缺了这一行，每个访客的真实 IP 在应用侧看到的都是这台 nginx 自己的地址——
+      # @taizan/ratelimit-core 按 IP 维度限流的 key 会全部收敛成同一个值，
+      # 相当于全站共用一份登录失败次数：一个人被锁，其他所有人跟着被锁；
+      # 反过来攻击者也能靠不同来源把限流基数冲高，形同虚设。
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+
+      # traceId 透传：nginx 默认就会把入站请求头原样转发给上游、也会把上游响应头
+      # 原样带回客户端，这里显式写出来是为了不让以后有人加 proxy_hide_header 时漏想到它——
+      # 少了它，前端日志的 traceId 和后端日志的 traceId 对不上，出问题时两边各查各的。
+      proxy_set_header X-Trace-Id $http_x_trace_id;
+
+      # 支付回调（POST /api/public/pay/:channel/notify）也走这个 location：
+      # 验签验的是原始请求字节（见 apps/api/src/bootstrap/main.ts 里 rawBody:true 的注释），
+      # 所以这里刻意不加任何会改写请求体的指令（sub_filter / gunzip / 手写 proxy_set_body 等）。
+      # `proxy_pass_request_body` 保持默认的 on 即可，不要改。
+      set $upstream_api api;
+      proxy_pass http://$upstream_api:{{apiPort}};
+    }
+  }
+}

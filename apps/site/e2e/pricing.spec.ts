@@ -1,0 +1,21 @@
+import { expect, test } from '@playwright/test'
+
+/**
+ * 价格页显示 seed 灌进去的两档套餐（体验版 / 标准版）。
+ *
+ * 断言按**名字存在**而不是「正好两张卡片」：这是一个跑在共享开发库上的 e2e，
+ * 库里可能还留着别的任务/别的 e2e 套件在同一个环境里造的其它套餐行——
+ * 断言总数会让这条用例跟着别人的测试数据一起变红，而它本该只关心
+ * 「`pnpm -F @taizan/api seed` 灌的那两档在不在」。
+ */
+test('价格页显示 seed 的两档套餐', async ({ page }) => {
+  await page.goto('/pricing')
+  await expect(page.getByRole('heading', { name: '体验版' })).toBeVisible()
+
+  const standardCard = page.getByTestId('plan-card').filter({ hasText: '标准版' })
+  await expect(standardCard).toBeVisible()
+  // 首开价 998 元（99800 分）、续费价 798 元（79800 分）：断言价格现取自接口，
+  // 与 packages/prisma-base/src/seed/plans.ts 里的 seed 数据逐字对上。
+  await expect(standardCard).toContainText('¥998')
+  await expect(standardCard).toContainText('¥798')
+})

@@ -1,0 +1,531 @@
+/**
+ * 平台后台开通租户。
+ *
+ * ## 建租户走 `@taizan/provision`，本文件一行建表代码都没有（T1-8）
+ *
+ * 蓝图 §8 spec 14 定死了「建租户的事务只允许出现在 `@taizan/provision` 的调用点，
+ * 控制器里不许再拼一遍」。T0-8 时这里确实拼了一遍（那时 provision 包还不存在），
+ * 现在整块换成了 `provisionTenant(tx, …)`——`test/arch/provision-single-path.spec.ts`
+ * 扫 `src/**` 不许再出现任何建租户的写调用，这条路一旦被人重新拼出来，那条 spec 先红。
+ *
+ * 收口之后本文件顺带补齐了原来漏掉的三件事（它们正是「两条建店路径会走偏」的具体形态）：
+ * 配额计数器、**全套**内置角色下发（原来只建了 owner 一个）、以及 `PlatformAuditLog`
+ * （由控制器上的 `@Audit` 拦截器写）。
+ *
+ * @packageDocumentation
+ */
+
+import { Inject, Injectable, Optional } from '@nestjs/common'
+import { ErrorCode, normalizePage, type PageResult } from '@taizan/contracts'
+import { AuditService } from '@taizan/nest-audit'
+import { BizException } from '@taizan/nest-core'
+import { RawPrismaService } from '@taizan/nest-prisma'
+import { SessionService } from '@taizan/nest-auth'
+import { PLATFORM_GATEWAY, type PlatformGateway } from '@taizan/nest-billing'
+import { hashPassword } from '@taizan/prisma-base'
+import {
+  isProvisionError,
+  normalizePhone,
+  provisionTenant,
+  type ProvisionErrorReason,
+} from '@taizan/provision'
+
+import { createProvisionDeps } from '../../../common/provision-deps'
+import type { AppPrismaClient } from '../../../common/prisma.types'
+import { APP_AUDIT_ACTIONS } from '../../../registry/audit-actions'
+import { PlanOrderService } from '../plan-order/plan-order.service'
+import { randomPassword } from '../shared/random-password'
+import type {
+  ChangeTenantPlanDto,
+  CreateTenantDto,
+  ListTenantQueryDto,
+  RenewTenantDto,
+  ResetOwnerPasswordDto,
+} from './dto/platform-tenant.dto'
+
+/** 续期的产出：新到期日 + 这次落的那张 `PlanOrder`。 */
+export interface RenewTenantResult {
+  tenant: TenantView
+  order: { id: string; outTradeNo: string; amountCents: number; expireAfterAt: string }
+}
+
+/** 重置店主口令的产出。 */
+export interface ResetOwnerPasswordResult {
+  accountId: string
+  phone: string
+  /** 只在**没有显式指定新口令**时回明文，交给调用方线下转告。 */
+  initialPassword: string | null
+}
+
+/** 租户看板（`GET :id/overview`）：全部走 `count`，禁止 `findMany` 拖全表。 */
+export interface TenantOverview {
+  tenant: TenantView
+  staffActiveCount: number
+  memberCount: number
+  goodsCount: number
+}
+
+/** 下发给平台后台的租户行。 */
+export interface TenantView {
+  id: string
+  slug: string
+  name: string
+  status: string
+  planId: string | null
+  planExpireAt: string | null
+  trialEndAt: string | null
+  ownerAccountId: string
+  createdAt: string
+}
+
+/** 建店的产出。 */
+export interface CreateTenantResult {
+  tenant: TenantView
+  owner: {
+    accountId: string
+    staffId: string
+    phone: string
+    /** 只在**新建账号**时回，已有账号不回。 */ initialPassword: string | null
+    /**
+     * 直接取自 `ProvisionResult.attachedExistingAccount`：这次开通是不是走的
+     * `attachExistingAccount` 那条口子——**跳过了口令校验**、直接绑到已有账号下。
+     *
+     * 「这次是不是复用了已有账号」（不管有没有跳过口令校验）另有信号：
+     * `initialPassword === null` 就是——账号是新建的才会回初始口令。
+     * 前端要判断该不该说「用刚才设置的密码登录」，看 `initialPassword` 而不是这个字段。
+     */
+    attachedExistingAccount: boolean
+    /** 给运营看的一句话，直接显示，不要自己再拼。 */
+    notice: string
+  }
+}
+
+/**
+ * 平台后台不显式给试用天数时用的天数。
+ *
+ * 与自助注册那条路的 `SIGNUP_TRIAL_DAYS` **刻意分开**：一个是运营手工开店的默认值
+ * （改它要改代码），一个是官网注册页的运营参数（改它只要改 env）。合成一个的话，
+ * 运营把官网试用期从 14 天调成 7 天，会顺手把后台手工开店也一起改了。
+ *
+ * 显式给了 `trialDays` 就一定是 `TRIAL`（`decideInitialStatus`）——这里恒传一个值，
+ * 也就意味着**平台后台这条路永远开出 TRIAL 店**，与 T0-8 起的行为一致
+ * （挂套餐直接 ACTIVE 开通要给 `planExpireAt`，那是「续期」那条路的事）。
+ */
+const DEFAULT_PLATFORM_TRIAL_DAYS = 14
+
+/**
+ * `ProvisionError.reason` → 平台后台的错误码。
+ *
+ * 按 `reason` 映射而**不是比对文案**：比对文案的代码改一个字就静默失效。
+ * 平台后台这一侧全部落在 `1040000`（参数错，运营看得懂该改哪一栏），
+ * 只有「角色模板坏了」是 `1090500`——那不是运营填错了什么，是该叫人来看的系统问题。
+ */
+// process-local: 这是一张写死在代码里的常量分类表（reason → 该不该算系统故障），
+// 不是缓存也不是计数器——它不随请求变化，多进程各存一份的内容逐字节相同。
+const PROVISION_SERVER_FAULTS: ReadonlySet<ProvisionErrorReason> = new Set([
+  'ROLE_PRESET_EMPTY',
+  'ROLE_PRESET_MISSING_OWNER',
+  // 平台路径漏传 operatorId 是接线 bug，不是运营填错了什么。
+  'OPERATOR_REQUIRED',
+])
+
+/** 把 `ProvisionError` 翻译成 `BizException`；其它异常原样抛。 */
+function toBizException(error: unknown): unknown {
+  if (!isProvisionError(error)) return error
+  const code = PROVISION_SERVER_FAULTS.has(error.reason)
+    ? ErrorCode.INTERNAL_ERROR
+    : ErrorCode.BAD_REQUEST
+  return new BizException(code, error.message)
+}
+
+function toView(row: {
+  id: string
+  slug: string
+  name: string
+  status: string
+  planId: string | null
+  planExpireAt: Date | null
+  trialEndAt: Date | null
+  ownerAccountId: string
+  createdAt: Date
+}): TenantView {
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    status: row.status,
+    planId: row.planId,
+    planExpireAt: row.planExpireAt?.toISOString() ?? null,
+    trialEndAt: row.trialEndAt?.toISOString() ?? null,
+    ownerAccountId: row.ownerAccountId,
+    createdAt: row.createdAt.toISOString(),
+  }
+}
+
+@Injectable()
+export class PlatformTenantService {
+  constructor(
+    // raw-reason: 平台后台——租户主体、登录账号都是平台域数据；而且建店这一刻
+    // 这个租户还不存在，任何「先有 tenantId 再查」的路径在这里都成立不了。
+    @Inject(RawPrismaService) private readonly raw: RawPrismaService<AppPrismaClient>,
+    @Inject(SessionService) private readonly sessions: SessionService,
+    /**
+     * `attachExistingAccount` 那条口子的审计出口。注入 `AuditService` 而不是直接
+     * `tx.platformAuditLog.create`，是为了让 `ip` / `traceId` 的兜底顺序与全站其余
+     * 审计完全一致（那两列非空，各写各的兜底迟早会出现空串）。
+     */
+    @Inject(AuditService) private readonly audit: AuditService,
+    /**
+     * 续期唯一的落库出口。注入一个平台内部服务而不是把逻辑抄过来，是 T1-5 收口的全部：
+     * 「把钱变成权益」只能有一个实现（蓝图 §4.6）。
+     */
+    @Inject(PlanOrderService) private readonly planOrders: PlanOrderService,
+    /**
+     * `@taizan/nest-billing` 的闸门视图有 30 秒进程内缓存（`GATE_CACHE_TTL_MS`）。
+     * 该包 README 明确列了「三件必须由 apps/api 做的接线」之一：**冻结/解冻/续费/
+     * 改套餐（本文件也把注销一并算进去，理由同前）之后必须调 `invalidate(tenantId)`**，
+     * 否则商家付完钱、被封/解封之后，最多还要再等 30 秒才真的生效。
+     * `@Optional()`：万一某个更小的测试装配没带 `BillingModule`，本服务仍能工作，
+     * 只是不做缓存失效——那种装配下反正也没有 `BillingGateGuard` 在读这份缓存。
+     */
+    @Optional()
+    @Inject(PLATFORM_GATEWAY)
+    private readonly gateway?: PlatformGateway,
+  ) {}
+
+  /** 租户列表（平台侧跨租户查询）。 */
+  async list(query: ListTenantQueryDto): Promise<PageResult<TenantView>> {
+    const { page, pageSize } = normalizePage(query)
+    const where = {
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.keyword
+        ? { OR: [{ name: { contains: query.keyword } }, { slug: { contains: query.keyword } }] }
+        : {}),
+    }
+
+    // raw-reason: 平台后台——跨租户列表，这正是 raw 的第三类合法用途。
+    const [rows, total] = await Promise.all([
+      this.raw.client.tenant.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.raw.client.tenant.count({ where }),
+    ])
+    return { items: rows.map(toView), total, page, pageSize }
+  }
+
+  /**
+   * 开通一家店。**整块走 `@taizan/provision`**，本方法一行建表代码都没有（T1-8）。
+   *
+   * 事务由这里开（而不是由 provision 自己开），这样「同一个事务里再写一条审计」
+   * 才放得进去——`attachExistingAccount` 那条审计就是这么落的。
+   *
+   * ## 一号多店与 `attachExistingAccount`
+   *
+   * provision 的原则是「已有手机号必须验原口令，不给 source 开口子」——不验的话，
+   * 任何人填上别人的手机号就能在别人账号下开出一家店（而店主会在自己的店铺列表里
+   * 看见它）。这条对自助注册**绝对成立**。
+   *
+   * 但平台后台拿不到商家的口令。所以这里开了一个**显式**的口子：请求体里写
+   * `attachExistingAccount: true` 才生效，且
+   *
+   * 1. 只在账号**已存在**时可用——不存在时直接拒绝，绝不会退化成「拿占位口令建新账号」；
+   * 2. **必须**落一条 `tenant.create-attach-existing` 审计（记 operatorId 与被绑定账号），
+   *    与建店在同一个事务里，回滚就一起没有；
+   * 3. 响应里明说「已绑定既有账号」，免得运营把一个并不存在的新口令转告给商家。
+   *
+   * @throws `BizException` 1040000 slug 非法/被占用、店名口令不合规、
+   *   一号多店口令不对、`attachExistingAccount` 用在了不存在的手机号上
+   */
+  async create(dto: CreateTenantDto, operatorId: string): Promise<CreateTenantResult> {
+    const attach = dto.attachExistingAccount === true
+    const phone = normalizePhone(dto.ownerPhone)
+    // 明文只在**新建账号**时有意义（回给运营线下转告）。已有账号那一支绝不回它，
+    // 更不会拿它去覆盖别人的口令——那是一个后门（provision 的文件头写了理由）。
+    const plainPassword = dto.ownerPassword ?? randomPassword()
+
+    try {
+      // raw-reason: 平台后台——建店事务全程跨租户（这一刻租户还不存在，注入不了 tenantId）。
+      const created = await this.raw.client.$transaction(async (tx) => {
+        const account = await tx.staffAccount.findUnique({ where: { phone } })
+
+        if (attach && account === null) {
+          // 在事务里判，不是在事务外判：事务外判会有「判完到建之间账号被删了」的缝，
+          // 而那条缝的后果正好是本开关最怕的那件事——把「跳过口令校验」变成
+          // 「拿一个运营根本不知道的占位口令建了个新账号」。
+          throw new BizException(
+            ErrorCode.BAD_REQUEST,
+            `手机号 ${phone} 还没有登录账号，不能用「绑定既有账号」开通。` +
+              '去掉 attachExistingAccount，或者让商家自己填口令。',
+          )
+        }
+
+        const result = await provisionTenant(
+          tx,
+          {
+            slug: dto.slug,
+            name: dto.name,
+            ownerPhone: dto.ownerPhone,
+            ownerPassword: plainPassword,
+            ...(dto.ownerName === undefined ? {} : { ownerName: dto.ownerName }),
+            ...(dto.planId === undefined ? {} : { planId: dto.planId }),
+            trialDays: dto.trialDays ?? DEFAULT_PLATFORM_TRIAL_DAYS,
+            source: 'PLATFORM',
+            operatorId,
+            attachExistingAccount: dto.attachExistingAccount,
+          },
+          createProvisionDeps(),
+        )
+
+        if (attach) {
+          // 这条口子的全部安全性建立在「事后查得出是谁按的」上面，所以审计不是可选项：
+          // 与建店同一个事务，写不进去就整件事回滚，绝不允许「店开出来了、审计没落上」。
+          await this.audit.recordPlatform(
+            {
+              actorType: 'PLATFORM_ADMIN',
+              actorId: operatorId,
+              actorName: operatorId,
+              action: APP_AUDIT_ACTIONS.TENANT_CREATE_ATTACH_EXISTING,
+              targetType: 'Tenant',
+              targetId: result.tenantId,
+              targetTenantId: result.tenantId,
+              after: {
+                slug: dto.slug.trim().toLowerCase(),
+                attachedAccountId: result.ownerAccountId,
+                attachedPhone: phone,
+                operatorId,
+                // 写死一句话而不是只留 action：审计页上「跳过了什么校验」必须一眼看得见。
+                skipped: 'owner-password-verification',
+              },
+            },
+            tx,
+          )
+        }
+
+        // raw-reason: 平台后台——回读刚建好的租户行拼视图，Tenant 是平台域表。
+        const row = await tx.tenant.findUnique({ where: { id: result.tenantId } })
+        return { row: row as NonNullable<typeof row>, result }
+      })
+
+      const accountCreated = created.result.created.account
+      return {
+        tenant: toView(created.row),
+        owner: {
+          accountId: created.result.ownerAccountId,
+          staffId: created.result.ownerStaffId,
+          phone,
+          initialPassword: accountCreated ? plainPassword : null,
+          attachedExistingAccount: created.result.attachedExistingAccount,
+          notice: accountCreated
+            ? '新建了登录账号，请把初始口令线下转告店主。'
+            : '已绑定既有账号：这个手机号原来的登录口令没有变，' +
+              (attach
+                ? '本次开通跳过了口令校验并已记入平台审计。'
+                : '请让店主用他自己的口令登录。'),
+        },
+      }
+    } catch (error) {
+      throw toBizException(error)
+    }
+  }
+
+  /** 冻结（暂停）一家店。`DEREGISTERED` / 已经 `SUSPENDED` 的不能再冻结。 */
+  async suspend(id: string): Promise<TenantView> {
+    const tenant = await this.requireTenant(id)
+    if (tenant.status === 'SUSPENDED') {
+      throw new BizException(ErrorCode.BAD_REQUEST, '这家店已经是冻结状态了')
+    }
+    if (tenant.status === 'DEREGISTERED') {
+      throw new BizException(ErrorCode.BAD_REQUEST, '已注销的店不能冻结')
+    }
+    // raw-reason: 平台后台——冻结租户，Tenant 是平台域表。
+    const row = await this.raw.client.tenant.update({
+      where: { id },
+      data: { status: 'SUSPENDED' },
+    })
+    this.gateway?.invalidate(id)
+    return toView(row)
+  }
+
+  /**
+   * 解冻一家店。
+   *
+   * 冻结前是什么状态没有单独存一份「上一状态」，回退按业务口径**现算**：
+   * 挂了套餐（`planId` 非空）说明它冻结前已经是付费在用，回 `ACTIVE`；
+   * 没挂套餐说明它冻结前还在试用，回 `TRIAL`。这与 `TenantStatus` 刻意不落
+   * `EXPIRED`、到期永远现算是同一个思路——能算出来的状态就不该额外存一份。
+   */
+  async resume(id: string): Promise<TenantView> {
+    const tenant = await this.requireTenant(id)
+    if (tenant.status !== 'SUSPENDED') {
+      throw new BizException(ErrorCode.BAD_REQUEST, '只有冻结中的店才能解冻')
+    }
+    const nextStatus = tenant.planId ? 'ACTIVE' : 'TRIAL'
+    // raw-reason: 平台后台——解冻租户，Tenant 是平台域表。
+    const row = await this.raw.client.tenant.update({ where: { id }, data: { status: nextStatus } })
+    this.gateway?.invalidate(id)
+    return toView(row)
+  }
+
+  /**
+   * 续期：落一张 `OFFLINE` 的 `PENDING` 订单，然后调**统一的** `fulfill()`。
+   *
+   * ─────────────────────────────────────────────────────────────────────
+   * 这里刻意不碰 `planExpireAt` 一个字。T1-5 之前本方法自己写了一遍
+   * 「建 FULFILLED 订单 + 改租户到期日」，那是收费闭环的第二份实现——
+   * 它当时就漏掉了两件事：审计与站内信。线下开单、在线支付回调、
+   * 平台续期三条路必须收敛到一个 `fulfill()`（蓝图 §4.6），
+   * 由 `test/arch/plan-order-fulfill.spec.ts` 扫源码盯着：
+   * 本文件里再出现 `planExpireAt:` 的写入，那条 spec 立刻红。
+   *
+   * 顺带一个行为变化，是改对了而不是改坏了：金额现在由
+   * `computeOrderAmount` 按「这家店有没有 FULFILLED 过」在首开价/续费价之间选，
+   * 而不是无条件用 `renewPriceCents`——平台后台给一家从没付过钱的店点「续期」，
+   * 收的本来就该是首开价。
+   * ─────────────────────────────────────────────────────────────────────
+   *
+   * @throws `BizException` 1040000：租户已注销 / 目标套餐不存在 / 没有可续的套餐
+   */
+  async renew(id: string, dto: RenewTenantDto, operatorId: string): Promise<RenewTenantResult> {
+    const tenant = await this.requireTenant(id)
+    if (tenant.status === 'DEREGISTERED') {
+      throw new BizException(ErrorCode.BAD_REQUEST, '已注销的店不能续期')
+    }
+    const planId = dto.planId ?? tenant.planId
+    if (!planId) {
+      throw new BizException(ErrorCode.BAD_REQUEST, '这家店还没有套餐，续期请先指定 planId')
+    }
+
+    // 下单 → 立刻线下核销。两步都在 `PlanOrderService` 里，本服务一行落库都不写。
+    const order = await this.planOrders.create({
+      tenantId: id,
+      planId,
+      periods: dto.periods,
+      channel: 'OFFLINE',
+      operatorId,
+    })
+    const fulfilled = await this.planOrders.markPaidOffline(order.id, operatorId)
+
+    // `fulfill()` 里已经调过 `gateway.invalidate()` 了，这里重新读一次租户只是为了
+    // 把最新的 `planExpireAt` 回给前端。
+    const updated = await this.requireTenant(id)
+    return {
+      tenant: toView(updated),
+      order: {
+        id: fulfilled.order.id,
+        outTradeNo: fulfilled.order.outTradeNo,
+        amountCents: fulfilled.order.amountCents,
+        expireAfterAt: fulfilled.expireAfterAt.toISOString(),
+      },
+    }
+  }
+
+  /**
+   * 更换套餐。**只切换 `planId`，不改 `planExpireAt`**——升降配额/功能白名单立即生效，
+   * 到期时间的重算（差价补退）是 T1-5 订单侧的事，这里不越权替它算。
+   */
+  async changePlan(id: string, dto: ChangeTenantPlanDto): Promise<TenantView> {
+    await this.requireTenant(id)
+    // raw-reason: 平台后台——校验目标套餐存在，Plan 是平台域表。
+    const plan = await this.raw.client.plan.findUnique({ where: { id: dto.planId } })
+    if (!plan) throw new BizException(ErrorCode.BAD_REQUEST, '套餐不存在')
+    if (plan.status === 'ARCHIVED') {
+      throw new BizException(ErrorCode.BAD_REQUEST, '归档套餐不能分配给租户')
+    }
+
+    // raw-reason: 平台后台——更换租户套餐，Tenant 是平台域表。
+    const row = await this.raw.client.tenant.update({
+      where: { id },
+      data: { planId: dto.planId },
+    })
+    this.gateway?.invalidate(id)
+    return toView(row)
+  }
+
+  /**
+   * 重置店主登录口令，并吊销该账号的全部会话——不吊销的话，店主手上还没过期的
+   * 旧 token 仍然能用，"重置口令" 就成了一句空话。
+   */
+  async resetOwnerPassword(
+    id: string,
+    dto: ResetOwnerPasswordDto,
+  ): Promise<ResetOwnerPasswordResult> {
+    const tenant = await this.requireTenant(id)
+    // raw-reason: 平台后台——按 id 取店主登录账号，StaffAccount 是平台域表。
+    const account = await this.raw.client.staffAccount.findUnique({
+      where: { id: tenant.ownerAccountId },
+    })
+    if (!account) throw new BizException(ErrorCode.BAD_REQUEST, '店主账号不存在')
+
+    const newPassword = dto.newPassword ?? randomPassword()
+    const passwordHash = await hashPassword(newPassword)
+    // raw-reason: 平台后台——重置店主口令，StaffAccount 是平台域表。
+    await this.raw.client.staffAccount.update({ where: { id: account.id }, data: { passwordHash } })
+
+    // staff token 的会话 sub 是 `Staff.id`（每租户一条成员关系），**不是** `StaffAccount.id`
+    // （见 `@taizan/nest-auth` 的 `AuthFlowService.loginStaff`：`sub: membership.staffId`）。
+    // 一号多店时同一个账号在好几家店都可能有成员关系，口令是账号级的，泄露的风险
+    // 因此也是账号级的——所以这里撤销的是这个账号在**所有**店铺的会话，不只是这一家。
+    // raw-reason: 平台后台——按账号 id 找这个人在哪些店有成员关系，跨租户查询。
+    const memberships = await this.raw.client.staff.findMany({
+      where: { accountId: account.id },
+      select: { id: true },
+    })
+    await Promise.all(memberships.map((m) => this.sessions.revokeAll('staff', m.id)))
+
+    return {
+      accountId: account.id,
+      phone: account.phone,
+      initialPassword: dto.newPassword ? null : newPassword,
+    }
+  }
+
+  /**
+   * 注销一家店：**只置状态位 + 时间戳，不做任何物理删除**。
+   * 到 `retentionDays` 之后的物理清理由清理任务负责（本阶段未实现），
+   * 平台后台这一步只是「进入注销流程」的开关。
+   */
+  async deregister(id: string): Promise<TenantView> {
+    const tenant = await this.requireTenant(id)
+    if (tenant.status === 'DEREGISTERED') {
+      throw new BizException(ErrorCode.BAD_REQUEST, '这家店已经注销过了')
+    }
+    // raw-reason: 平台后台——注销租户，Tenant 是平台域表。只置状态位，无物理删除。
+    const row = await this.raw.client.tenant.update({
+      where: { id },
+      data: { status: 'DEREGISTERED', deregisterAt: new Date() },
+    })
+    this.gateway?.invalidate(id)
+    return toView(row)
+  }
+
+  /**
+   * 租户看板：员工数 / 会员数 / 商品数。
+   *
+   * 三个数全部走 `count`——这家店可能有几万个会员，`findMany` 拖全表再数 `length`
+   * 是在平台后台点一下就能打崩数据库的写法。
+   */
+  async overview(id: string): Promise<TenantOverview> {
+    const tenant = await this.requireTenant(id)
+    // raw-reason: 平台后台——跨租户统计一家店的员工/会员/商品数，均为租户域表。
+    const [staffActiveCount, memberCount, goodsCount] = await Promise.all([
+      this.raw.client.staff.count({ where: { tenantId: id, status: 'ACTIVE' } }),
+      this.raw.client.member.count({ where: { tenantId: id } }),
+      this.raw.client.goods.count({ where: { tenantId: id } }),
+    ])
+    return { tenant: toView(tenant), staffActiveCount, memberCount, goodsCount }
+  }
+
+  /** 取一家店，不存在则 `BAD_REQUEST`（平台后台按 id 操作，不存在就是参数错）。 */
+  private async requireTenant(id: string): Promise<TenantRow> {
+    // raw-reason: 平台后台——按 id 取租户，Tenant 是平台域表。
+    const row = await this.raw.client.tenant.findUnique({ where: { id } })
+    if (!row) throw new BizException(ErrorCode.BAD_REQUEST, '租户不存在')
+    return row
+  }
+}
+
+/** 一行 `Tenant`（借 `findUnique` 的返回值收窄非空后的形状）。 */
+type TenantRow = NonNullable<Awaited<ReturnType<AppPrismaClient['tenant']['findUnique']>>>

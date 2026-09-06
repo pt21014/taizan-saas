@@ -1,0 +1,88 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// 本文件由 @taizan/prisma-base 托管，勿手改；升级请 pnpm taizan:schema-sync
+// ─────────────────────────────────────────────────────────────────────────────
+// 通知模板与发送记录。发送记录按 audit 的同一套拆法分租户域 / 平台域两张表。
+
+/// 通知模板。【平台域】——模板全平台共享一份，租户不自定义（要自定义再另开租户级表）。
+model NotifyTemplate {
+  id                 String            @id @db.VarChar(26)
+  /// 模板 key，代码里按它取，例如 tenant.plan.expiring。
+  key                String            @unique
+  channel            NotifyChannelKind
+  title              String
+  /// 模板正文，`\{{var}}` 占位。
+  content            String            @db.Text
+  /// 渠道侧模板 id（短信签名模板、微信订阅消息模板等）。
+  providerTemplateId String?
+  enabled            Boolean           @default(true)
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  @@index([channel, enabled])
+}
+
+/// 租户内的通知发送记录。【租户域】——tenantId 必填。
+model NotifyRecord {
+  id          String            @id @db.VarChar(26)
+  tenantId    String            @db.VarChar(26)
+  channel     NotifyChannelKind
+  templateKey String
+  /// 接收方：手机号 / openId / 邮箱 / 设备 token。
+  to          String
+  /// 模板变量。
+  vars        Json
+  status      NotifyStatus      @default(PENDING)
+  error       String?           @db.Text
+  traceId     String
+  sentAt      DateTime?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([tenantId, id])
+  @@index([tenantId, status, createdAt])
+  @@index([tenantId, templateKey, createdAt])
+}
+
+/// 平台侧的通知发送记录（发给平台管理员、或发给租户主体的平台通知）。【平台域】
+/// 与 NotifyRecord 拆开的理由同 AuditLog / PlatformAuditLog：不给隔离留可空 tenantId 的例外。
+model PlatformNotifyRecord {
+  id             String            @id @db.VarChar(26)
+  /// 这条通知是关于哪家店的；纯平台内部通知为 null。它不是归属列。
+  targetTenantId String?           @db.VarChar(26)
+  channel        NotifyChannelKind
+  templateKey    String
+  to             String
+  vars           Json
+  status         NotifyStatus      @default(PENDING)
+  error          String?           @db.Text
+  traceId        String
+  sentAt         DateTime?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  @@index([status, createdAt])
+  @@index([targetTenantId, createdAt])
+  @@index([templateKey, createdAt])
+}
+
+/// 通知渠道。
+enum NotifyChannelKind {
+  SMS
+  EMAIL
+  /// 微信公众号模板消息。
+  WECHAT_OA
+  /// 微信小程序订阅消息。
+  WECHAT_MP
+  /// App 推送。
+  APP_PUSH
+  /// 站内信。
+  IN_APP
+}
+
+/// 通知发送状态。
+enum NotifyStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+}

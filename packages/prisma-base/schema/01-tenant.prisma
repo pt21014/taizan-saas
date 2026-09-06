@@ -1,0 +1,116 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// 本文件由 @taizan/prisma-base 托管，勿手改；升级请 pnpm taizan:schema-sync
+// ─────────────────────────────────────────────────────────────────────────────
+// 租户主体与租户级资质、密钥。
+//
+// 全局约定（蓝图 §3.1，不可协商）：
+// - 主键 `String @id`，值是应用层生成的 ULID（26 字符），所以统一 @db.VarChar(26)；
+// - 字段名 camelCase 直用，不做 @map；
+// - 业务表**不建外键指向 Tenant**（将来平台侧平移成控制面服务时外键会挡路），
+//   本包索性一条 relation 都不写，跨表引用一律裸 id + 索引。
+
+/// 租户（商家）主体。【平台域】——登录前解析、平台后台管理都走 raw 逃生口，不受租户隔离。
+model Tenant {
+  id             String       @id @db.VarChar(26)
+  /// 全局唯一且**不可改**：子域名 / 小程序启动参数 / 回调 URL 都靠它定位租户。
+  slug           String       @unique
+  name           String
+  /// 刻意没有 EXPIRED：到期永远现算（evaluateTenantGate），不落状态位。
+  status         TenantStatus @default(TRIAL)
+  planId         String?      @db.VarChar(26)
+  planExpireAt   DateTime?
+  trialEndAt     DateTime?
+  /// 到期后的宽限天数，宽限期内只读不封。
+  graceDays      Int          @default(0)
+  /// 注销后数据保留天数，到点由清理任务物理删。
+  retentionDays  Int          @default(7)
+  /// 提交注销的时刻；null = 未注销。
+  deregisterAt   DateTime?
+  /// 店主的 StaffAccount.id。一号多店：同一个账号可以是多家店的店主。
+  ownerAccountId String       @db.VarChar(26)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([status])
+  @@index([planId])
+  @@index([ownerAccountId])
+  @@index([planExpireAt])
+}
+
+/// 租户实名/资质认证的提交与审核记录，一租户可多次提交（驳回后重交保留历史）。【租户域】
+model TenantVerification {
+  id           String       @id @db.VarChar(26)
+  tenantId     String       @db.VarChar(26)
+  type         VerifyType
+  /// 主体名称：企业营业执照名 / 个体户字号 / 个人姓名。
+  legalName    String
+  /// 统一社会信用代码或身份证号（个人主体时按脱敏后的值存）。
+  licenseNo    String
+  /// 证件影像等附件的对象存储 key 数组。
+  attachments  Json
+  status       VerifyStatus @default(PENDING)
+  /// 审核人的 PlatformAdmin.id。
+  reviewedBy   String?      @db.VarChar(26)
+  reviewedAt   DateTime?
+  rejectReason String?      @db.Text
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  @@index([tenantId, id])
+  @@index([tenantId, status])
+  @@index([status, createdAt])
+}
+
+/// 租户级三方密钥的统一入口（微信/支付/短信/对象存储…）。【租户域】
+/// 密文列 valueEnc 与它的 keyId 必须成对，登记在 src/encrypted-columns.ts，轮换脚本按注册表走。
+model TenantCredential {
+  id         String    @id @db.VarChar(26)
+  tenantId   String    @db.VarChar(26)
+  /// 供应商标识，例如 wechat-pay / aliyun-sms / tencent-cos。
+  provider   String
+  /// 该供应商下的具体密钥名，例如 apiV3Key / mchId / secretKey。
+  credKey    String
+  /// 密文。明文**永远不落库**，接口只回 maskedHint。
+  valueEnc   String    @db.Text
+  /// 加密时使用的密钥版本号，轮换时按它挑行；没有它换完密钥就读不出来。
+  keyId      String
+  /// 给运营看的脱敏提示，例如 `1900******01`。
+  maskedHint String?
+  /// 最后一次改动者（StaffAccount.id 或 PlatformAdmin.id）。
+  updatedBy  String?   @db.VarChar(26)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  deletedAt  DateTime?
+
+  @@unique([tenantId, provider, credKey, deletedAt])
+  @@index([tenantId, id])
+}
+
+/// 租户生命周期状态。**刻意没有 EXPIRED**：到期与否一律现算，不靠定时任务改状态位。
+enum TenantStatus {
+  /// 试用中，trialEndAt 到点后走同一套到期闸门。
+  TRIAL
+  /// 正常付费使用。
+  ACTIVE
+  /// 平台封停（违规/欠费人工封）。
+  SUSPENDED
+  /// 已提交注销，等待 retentionDays 后清理。
+  DEREGISTERED
+}
+
+/// 认证主体类型。
+enum VerifyType {
+  /// 企业（营业执照）。
+  ENTERPRISE
+  /// 个体工商户。
+  INDIVIDUAL
+  /// 个人（身份证）。
+  PERSONAL
+}
+
+/// 认证审核状态。
+enum VerifyStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}

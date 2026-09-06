@@ -1,0 +1,349 @@
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Form, Input, InputNumber, Modal, Select, Switch, message } from 'antd'
+import { useNavigate } from 'react-router-dom'
+import {
+  CrudDrawerForm,
+  CrudTable,
+  dateTimeColumn,
+  statusTagColumn,
+  textColumn,
+  useCrudForm,
+  useCrudTable,
+} from '@taizan/admin-ui'
+import { usePlanApi, type PlanView } from '../api/plan'
+import {
+  TENANT_STATUSES,
+  TENANT_STATUS_TAGS,
+  useTenantApi,
+  type CreateTenantInput,
+  type CreateTenantResult,
+  type TenantView,
+} from '../api/tenant'
+
+type ActiveModal =
+  | { type: 'renew'; tenant: TenantView }
+  | { type: 'changePlan'; tenant: TenantView }
+  | { type: 'resetPassword'; tenant: TenantView }
+  | { type: 'deregister'; tenant: TenantView }
+  | null
+
+/** 续期 / 改套餐 / 重置店主口令 / 注销，四个一次性动作弹窗共用的外壳。 */
+function ActionModal({
+  title,
+  open,
+  onCancel,
+  onOk,
+  okDisabled,
+  okDanger,
+  submitting,
+  children,
+}: {
+  title: string
+  open: boolean
+  onCancel: () => void
+  onOk: () => void
+  okDisabled?: boolean
+  okDanger?: boolean
+  submitting?: boolean
+  children: ReactNode
+}) {
+  return (
+    <Modal
+      title={title}
+      open={open}
+      onCancel={onCancel}
+      onOk={onOk}
+      confirmLoading={submitting}
+      okButtonProps={{ disabled: okDisabled, danger: okDanger }}
+      okText="确定"
+      cancelText="取消"
+      destroyOnClose
+    >
+      {children}
+    </Modal>
+  )
+}
+
+export default function PlatformTenantList() {
+  const navigate = useNavigate()
+  const api = useTenantApi()
+  const planApi = usePlanApi()
+  const [plans, setPlans] = useState<PlanView[]>([])
+  const [activeModal, setActiveModal] = useState<ActiveModal>(null)
+  const [renewForm] = Form.useForm<{ planId?: string; periods: number }>()
+  const [planForm] = Form.useForm<{ planId: string }>()
+  const [pwdForm] = Form.useForm<{ newPassword?: string }>()
+  const [slugConfirm, setSlugConfirm] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  useEffect(() => {
+    planApi
+      .list({ page: 1, pageSize: 100, status: 'ENABLED' })
+      .then((res) => setPlans(res.items))
+      .catch(() => undefined)
+    // 只在挂载时拉一次即可：套餐列表变动频率低，弹窗打开时看到的是「打开这一刻」的可选项已经够用。
+  }, [])
+
+  const table = useCrudTable<TenantView>({
+    list: api.list,
+    rowKey: 'id',
+    syncUrl: true,
+    searchSchema: [
+      { name: 'keyword', label: '店名 / slug' },
+      {
+        name: 'status',
+        label: '状态',
+        type: 'select',
+        options: TENANT_STATUSES.map((s) => ({
+          label: TENANT_STATUS_TAGS[s]?.text ?? s,
+          value: s,
+        })),
+      },
+    ],
+  })
+
+  // useCrudForm 的 onSuccess 拿不到 create() 的返回值（签名只传 mode），但开店成功后
+  // 必须把 CreateTenantResult.owner 的初始口令/一号多店提示展示给运营——用一个稳定的
+  // ref 在 create() 里记一下，onSuccess 里读出来，两者是同一次 submit() 里前后调用的，
+  // ref 不受 React 重渲染影响，比拿 useState 读「刚设的值」更可靠。
+  const lastCreateResultRef = useRef<CreateTenantResult | null>(null)
+  const form = useCrudForm<CreateTenantInput>({
+    create: async (values) => {
+      const result = await api.create(values)
+      lastCreateResultRef.current = result
+      return result
+    },
+    onSuccess: () => {
+      table.refresh()
+      const result = lastCreateResultRef.current
+      if (!result) return
+      const { owner } = result
+      Modal.success({
+        title: `已开通「${result.tenant.name}」`,
+        content: owner.attachedExistingAccount
+          ? owner.notice
+          : `店主登录手机号：${owner.phone}；初始口令：${owner.initialPassword ?? '（沿用你填写的口令）'}（只显示这一次，请线下转告）`,
+      })
+    },
+  })
+
+  const closeModal = () => {
+    setActiveModal(null)
+    setSlugConfirm('')
+    renewForm.resetFields()
+    planForm.resetFields()
+    pwdForm.resetFields()
+  }
+
+  const runAction = async (fn: () => Promise<unknown>, successText: string) => {
+    setSubmitting(true)
+    try {
+      await fn()
+      void message.success(successText)
+      table.refresh()
+      closeModal()
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <>
+      <CrudTable
+        table={table}
+        title="租户"
+        create={{ label: '开通新店', onClick: () => form.openForm() }}
+        columns={[
+          textColumn<TenantView>({ title: 'slug', dataIndex: 'slug', copyable: true, width: 140 }),
+          { title: '店名', dataIndex: 'name', key: 'name' },
+          statusTagColumn<TenantView>({
+            title: '状态',
+            dataIndex: 'status',
+            map: TENANT_STATUS_TAGS,
+          }),
+          dateTimeColumn<TenantView>({ title: '套餐到期', dataIndex: 'planExpireAt' }),
+          dateTimeColumn<TenantView>({ title: '开通时间', dataIndex: 'createdAt' }),
+        ]}
+        actionsWidth={320}
+        actions={[
+          { key: 'detail', label: '详情', onClick: (r) => navigate(`/tenants/${r.id}`) },
+          {
+            key: 'suspend',
+            label: '冻结',
+            danger: true,
+            hidden: (r) => r.status !== 'ACTIVE' && r.status !== 'TRIAL',
+            confirm: (r) => `确定冻结「${r.name}」？冻结后商家后台立即 401，不能新增/编辑/删除。`,
+            onClick: (r) => runAction(() => api.suspend(r.id), '已冻结'),
+          },
+          {
+            key: 'resume',
+            label: '恢复',
+            hidden: (r) => r.status !== 'SUSPENDED',
+            confirm: (r) => `确定恢复「${r.name}」？`,
+            onClick: (r) => runAction(() => api.resume(r.id), '已恢复'),
+          },
+          {
+            key: 'renew',
+            label: '续期',
+            hidden: (r) => r.status === 'DEREGISTERED',
+            onClick: (r) => setActiveModal({ type: 'renew', tenant: r }),
+          },
+          {
+            key: 'changePlan',
+            label: '改套餐',
+            hidden: (r) => r.status === 'DEREGISTERED',
+            onClick: (r) => setActiveModal({ type: 'changePlan', tenant: r }),
+          },
+          {
+            key: 'resetPwd',
+            label: '重置店主密码',
+            hidden: (r) => r.status === 'DEREGISTERED',
+            onClick: (r) => setActiveModal({ type: 'resetPassword', tenant: r }),
+          },
+          {
+            key: 'deregister',
+            label: '注销',
+            danger: true,
+            hidden: (r) => r.status === 'DEREGISTERED',
+            onClick: (r) => setActiveModal({ type: 'deregister', tenant: r }),
+          },
+        ]}
+      />
+
+      <CrudDrawerForm form={form} title="开通新店" width={480}>
+        <Form.Item name="slug" label="slug" rules={[{ required: true, message: '如 shop-a' }]}>
+          <Input placeholder="shop-a（全局唯一，不可改）" />
+        </Form.Item>
+        <Form.Item name="name" label="店名" rules={[{ required: true }]}>
+          <Input placeholder="如：A 家便利店" />
+        </Form.Item>
+        <Form.Item name="ownerPhone" label="店主手机号" rules={[{ required: true }]}>
+          <Input placeholder="同时是登录名" />
+        </Form.Item>
+        <Form.Item name="ownerName" label="店主显示名">
+          <Input placeholder="不填就用店名" />
+        </Form.Item>
+        <Form.Item name="ownerPassword" label="店主初始口令">
+          <Input.Password placeholder="不填就随机生成，回填在成功提示里" />
+        </Form.Item>
+        <Form.Item
+          name="attachExistingAccount"
+          label="挂到既有账号"
+          valuePropName="checked"
+          tooltip="【高危】手机号已有账号时，跳过验证原口令直接把新店挂上去（一号多店，运营专用）；手机号还没有账号时打开这个开关会被后端拒绝。"
+        >
+          <Switch checkedChildren="是" unCheckedChildren="否" />
+        </Form.Item>
+        <Form.Item name="planId" label="套餐">
+          <Select
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            placeholder="不选就是无套餐（试用期到了直接只读），可输入名称搜索"
+            options={plans.map((p) => ({ label: `${p.name}（${p.code}）`, value: p.id }))}
+          />
+        </Form.Item>
+        <Form.Item name="trialDays" label="试用天数" initialValue={14}>
+          <InputNumber min={0} max={3650} style={{ width: '100%' }} />
+        </Form.Item>
+      </CrudDrawerForm>
+
+      <ActionModal
+        title={`续期 —— ${activeModal?.tenant.name ?? ''}`}
+        open={activeModal?.type === 'renew'}
+        onCancel={closeModal}
+        submitting={submitting}
+        onOk={() =>
+          void renewForm.validateFields().then((values) => {
+            if (!activeModal) return
+            void runAction(() => api.renew(activeModal.tenant.id, values), '已续期')
+          })
+        }
+      >
+        <Form form={renewForm} layout="vertical" initialValues={{ periods: 1 }}>
+          <Form.Item name="planId" label="换套餐（不填沿用当前套餐）">
+            <Select
+              allowClear
+              options={plans.map((p) => ({ label: `${p.name}（${p.code}）`, value: p.id }))}
+            />
+          </Form.Item>
+          <Form.Item name="periods" label="计费周期数" rules={[{ required: true }]}>
+            <InputNumber min={1} max={120} style={{ width: '100%' }} />
+          </Form.Item>
+        </Form>
+      </ActionModal>
+
+      <ActionModal
+        title={`更换套餐 —— ${activeModal?.tenant.name ?? ''}`}
+        open={activeModal?.type === 'changePlan'}
+        onCancel={closeModal}
+        submitting={submitting}
+        onOk={() =>
+          void planForm.validateFields().then((values) => {
+            if (!activeModal) return
+            void runAction(() => api.changePlan(activeModal.tenant.id, values.planId), '已更换套餐')
+          })
+        }
+      >
+        <Form form={planForm} layout="vertical">
+          <Form.Item name="planId" label="目标套餐" rules={[{ required: true }]}>
+            <Select
+              options={plans.map((p) => ({ label: `${p.name}（${p.code}）`, value: p.id }))}
+            />
+          </Form.Item>
+        </Form>
+      </ActionModal>
+
+      <ActionModal
+        title={`重置店主登录口令 —— ${activeModal?.tenant.name ?? ''}`}
+        open={activeModal?.type === 'resetPassword'}
+        onCancel={closeModal}
+        submitting={submitting}
+        onOk={() =>
+          void pwdForm.validateFields().then((values) => {
+            if (!activeModal) return
+            void runAction(async () => {
+              const result = await api.resetOwnerPassword(activeModal.tenant.id, values.newPassword)
+              if (result.initialPassword) {
+                Modal.info({
+                  title: '新口令',
+                  content: `店主 ${result.phone} 的新登录口令：${result.initialPassword}（只显示这一次，请线下转告）`,
+                })
+              }
+            }, '已重置（重置后旧 token 立即失效）')
+          })
+        }
+      >
+        <Form form={pwdForm} layout="vertical">
+          <Form.Item name="newPassword" label="新口令（不填随机生成）">
+            <Input.Password minLength={6} maxLength={200} />
+          </Form.Item>
+        </Form>
+      </ActionModal>
+
+      <ActionModal
+        title={`注销 —— ${activeModal?.tenant.name ?? ''}`}
+        open={activeModal?.type === 'deregister'}
+        onCancel={closeModal}
+        okDanger
+        submitting={submitting}
+        okDisabled={submitting || slugConfirm !== activeModal?.tenant.slug}
+        onOk={() => {
+          if (!activeModal) return
+          void runAction(() => api.deregister(activeModal.tenant.id), '已注销')
+        }}
+      >
+        <p>
+          注销只置状态位并进入保留期，不会物理删除数据。请输入该店的 slug「
+          <b>{activeModal?.tenant.slug}</b>
+          」以确认（后端接口本身不校验这一步，纯前端二次确认门槛）：
+        </p>
+        <Input
+          value={slugConfirm}
+          onChange={(e) => setSlugConfirm(e.target.value)}
+          placeholder={activeModal?.tenant.slug}
+        />
+      </ActionModal>
+    </>
+  )
+}

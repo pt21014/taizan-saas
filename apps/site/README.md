@@ -1,0 +1,150 @@
+# @taizan/site
+
+官网 + 自助注册（T3-5）：**零 UI 库**，11 页营销站 + 自助开店表单，接 `apps/api` 的
+`/api/public/*` 真实接口。Vite + React 18 + react-router 6。
+
+## 1. 起步
+
+```bash
+pnpm install
+cp apps/site/.env.example apps/site/.env.local   # 本地开发留空即可，走 vite 代理
+pnpm -F @taizan/site dev                          # http://localhost:5176
+```
+
+`vite.config.ts` 把 `/api` 代理到 `http://localhost:3000`（`apps/api` 的默认端口），
+本地开发不需要在 `.env.local` 里填任何东西。
+
+`dev`/`build` 之前都会先跑一遍 `pnpm run generate`（见 `package.json`），它只做一件事：
+
+| 脚本 | 作用 |
+|---|---|
+| `scripts/generate-tokens.ts` | `@taizan/tokens` 的 `toScssVariables()` → `src/styles/tokens.css`（CSS 自定义属性） |
+
+`tokens.css` 是**派生文件**，不要手改；改了源头（`packages/tokens`）后重新跑
+`pnpm dev`/`pnpm build` 即可同步。
+
+`robots.txt` / `sitemap.xml` 由 `scripts/generate-seo.ts` 生成（`src/config/NAV.ts` 的
+`ALL_PAGES` → 两个文件），但**只在 `pnpm build` 里、`vite build` 之后**才跑，直接写进
+`dist/`，不落 `public/`——早先它写的是受版本管理的 `public/sitemap.xml`，`<lastmod>`
+又取「今天的日期」，导致同一次提交隔天重新构建就产生 diff，把
+`build:templates:check`（模板快照对账）冲红。现在 `<lastmod>` 按
+`SITE_LASTMOD` 环境变量 → `git log -1 --format=%cI`（最近一次提交时间）→ 固定回退值
+依次取，同一个提交多次构建结果一致；`pnpm dev` 不再生成这两个文件（dev server
+本来也不需要它们）。
+
+（曾经这里还有第三个脚本 `scripts/generate-signup-rules.ts`，把 `@taizan/provision`
+的规则常量在构建期抄成一份纯数据文件绕开 `vite dev` 崩页问题——`@taizan/provision`
+现在拆成了 `.`/`./arch` 两个入口，主入口不再含 node-only 代码，这个绕过脚本已删除，
+`src/lib/signupRules.ts` 直接 `import from '@taizan/provision'`，见第 6 节。）
+
+## 2. 与后端联调
+
+```bash
+pnpm dev:infra                        # MySQL(3307) + Redis(6380)
+pnpm -F @taizan/api prisma:migrate
+pnpm -F @taizan/api seed              # 灌两档演示套餐：体验版 / 标准版
+pnpm -F @taizan/api dev               # http://localhost:3000，Swagger 在 /docs
+pnpm -F @taizan/site dev              # http://localhost:5176
+```
+
+## 3. 品牌位配置
+
+所有品牌相关的取值集中在 `src/config/BRAND.ts`（本仓库是**参考应用**，
+`create-taizan-saas` 生成器后续会把这个文件的取值换成 `{{productName}}` 之类的
+`.hbs` 占位符，其余页面一律从这里取值，不允许各写一份）：
+
+| 字段 | 说明 |
+|---|---|
+| `productName` / `shortName` / `slogan` | 站点标题、导航栏 logo、首页大标题 |
+| `companyName` | 服务条款/隐私政策落款、页脚版权行 |
+| `adminUrl` | 商家后台地址（`apps/admin` 是分开部署的另一个应用），来自 `VITE_ADMIN_URL` |
+| `icpNumber` / `icpLink` | 页脚 ICP 备案位；`icpNumber` 留空时页脚不渲染这一行 |
+| `contactPhone` / `contactEmail` | 页脚与「关于」页联系方式 |
+
+导航结构（顶部导航、页脚法律链接、11 个路由的 `<title>`/`description`）集中在
+`src/config/NAV.ts` 的 `NAV`/`LEGAL_NAV`/`SIGNUP_NAV`/`ALL_PAGES`，
+`sitemap.xml` 与路由一致性测试（`src/App.spec.tsx`）都读这一份表。
+
+## 4. 与后端同域部署说明
+
+生产环境把官网与 `apps/api` 部署在**同一个域名**下，由 nginx 把 `/api/` 反代到后端
+（反代必须带 `X-Forwarded-For`，否则所有访客在注册限流里会被算成同一个 IP）。
+`src/api.ts` 里请求的路径都是相对路径（`/api/public/...`），不需要配置
+`VITE_API_BASE` 之类的跨域基址——这是与 `apps/admin`/`apps/platform` 唯一的差异，
+那两个后台的 API 服务器可能跨域，官网不会。
+
+`apps/admin`（商家后台）是**分开部署**的另一个应用/子域名，所以需要单独配置
+`VITE_ADMIN_URL` 指向它的真实地址，注册成功页的「去商家后台登录」按钮从这里取。
+
+## 5. 页面清单
+
+| 路由 | 页面 |
+|---|---|
+| `/` | 首页 |
+| `/product` | 产品介绍 |
+| `/features` | 功能介绍（如实列出未完成清单） |
+| `/solutions` | 解决方案 |
+| `/pricing` | 套餐价格（现取自 `/api/public/site-config`，接口失败时兜底文案） |
+| `/onboarding` | 开通流程 |
+| `/faq` | 常见问题 |
+| `/about` | 关于 |
+| `/terms` | 服务条款 |
+| `/privacy` | 隐私政策 |
+| `/signup` | 自助注册 |
+
+## 6. 自助注册的几个设计取舍
+
+- **直接 `import from '@taizan/provision'` 到浏览器代码里**：`src/lib/signupRules.ts`
+  从主入口重新导出 `validateSlug`/`validateTenantName`/`PHONE_PATTERN`/… 这些浏览器
+  安全的纯规则，只多写了一个 `checkPasswordPolicy`（把 `assertOwnerPasswordPolicy`
+  的 `throw` 语义转成不抛错的强度提示，供输入过程中实时渲染）。**曾经**这里不敢这么
+  写：`@taizan/provision` 的单一入口把这些纯规则与只给测试工具用的源码扫描器
+  （`arch/single-path.scan.ts`，顶层 `import ... from 'node:fs'`）打包进了同一个
+  `dist/index.js`——`vite build` 能靠 Rollup 的 tree-shaking + external 绕过去，
+  但 `vite dev` 走原生 ESM、无条件求值整个模块，浏览器里会直接报错崩页，只能改成
+  在构建期把规则常量抄成一份数据文件（`scripts/generate-signup-rules.ts`）绕开。
+  `@taizan/provision` 现在拆成了 `.`（浏览器可用的纯规则，构建产物不含任何
+  `node:fs`/`node:path`）与 `./arch`（node-only 的扫描器）两个入口，绕过脚本与生成的
+  数据文件都已删除，`src/lib/signupRules.spec.ts` 只留了两条断言：re-export 的
+  `validateSlug` 确实是同一个函数引用，以及 `checkPasswordPolicy` 这个薄适配层本身的
+  throw→message 转换逻辑是对的（其余「手抄件 vs 真实包」的行为级 diff 已经是同义反复，
+  删掉了）。
+- **保留字 slug 前端即时提示**：`validateSlug()` 在本地就能判定形状与保留字
+  （`RESERVED_SLUGS`），不等 400ms 防抖、不发网络请求；只有形状合法时才防抖查
+  `GET /api/public/signup/check-slug` 确认是否已被占用。
+- **口令强度规则与 `provisionTenant()` 落库前的判定一致**：8–64 位、不能是同一
+  字符重复、字母/数字/符号至少两类。
+- **`existingPassword` 字段常驻可选**，不做「查这个手机号有没有账号」再决定要不要
+  显示——那样做本身就是一个手机号枚举器（后台注册接口正是为了不做这件事，才把
+  三种失败原因合并成同一句「手机号或密码不对」）。
+- **注册成功不下发 token**，成功页引导「去商家后台登录」（`BRAND.adminUrl`）。
+- **`1042900`（限流命中）统一显示「操作太频繁了，请稍后再试」**，不原样透出后端的
+  「请求过于频繁」——那句话对着注册页最后一步的商家说，听起来像是他自己操作有问题。
+
+## 7. 测试
+
+```bash
+pnpm -F @taizan/site lint
+pnpm -F @taizan/site typecheck
+pnpm -F @taizan/site test       # vitest + testing-library，含 signupRules 对 @taizan/provision 的薄适配层 spec
+pnpm -F @taizan/site build      # dist/ 含 robots.txt / sitemap.xml（vite build 之后生成）
+```
+
+Playwright e2e **需要真实后端**（按第 2 节起好 `apps/api` 并 seed 之后再跑）：
+
+```bash
+pnpm -F @taizan/site e2e
+```
+
+四条用例：① 价格页显示 seed 的两档套餐；② 走完注册（随机 slug/手机号）→ 成功页 →
+用该账号 `POST /api/admin/auth/login` 能登录；③ 保留字 slug 前端即时提示；
+④ 未勾选服务条款时提交按钮保持禁用。串行执行（`playwright.config.ts` 里
+`workers: 1`）：`signup` 档限流是「同 IP 一天 3 次」，并行跑相当于同一个 IP
+同时打好几次，容易互相踩到限流。
+
+## 8. 已知未覆盖点
+
+- 没有做「自定义域名」「多语言店铺」等功能页里如实列出的未完成项。
+- Playwright 的注册用例走的是「不填图形验证码」的联调期路径（两个字段都不给时
+  后端跳过验证码校验），没有覆盖「填错验证码」这条分支——那需要一个能读图形码
+  的 OCR，不值得为一条 e2e 引入。

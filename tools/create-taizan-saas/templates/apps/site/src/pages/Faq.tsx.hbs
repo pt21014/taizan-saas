@@ -1,0 +1,67 @@
+import { Link } from 'react-router-dom'
+import { usePageTitle } from '../hooks/usePageTitle'
+import { PageHead } from '../components/PageHead'
+import { useSiteConfig } from '../context/SiteConfigContext'
+import { NAV } from '../config/NAV'
+
+export default function Faq() {
+  const meta = NAV[6]
+  usePageTitle(meta?.title ?? '常见问题', meta?.description)
+  const { cfg } = useSiteConfig()
+  const days = cfg?.trialDays ?? 14
+
+  const items: Array<[string, string]> = [
+    [
+      '开通需要什么资质？',
+      '开通试用不需要任何资质。等到要用微信收款时，微信会要求提供营业执照与结算账户，那是微信的要求，与平台无关。',
+    ],
+    [
+      `${days} 天试用到期后会怎样？`,
+      '后台变为只读、店铺暂停营业，但数据一直保留；续费之后立刻恢复原样，不需要重新装修或重新上架。',
+    ],
+    [
+      '一个手机号能开几家店？',
+      '可以开多家。再注册一家新店时，在原密码那一栏填现有登录密码，新店会挂在同一个账号下，登录后在后台切换。',
+    ],
+    [
+      '店铺路径（slug）能改吗？',
+      '不能。它会出现在你发出去的每一个链接、支付回调、小程序启动参数里，注册前请想清楚再填。',
+    ],
+    [
+      '收款的钱经过平台吗？',
+      '不经过。学员/顾客的付款走商家自己的微信特约商户号，直接进商家账户，平台只按约定收取服务费。',
+    ],
+    ['支持自定义域名吗？', '目前还不支持，见「功能介绍」页底部如实列出的未完成清单。'],
+    [
+      '能试用后再决定要不要付费吗？',
+      '可以，不绑卡、不自动续费。试用期内可以正常上架、收款；不满意直接放着不用即可。',
+    ],
+  ]
+
+  return (
+    <>
+      <PageHead eyebrow="常见问题" title="开通前最常被问到的几件事" />
+
+      <section className="section">
+        <div className="container" style=\{{ maxWidth: 760 }}>
+          <div style=\{{ display: 'grid', gap: 16 }}>
+            {items.map(([q, a]) => (
+              <div className="card" key={q}>
+                <h3 style=\{{ fontSize: 16 }}>{q}</h3>
+                <p style=\{{ color: '#6b7078', marginTop: 8 }}>{a}</p>
+              </div>
+            ))}
+          </div>
+
+          <p style=\{{ textAlign: 'center', marginTop: 32, color: '#6b7078' }}>
+            没找到答案？<Link to="/about">联系我们</Link>，或直接
+            <Link to="/signup" style=\{{ marginLeft: 4 }}>
+              免费注册
+            </Link>
+            试试看。
+          </p>
+        </div>
+      </section>
+    </>
+  )
+}

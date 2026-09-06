@@ -1,0 +1,198 @@
+/**
+ * **限流守卫 e2e** —— T2-6 接线的收口证明，跑在
+ * `deploy/docker/docker-compose.dev.yml` 起的**真** MySQL + **真** Redis（6380）上。
+ *
+ * ```
+ * pnpm dev:infra
+ * pnpm -F {{scope}}/api prisma:migrate
+ * pnpm -F {{scope}}/api test:e2e
+ * ```
+ *
+ * ## 为什么必须连真 Redis
+ *
+ * `RateLimitGuard` 的计数在 Redis 里（`AuthRedisRateLimitStore`），三个维度
+ * （客户端 IP / 入口 IP / 账号）各自的桶、`INCR` + 过期窗口、触顶时的 `Retry-After`
+ * 秒数——这些只有真的连续打若干次真请求才看得出来，替身 store 怎么写断言就怎么过。
+ *
+ * ## 为什么专门起一份文件，不并进 `rbac-billing.e2e-spec.ts`
+ *
+ * 那份 spec 测的是 RBAC/计费，中间会真的敲十几次登录接口（每开一家店登录一次）——
+ * 为了不互相踩限流的桶，那边已经给每次登录都配了各自独立的假 IP（见那份文件的
+ * `fakeClientIp`）。限流本身的行为需要**故意**把同一个 IP 打满，两种意图混在
+ * 一起写会互相牵制，拆开更干净。
+ *
+ * ## 用 `X-Forwarded-For` 模拟「谁是谁」
+ *
+ * `.env` 里 `TRUSTED_PROXY_HOPS=1`（没有 CDN，只有一层反代），`resolveIps` 因此
+ * 只信 XFF 的**最后一段**（见 `packages/ratelimit-core/src/resolve-ips.ts`）：
+ * `client` 与 `edge` 恰好都等于那一段。也就是说，给 `X-Forwarded-For` 塞
+ * `"任意个可伪造的前缀, 真实段"`，限流 key 只看得见「真实段」——这正好用来验证
+ * 蓝图 §8 spec 13 那条不变量：攻击者能往开头塞任意多段，塞不动末尾那一段。
+ *
+ * ## 用例清单
+ *
+ * ① 同一 IP 连续登录失败超过 `login` 档的 `clientLimit`（10 次 / 5 分钟）→
+ *   第 11 次起 HTTP 429、业务码 1042900、带 `Retry-After`
+ * ② 伪造 `X-Forwarded-For` 开头的段（每次换一个）不能让计数器归零——
+ *   真实段不变，照样在第 11 次触顶
+ * ③ 两个不同的「真实」客户端 IP 互不影响：A 被打满之后，B 的额度原封不动
+ */
+
+import 'reflect-metadata'
+import 'dotenv/config'
+
+import type { INestApplication } from '@nestjs/common'
+import { Test } from '@nestjs/testing'
+import { ulid } from '@taizan/contracts'
+import request from 'supertest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+
+import { AppModule } from '../src/bootstrap/app.module'
+import { configureApp } from '../src/bootstrap/configure-app'
+
+/** 每次跑用一段唯一后缀，假 IP 里带上它，重复跑也不会撞上一次运行留在 Redis 里的计数。 */
+const RUN = ulid().slice(-8).toLowerCase()
+
+let app: INestApplication
+
+function http(): Parameters<typeof request>[0] {
+  return app.getHttpServer() as Parameters<typeof request>[0]
+}
+
+/** 取业务码；429 时 body 仍然是统一信封（见 `rate-limit.exception.ts` 的文件头）。 */
+function codeOf(body: unknown): number {
+  return (body as { code: number }).code
+}
+
+/**
+ * 从任意字符串种子派生一个合法的 IPv4，代表「一个模拟出来的真实客户端」。
+ *
+ * 算法与 `rbac-billing.e2e-spec.ts` 的 `fakeClientIp` 一致：同一个种子恒定出同一个
+ * IP，不同种子几乎不撞。`10.x.x.x` 是私有段，不会意外撞上真实公网地址。
+ */
+function fakeClientIp(seed: string): string {
+  const codes = [...seed].map((c) => c.charCodeAt(0))
+  const octet = (offset: number): number => {
+    const sum = codes.reduce((acc, code, i) => acc + code * (i + offset + 1), 0)
+    return (sum % 254) + 1 // 1..254，避开 0（非法段）与 255
+  }
+  return `10.${octet(1)}.${octet(2)}.${octet(3)}`
+}
+
+/** 一次会失败的登录请求（手机号格式合法但账号不存在，DTO 校验过得去）。 */
+async function loginAttempt(xff: string): Promise<{ status: number; body: unknown }> {
+  const res = await request(http())
+    .post('/api/admin/auth/login')
+    .set('X-Forwarded-For', xff)
+    .send({ phone: '13900000000', password: 'wrong-password' })
+  return { status: res.status, body: res.body as unknown }
+}
+
+/** `login` 档：`clientLimit: 10`（见 `packages/ratelimit-core/src/config.ts`）。 */
+const LOGIN_CLIENT_LIMIT = 10
+
+beforeAll(async () => {
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile()
+  app = moduleRef.createNestApplication({ logger: false })
+  configureApp(app)
+  await app.init()
+})
+
+afterAll(async () => {
+  await app?.close()
+})
+
+describe('① 同一 IP 连续登录失败：超过 login 档阈值 → 429 + Retry-After', () => {
+  const ip = fakeClientIp(`${RUN}-primary`)
+
+  it(`前 ${LOGIN_CLIENT_LIMIT} 次都是正常的业务失败（1140100），不是限流`, async () => {
+    for (let i = 0; i < LOGIN_CLIENT_LIMIT; i += 1) {
+      const { status, body } = await loginAttempt(ip)
+      expect(status, `第 ${i + 1} 次不该被限流`).toBe(200)
+      expect(codeOf(body), `第 ${i + 1} 次的业务码`).toBe(1140100)
+    }
+  })
+
+  it(`第 ${LOGIN_CLIENT_LIMIT + 1} 次：HTTP 429 + 业务码 1042900 + Retry-After`, async () => {
+    const res = await request(http())
+      .post('/api/admin/auth/login')
+      .set('X-Forwarded-For', ip)
+      .send({ phone: '13900000000', password: 'wrong-password' })
+
+    expect(res.status).toBe(429)
+    expect(codeOf(res.body)).toBe(1042900)
+
+    const retryAfter = res.headers['retry-after']
+    expect(retryAfter, 'Retry-After 头必须存在，否则客户端不知道该等多久重试').toBeDefined()
+    expect(Number(retryAfter)).toBeGreaterThan(0)
+  })
+
+  it('继续打还是 429（触顶之后没有自动放行）', async () => {
+    const res = await request(http())
+      .post('/api/admin/auth/login')
+      .set('X-Forwarded-For', ip)
+      .send({ phone: '13900000000', password: 'wrong-password' })
+    expect(res.status).toBe(429)
+    expect(codeOf(res.body)).toBe(1042900)
+  })
+})
+
+describe('② 伪造 X-Forwarded-For 的可伪造段：换着花样也躲不过限流', () => {
+  // 真实段（nginx 亲自追加的那一段，TRUSTED_PROXY_HOPS=1 时也是 resolveIps 认的
+  // client/edge）固定不变；每次请求把**开头**那段换成不同的伪造 IP。
+  const realSegment = fakeClientIp(`${RUN}-forged-real`)
+
+  function forgedXff(i: number): string {
+    // 攻击者能控制的只有开头这段——每次都不一样，模拟「每次换一个 XFF 前缀」的打法。
+    return `9.${i % 256}.${(i * 7) % 256}.${(i * 13) % 256}, ${realSegment}`
+  }
+
+  it(`前 ${LOGIN_CLIENT_LIMIT} 次（每次伪造段都不同）仍然只是业务失败`, async () => {
+    for (let i = 0; i < LOGIN_CLIENT_LIMIT; i += 1) {
+      const { status, body } = await loginAttempt(forgedXff(i))
+      expect(status, `第 ${i + 1} 次不该被限流`).toBe(200)
+      expect(codeOf(body)).toBe(1140100)
+    }
+  })
+
+  it('第 11 次：换了一个全新的伪造前缀，照样 429——计数器认的是末段，不是开头', async () => {
+    const res = await request(http())
+      .post('/api/admin/auth/login')
+      .set('X-Forwarded-For', forgedXff(9999))
+      .send({ phone: '13900000000', password: 'wrong-password' })
+    expect(
+      res.status,
+      '如果这里不是 429，说明伪造 XFF 开头段真的能让限流 key 跟着变——' +
+        '那正是蓝图 §8 spec 13 要挡住的那次真实事故（伪造后限流形同虚设）。',
+    ).toBe(429)
+    expect(codeOf(res.body)).toBe(1042900)
+  })
+})
+
+describe('③ 两个不同的真实客户端 IP 互不影响', () => {
+  const ipA = fakeClientIp(`${RUN}-independent-A`)
+  const ipB = fakeClientIp(`${RUN}-independent-B`)
+
+  it('把 A 打到触顶', async () => {
+    for (let i = 0; i < LOGIN_CLIENT_LIMIT; i += 1) {
+      const { status } = await loginAttempt(ipA)
+      expect(status).toBe(200)
+    }
+    const res = await request(http())
+      .post('/api/admin/auth/login')
+      .set('X-Forwarded-For', ipA)
+      .send({ phone: '13900000000', password: 'wrong-password' })
+    expect(res.status).toBe(429)
+  })
+
+  it('B 完全没被牵连——额度原封不动', async () => {
+    const { status, body } = await loginAttempt(ipB)
+    expect(
+      status,
+      'A、B 是两个不同的客户端 IP，各自一个桶。A 被打满不该影响 B 的额度——' +
+        '共用一个桶意味着「同一入口后面的所有人互相牵连」，正是 edge 维度必须宽松、' +
+        'client 维度必须按真实 IP 分桶的理由。',
+    ).toBe(200)
+    expect(codeOf(body)).toBe(1140100)
+  })
+})

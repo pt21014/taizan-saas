@@ -1,0 +1,172 @@
+import { describe, expect, it } from 'vitest'
+
+import {
+  deductStock,
+  GOODS_NAME_MAX,
+  GOODS_PRICE_CENTS_MAX,
+  GOODS_STOCK_MAX,
+  normalizeGoodsName,
+  validateGoodsInput,
+  validateGoodsPatch,
+  warnOnShelfWithoutStock,
+} from './goods.rules'
+
+/** 一份合法输入，各用例只覆盖自己关心的那个字段。 */
+function ok(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { name: '可乐 330ml', priceCents: 350, stock: 10, status: 'ON_SHELF', ...overrides }
+}
+
+function fields(violations: ReturnType<typeof validateGoodsInput>): string[] {
+  return violations.map((v) => v.field)
+}
+
+describe('normalizeGoodsName', () => {
+  it('去掉首尾空白', () => {
+    expect(normalizeGoodsName('  可乐  ')).toBe('可乐')
+  })
+
+  it('把连续空白压成一个空格——否则「可乐  330ml」和「可乐 330ml」会成为两条商品', () => {
+    expect(normalizeGoodsName('可乐  330ml')).toBe('可乐 330ml')
+    expect(normalizeGoodsName('可乐\t\n330ml')).toBe('可乐 330ml')
+  })
+
+  it('非字符串一律归成空串（交给校验去报错，不在这里抛）', () => {
+    expect(normalizeGoodsName(undefined)).toBe('')
+    expect(normalizeGoodsName(123)).toBe('')
+    expect(normalizeGoodsName(null)).toBe('')
+  })
+})
+
+describe('validateGoodsInput', () => {
+  it('合法输入零违规', () => {
+    expect(validateGoodsInput(ok())).toEqual([])
+  })
+
+  it('一次返回全部违规，不是遇到第一条就停', () => {
+    const violations = validateGoodsInput({ name: '  ', priceCents: -1, stock: 1.5 })
+    expect(fields(violations).sort()).toEqual(['name', 'priceCents', 'stock'])
+  })
+
+  it.each([
+    ['空串', ''],
+    ['全是空白', '   '],
+    ['缺字段', undefined],
+    ['不是字符串', 42],
+  ])('商品名%s → 违规', (_label, name) => {
+    expect(fields(validateGoodsInput(ok({ name })))).toContain('name')
+  })
+
+  it(`商品名 ${GOODS_NAME_MAX} 字通过、${GOODS_NAME_MAX + 1} 字不通过（按字符数，不是字节）`, () => {
+    expect(validateGoodsInput(ok({ name: '啊'.repeat(GOODS_NAME_MAX) }))).toEqual([])
+    expect(fields(validateGoodsInput(ok({ name: '啊'.repeat(GOODS_NAME_MAX + 1) })))).toContain(
+      'name',
+    )
+  })
+
+  it('emoji 按字符计数（[...name] 而不是 name.length）', () => {
+    // '🍺' 的 UTF-16 length 是 2；用 .length 判长度会让 30 个 emoji 就超限。
+    expect(validateGoodsInput(ok({ name: '🍺'.repeat(GOODS_NAME_MAX) }))).toEqual([])
+  })
+
+  it.each([
+    ['负数', -1],
+    ['小数', 3.5],
+    ['字符串', '350'],
+    ['NaN', Number.NaN],
+    ['缺字段', undefined],
+  ])('价格%s → 违规', (_label, priceCents) => {
+    expect(fields(validateGoodsInput(ok({ priceCents })))).toContain('priceCents')
+  })
+
+  it('价格 0 是合法的（赠品、0 元试用）', () => {
+    expect(validateGoodsInput(ok({ priceCents: 0 }))).toEqual([])
+  })
+
+  it('价格上限：正好 1 亿分通过，多 1 分不通过', () => {
+    expect(validateGoodsInput(ok({ priceCents: GOODS_PRICE_CENTS_MAX }))).toEqual([])
+    const over = validateGoodsInput(ok({ priceCents: GOODS_PRICE_CENTS_MAX + 1 }))
+    expect(fields(over)).toContain('priceCents')
+    // 报错文案要能让商家想起「是不是多打了 0」，而不是干巴巴一句「超出范围」。
+    expect(over[0]?.message).toContain('0')
+  })
+
+  it('库存 0 合法，负数与小数不合法', () => {
+    expect(validateGoodsInput(ok({ stock: 0 }))).toEqual([])
+    expect(fields(validateGoodsInput(ok({ stock: -1 })))).toContain('stock')
+    expect(fields(validateGoodsInput(ok({ stock: 0.5 })))).toContain('stock')
+  })
+
+  it(`库存上限 ${GOODS_STOCK_MAX}`, () => {
+    expect(validateGoodsInput(ok({ stock: GOODS_STOCK_MAX }))).toEqual([])
+    expect(fields(validateGoodsInput(ok({ stock: GOODS_STOCK_MAX + 1 })))).toContain('stock')
+  })
+
+  it('状态不在枚举里 → 违规；不传状态则不校验（走库里的默认值）', () => {
+    expect(fields(validateGoodsInput(ok({ status: 'SOLD_OUT' })))).toContain('status')
+    expect(validateGoodsInput(ok({ status: undefined }))).toEqual([])
+  })
+})
+
+describe('validateGoodsPatch', () => {
+  it('空 patch 零违规——「什么都不改」不是错误', () => {
+    expect(validateGoodsPatch({})).toEqual([])
+  })
+
+  it('只校验传了的字段：不传价格不会报「价格必填」', () => {
+    expect(validateGoodsPatch({ name: '雪碧' })).toEqual([])
+  })
+
+  it('传了但传错照样拦', () => {
+    expect(fields(validateGoodsPatch({ priceCents: -1 }))).toEqual(['priceCents'])
+    expect(fields(validateGoodsPatch({ name: '   ' }))).toEqual(['name'])
+    expect(fields(validateGoodsPatch({ stock: -3 }))).toEqual(['stock'])
+    expect(fields(validateGoodsPatch({ status: 'X' }))).toEqual(['status'])
+  })
+
+  it('显式传 null 也算传了，且不合法（不能靠 null 把价格清空）', () => {
+    expect(fields(validateGoodsPatch({ priceCents: null }))).toEqual(['priceCents'])
+  })
+})
+
+describe('warnOnShelfWithoutStock', () => {
+  it('上架 + 库存 0 → 提示', () => {
+    expect(warnOnShelfWithoutStock({ status: 'ON_SHELF', stock: 0 })).toContain('售罄')
+  })
+
+  it('上架 + 有库存 → 不提示', () => {
+    expect(warnOnShelfWithoutStock({ status: 'ON_SHELF', stock: 1 })).toBeNull()
+  })
+
+  it('草稿 / 下架状态一律不提示', () => {
+    expect(warnOnShelfWithoutStock({ status: 'DRAFT', stock: 0 })).toBeNull()
+    expect(warnOnShelfWithoutStock({ status: 'OFF_SHELF', stock: 0 })).toBeNull()
+  })
+
+  it('这是提示不是错误：它不出现在 validateGoodsInput 的结果里', () => {
+    expect(validateGoodsInput(ok({ status: 'ON_SHELF', stock: 0 }))).toEqual([])
+  })
+})
+
+describe('deductStock', () => {
+  it('够扣就返回扣后值', () => {
+    expect(deductStock(10, 3)).toBe(7)
+  })
+
+  it('正好扣完返回 0（不是 null）', () => {
+    expect(deductStock(3, 3)).toBe(0)
+  })
+
+  it('不够扣返回 null', () => {
+    expect(deductStock(2, 3)).toBeNull()
+  })
+
+  it.each([
+    ['数量为 0', 10, 0],
+    ['数量为负', 10, -1],
+    ['数量为小数', 10, 1.5],
+    ['库存为负', -1, 1],
+    ['库存为小数', 1.5, 1],
+  ])('%s → null', (_label, stock, quantity) => {
+    expect(deductStock(stock, quantity)).toBeNull()
+  })
+})

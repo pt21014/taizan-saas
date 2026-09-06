@@ -1,0 +1,207 @@
+/**
+ * 内置角色预设 CRUD（T1-7）。
+ *
+ * `RolePreset` 是平台域表（`04-rbac.prisma`），全程走 `RawPrismaService`——
+ * 属于 `raw-reasons.ts` 里 `src/modules/platform/` 整目录的豁免。
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * `PERMISSION_REGISTRY` 的可选注入：本文件写下时 `RbacModule` 尚未接入 `app.module.ts`
+ * （T1-2 还没排期），所以用 `@Optional()`——拿到注册表就走 `defineRolePreset` 的完整
+ * 存在性校验（含通配展开），拿不到就**退化成只校验 code 格式**，不因为"还没到 T1-2"
+ * 就让整个角色预设模块编译不过或者启动就炸。
+ *
+ * 之后 `RbacModule.forRoot({ permissions: [PERMISSIONS], ... })` 在并行开发中已经接线
+ * 到 `app.module.ts`，`PERMISSION_REGISTRY` 现在确实拿得到——所以线上路径走的是
+ * `defineRolePreset` 那一支（e2e 用 `{{domainSlug}}:list`/`{{domainSlug}}:write` 这两个真实注册的权限点
+ * 验证）。`@Optional()` 与下面的格式兜底分支继续保留：这份服务不该假设自己一定跑在
+ * 装了 `RbacModule` 的应用里（生成器产出的最小项目可能暂时没装）。
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * @packageDocumentation
+ */
+
+import { Inject, Injectable, Optional } from '@nestjs/common'
+import { ErrorCode, normalizePage, ulid, type PageResult } from '@taizan/contracts'
+import { BizException } from '@taizan/nest-core'
+import { RawPrismaService } from '@taizan/nest-prisma'
+import { PERMISSION_REGISTRY, type PermissionRegistry } from '@taizan/nest-rbac'
+import { defineRolePreset, isWildcardCode } from '@taizan/rbac-core'
+
+import type { AppPrismaClient } from '../../../common/prisma.types'
+import type {
+  CreateRolePresetDto,
+  ListRolePresetQueryDto,
+  UpdateRolePresetDto,
+} from './dto/role-preset.dto'
+
+/** 下发给平台后台的角色预设行。 */
+export interface RolePresetView {
+  id: string
+  code: string
+  name: string
+  side: string
+  permissionCodes: string[]
+  builtin: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+type RolePresetRow = NonNullable<Awaited<ReturnType<AppPrismaClient['rolePreset']['findUnique']>>>
+
+/** 与 `@taizan/contracts` 的 `definePermissions` 同一份格式：`module:action`。 */
+const CODE_FORMAT_PATTERN = /^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$/
+
+function toView(row: RolePresetRow): RolePresetView {
+  return {
+    id: row.id,
+    code: row.code,
+    name: row.name,
+    side: row.side,
+    permissionCodes: row.permissionCodes as string[],
+    builtin: row.builtin,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  }
+}
+
+@Injectable()
+export class PlatformRolePresetService {
+  constructor(
+    // raw-reason: 平台后台——RolePreset 是平台域表，全程无租户维度。
+    @Inject(RawPrismaService) private readonly raw: RawPrismaService<AppPrismaClient>,
+    @Optional()
+    @Inject(PERMISSION_REGISTRY)
+    private readonly permissionRegistry?: PermissionRegistry,
+  ) {}
+
+  async list(query: ListRolePresetQueryDto): Promise<PageResult<RolePresetView>> {
+    const { page, pageSize } = normalizePage(query)
+    const where = query.side ? { side: query.side } : {}
+
+    // raw-reason: 平台后台——角色预设列表，无租户维度。
+    const [rows, total] = await Promise.all([
+      this.raw.client.rolePreset.findMany({
+        where,
+        orderBy: [{ side: 'asc' }, { createdAt: 'asc' }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      this.raw.client.rolePreset.count({ where }),
+    ])
+    return { items: rows.map(toView), total, page, pageSize }
+  }
+
+  async get(id: string): Promise<RolePresetView> {
+    return toView(await this.requirePreset(id))
+  }
+
+  /** @throws `BizException` 1040000 (code, side) 已存在，或 permissionCodes 格式/引用非法 */
+  async create(dto: CreateRolePresetDto): Promise<RolePresetView> {
+    // raw-reason: 平台后台——(code, side) 唯一性检查，无租户维度。
+    const taken = await this.raw.client.rolePreset.findUnique({
+      where: { code_side: { code: dto.code, side: dto.side } },
+    })
+    if (taken) {
+      throw new BizException(
+        ErrorCode.BAD_REQUEST,
+        `角色预设「${dto.code}」（${dto.side}）已经存在`,
+      )
+    }
+
+    const permissionCodes = this.resolvePermissionCodes(dto.code, dto.side, dto.permissionCodes)
+
+    // raw-reason: 平台后台——新建角色预设，无租户维度。
+    const row = await this.raw.client.rolePreset.create({
+      data: {
+        id: ulid(),
+        code: dto.code,
+        name: dto.name,
+        side: dto.side,
+        permissionCodes,
+        // 平台运营新建的预设一律非 builtin——builtin 只属于框架自带的那几条
+        // （`@taizan/prisma-base` 的 `BASE_ROLE_PRESETS`），运营建的能被改也能被删。
+        builtin: false,
+      },
+    })
+    return toView(row)
+  }
+
+  /** @throws `BizException` 1040000 builtin 预设禁止修改，或 permissionCodes 非法 */
+  async update(id: string, dto: UpdateRolePresetDto): Promise<RolePresetView> {
+    const current = await this.requirePreset(id)
+    if (current.builtin) {
+      throw new BizException(ErrorCode.BAD_REQUEST, '内置角色预设不允许修改')
+    }
+
+    const permissionCodes =
+      dto.permissionCodes !== undefined
+        ? this.resolvePermissionCodes(current.code, current.side, dto.permissionCodes)
+        : undefined
+
+    // raw-reason: 平台后台——修改角色预设，无租户维度。
+    const row = await this.raw.client.rolePreset.update({
+      where: { id },
+      data: {
+        ...(dto.name !== undefined ? { name: dto.name } : {}),
+        ...(permissionCodes !== undefined ? { permissionCodes } : {}),
+      },
+    })
+    return toView(row)
+  }
+
+  /** @throws `BizException` 1040000 builtin 预设禁止删除（schema 注释原话） */
+  async remove(id: string): Promise<{ id: string }> {
+    const current = await this.requirePreset(id)
+    if (current.builtin) {
+      throw new BizException(ErrorCode.BAD_REQUEST, '内置角色预设不允许删除')
+    }
+    // raw-reason: 平台后台——删除角色预设，无租户维度。RolePreset 不做软删（蓝图附录 #3：
+    // 权限点/菜单/角色预设由代码注册表镜像，人工改动本来就该被下次同步覆盖/清理）。
+    await this.raw.client.rolePreset.delete({ where: { id } })
+    return { id }
+  }
+
+  private async requirePreset(id: string): Promise<RolePresetRow> {
+    // raw-reason: 平台后台——按 id 取角色预设，无租户维度。
+    const row = await this.raw.client.rolePreset.findUnique({ where: { id } })
+    if (!row) throw new BizException(ErrorCode.BAD_REQUEST, '角色预设不存在')
+    return row
+  }
+
+  /**
+   * 校验 + 展开 `permissionCodes`。见文件头 TODO(T1-2)。
+   */
+  private resolvePermissionCodes(
+    code: string,
+    side: 'ADMIN' | 'PLATFORM',
+    permissionCodes: string[],
+  ): string[] {
+    if (this.permissionRegistry) {
+      try {
+        return [
+          ...defineRolePreset(
+            { code, name: code, side, permissionCodes },
+            this.permissionRegistry.codes(),
+          ).permissionCodes,
+        ]
+      } catch (error) {
+        throw new BizException(
+          ErrorCode.BAD_REQUEST,
+          error instanceof Error ? error.message : '角色预设权限码校验失败',
+        )
+      }
+    }
+
+    // 降级：权限点注册表还没接入（T1-2 之前），只校验格式，不校验「这个 code 真的存在」。
+    const invalid = permissionCodes.filter(
+      (raw) => !isWildcardCode(raw.trim()) && !CODE_FORMAT_PATTERN.test(raw.trim()),
+    )
+    if (invalid.length > 0) {
+      throw new BizException(
+        ErrorCode.BAD_REQUEST,
+        `以下权限码格式不合法（应为 "module:action" 或通配 "module:*"/"*"）：${invalid.join(', ')}`,
+      )
+    }
+    return [...new Set(permissionCodes.map((c) => c.trim()))].sort()
+  }
+}

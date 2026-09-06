@@ -1,0 +1,23 @@
+// 验收用样本：ScopedOrphan 带 tenantId 却不在注册表里 —— 这张表毫无隔离。
+// CLI 对它必须非零退出。
+
+model Tenant {
+  id   String @id
+  slug String @unique
+}
+
+model ScopedAlpha {
+  id       String @id
+  tenantId String
+  name     String
+
+  @@index([tenantId, id])
+}
+
+model ScopedOrphan {
+  id       String @id
+  tenantId String
+  secret   String
+
+  @@index([tenantId, id])
+}

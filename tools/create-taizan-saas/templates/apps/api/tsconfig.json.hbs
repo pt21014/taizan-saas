@@ -1,0 +1,18 @@
+{
+  "extends": "{{scope}}/tsconfig/node.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": ".",
+    // ── Nest 需要的两个开关 ──────────────────────────────────────────────
+    // 装饰器：Nest 全套（@Controller / @Injectable / @Get）都建立在旧版装饰器提案上。
+    "experimentalDecorators": true,
+    // **刻意不开 emitDecoratorMetadata**：构建走 tsup（esbuild），esbuild 不支持它，
+    // 开了在 tsc 下能过、在 tsup/vitest 下静默失效，是最难查的那种「本地好使线上炸」。
+    // 代价：构造函数注入必须逐个写 @Inject(Token)，不能靠 design:paramtypes 反射。
+    // 这与 @taizan/nest-* 各包的写法一致（它们也全部显式 @Inject），照抄即可。
+    "emitDecoratorMetadata": false,
+    // 装饰器 + `define` 语义的类字段会互相打架（字段在装饰器赋值后被重新定义成 undefined）。
+    "useDefineForClassFields": false
+  },
+  "include": ["src", "test", "scripts", "*.ts"]
+}

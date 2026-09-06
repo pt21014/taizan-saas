@@ -1,0 +1,13 @@
+node_modules
+dist
+.turbo
+coverage
+pnpm-lock.yaml
+*.md
+.changeset/*.md
+
+# 模板快照（带 Handlebars \{{...}} 变量的原样文本），不是真源码，prettier 解析会直接报错，不该被格式化检查
+tools/create-taizan-saas/templates/
+# 同类模板快照散落在其他目录（tools/codegen/templates、tools/create-taizan-saas/extras、docs/templates），
+# 统一按扩展名忽略，而不是逐目录列举
+*.hbs

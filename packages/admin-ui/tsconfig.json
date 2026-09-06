@@ -1,0 +1,20 @@
+{
+  "extends": "@taizan/tsconfig/react.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node", "@testing-library/jest-dom"],
+    // 仓库里同时装着 @types/react 18（本包与 antd 的 peer 口径）与 19（其他端拉进来的），
+    // pnpm 的隐藏提升目录 node_modules/.pnpm/node_modules/@types/react 恰好是 19：
+    // antd 的 .d.ts 走真实路径向上查找会命中它，本包源码却命中自己的 18，
+    // 于是 `<Button>` 变成「ReactNode 与 ReactNode 不兼容」（tsup 生成 .d.ts 时炸）。
+    // 把 react/react-dom 的类型入口钉死在本包的 node_modules 上，两边口径就一致了。
+    "paths": {
+      "react": ["./node_modules/@types/react"],
+      "react/*": ["./node_modules/@types/react/*"],
+      "react-dom": ["./node_modules/@types/react-dom"],
+      "react-dom/*": ["./node_modules/@types/react-dom/*"]
+    }
+  },
+  "include": ["src"]
+}

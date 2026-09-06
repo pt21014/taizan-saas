@@ -1,0 +1,146 @@
+/**
+ * `pnpm gen:module <slug> [--name=中文名]` 的 CLI 外壳。
+ *
+ * 报告刻意分成「新建」「改写」「接下来必须跑」三段：前两段是**发生了什么**，
+ * 第三段是**还没做完的事**。schema 片段生成完但没 migrate、没 `prisma generate`，
+ * 项目是编译不过的——把这一点写在最后而不是藏在 README 里。
+ *
+ * @packageDocumentation
+ */
+
+import { existsSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+
+import pc from 'picocolors'
+
+import { generateModule } from './generate'
+
+interface Cli {
+  slug: string | undefined
+  name: string | undefined
+  root: string
+  dryRun: boolean
+  help: boolean
+}
+
+export function parseArgs(argv: readonly string[]): Cli {
+  const cli: Cli = {
+    slug: undefined,
+    name: undefined,
+    root: findProjectRoot(),
+    dryRun: false,
+    help: false,
+  }
+  for (const arg of argv) {
+    if (arg === '--help' || arg === '-h') cli.help = true
+    else if (arg === '--dry-run') cli.dryRun = true
+    else if (arg.startsWith('--name=')) cli.name = arg.slice('--name='.length)
+    else if (arg.startsWith('--root=')) cli.root = resolve(arg.slice('--root='.length))
+    else if (arg.startsWith('-')) throw new Error(`未知参数：${arg}`)
+    else if (cli.slug === undefined) cli.slug = arg
+    else throw new Error(`多余的位置参数：${arg}`)
+  }
+  return cli
+}
+
+/**
+ * 找项目根：从**用户敲命令的那个目录**往上走，找第一个含 `apps/api` 的目录。
+ *
+ * 为什么不能直接用 `process.cwd()`：这条命令的正常用法是根目录下的
+ * `pnpm gen:module order`，而 pnpm 会把工作目录切到 `tools/codegen`（脚本所在的包）。
+ * 用 cwd 的话它会在 `tools/codegen` 里找 `apps/api`，然后报「这不是一个 taizan-saas
+ * 项目」——一个完全正确的操作得到一句完全误导的错误。
+ *
+ * `INIT_CWD` 是 pnpm/npm 都会设的「用户最初所在的目录」，优先用它。
+ */
+function findProjectRoot(): string {
+  let dir = resolve(process.env.INIT_CWD ?? process.cwd())
+  for (;;) {
+    if (existsSync(join(dir, 'apps', 'api', 'package.json'))) return dir
+    const parent = dirname(dir)
+    if (parent === dir) return resolve(process.env.INIT_CWD ?? process.cwd())
+    dir = parent
+  }
+}
+
+const HELP = `
+${pc.bold('gen:module')} —— 一次生成一个业务模块的全部七处（蓝图 §7）
+
+  ${pc.cyan('pnpm gen:module <slug> [--name=中文名]')}
+
+选项
+  --name=<中文名>   菜单 / 权限点 / 审计动作的显示名，默认用 slug
+  --root=<路径>     项目根，默认当前目录
+  --dry-run         只列出会生成什么，不写盘
+  --help, -h        看这段
+
+例子
+  pnpm gen:module order --name=订单
+  pnpm gen:module sales-lead --name=销售线索
+`
+
+export function main(argv: readonly string[]): number {
+  let cli: Cli
+  try {
+    cli = parseArgs(argv)
+  } catch (e) {
+    console.error(pc.red((e as Error).message))
+    return 1
+  }
+
+  if (cli.help || cli.slug === undefined) {
+    console.log(HELP)
+    return cli.slug === undefined && !cli.help ? 1 : 0
+  }
+
+  let result
+  try {
+    result = generateModule({ root: cli.root, slug: cli.slug, name: cli.name, dryRun: cli.dryRun })
+  } catch (e) {
+    console.error(pc.red((e as Error).message))
+    return 1
+  }
+
+  const { names } = result
+  console.log('')
+  console.log(
+    pc.green(
+      pc.bold(
+        `✔ 业务模块 ${names.slug}（${names.name}）` + (cli.dryRun ? '（dry-run，未写盘）' : ''),
+      ),
+    ),
+  )
+  console.log('')
+  console.log(pc.bold('新建'))
+  for (const f of result.created) console.log(`  ${pc.green('+')} ${f}`)
+  for (const f of result.skipped)
+    console.log(`  ${pc.yellow('=')} ${f}  ${pc.dim('（已存在，跳过）')}`)
+
+  if (result.edits.length > 0) {
+    console.log('')
+    console.log(pc.bold('改写（蓝图 §7 的七处注册）'))
+    for (const [file, what, outcome] of result.edits) {
+      const mark = outcome === 'inserted' ? pc.green('~') : pc.yellow('=')
+      const tail = outcome === 'inserted' ? '' : pc.dim('（已注册，跳过）')
+      console.log(`  ${mark} ${file.padEnd(44)} ${pc.dim(what)} ${tail}`)
+    }
+  }
+
+  console.log('')
+  console.log(pc.bold('接下来必须跑（在这之前项目编译不过：Prisma client 里还没有这个 model）'))
+  for (const cmd of result.verify) console.log(`  ${pc.cyan(cmd)}`)
+  console.log('')
+  console.log(
+    pc.dim('  最后那条 `pnpm test:arch` 就是七件事的验收：漏了任何一处，16 条断言里必有一条红。'),
+  )
+  console.log('')
+  return 0
+}
+
+const invokedDirectly =
+  process.argv[1] !== undefined &&
+  (process.argv[1].endsWith('index.ts') || process.argv[1].endsWith('index.js'))
+
+if (invokedDirectly) {
+  process.exitCode = main(process.argv.slice(2))
+}

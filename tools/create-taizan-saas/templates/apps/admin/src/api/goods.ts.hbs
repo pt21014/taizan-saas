@@ -1,0 +1,41 @@
+import type { CrudListQuery, StatusTagConfig } from '@taizan/admin-ui'
+import type { PageResult } from '@taizan/contracts'
+import { useSession } from '../session'
+
+/** 一行{{domainName}}（对齐 `apps/api/src/modules/example-{{domainSlug}}/dto/{{domainSlug}}.dto.ts` 的 `{{DomainPascal}}View`）。 */
+export interface {{DomainPascal}} {
+  id: string
+  name: string
+  priceCents: number
+  stock: number
+  status: 'DRAFT' | 'ON_SHELF' | 'OFF_SHELF'
+  createdAt: string
+  updatedAt: string
+}
+
+/** 新建/编辑时提交的字段（对齐 `Create{{DomainPascal}}Dto`/`Update{{DomainPascal}}Dto`）。 */
+export type {{DomainPascal}}Input = Pick<{{DomainPascal}}, 'name' | 'priceCents' | 'stock' | 'status'>
+
+/** 状态列的枚举 → Tag 配置。 */
+export const {{DOMAIN_UPPER}}_STATUS: Record<{{DomainPascal}}['status'], StatusTagConfig> = {
+  ON_SHELF: { text: '在售', color: 'success' },
+  OFF_SHELF: { text: '下架' },
+  DRAFT: { text: '草稿', color: 'processing' },
+}
+
+/**
+ * {{domainName}}模块的接口层：五个函数对齐 `{{DomainPascal}}Controller`（蓝图 §5.2 的标准形状）。
+ * 页面里不直接拼 URL，是为了让业务页面只剩下「长什么样」这一件事。
+ */
+export function use{{DomainPascal}}Api() {
+  const req = useSession((s) => s.request)
+  return {
+    list: (query: CrudListQuery) => req.get<PageResult<{{DomainPascal}}>>('/api/admin/{{domainSlug}}', query),
+    get: (id: string) => req.get<{{DomainPascal}}>(`/api/admin/{{domainSlug}}/${id}`),
+    create: (values: {{DomainPascal}}Input) => req.post('/api/admin/{{domainSlug}}', values),
+    update: (id: string, values: {{DomainPascal}}Input) => req.put(`/api/admin/{{domainSlug}}/${id}`, values),
+    remove: (row: {{DomainPascal}}) => req.delete<void>(`/api/admin/{{domainSlug}}/${row.id}`),
+    /** 导出（`GET /api/admin/{{domainSlug}}/export`，`{{domainSlug}}:export` 权限点）：不分页，返回全量。 */
+    exportAll: () => req.get<{{DomainPascal}}[]>('/api/admin/{{domainSlug}}/export'),
+  }
+}

@@ -1,0 +1,151 @@
+import { useEffect, useState } from 'react'
+import { Form, Input, Modal, Select } from 'antd'
+import {
+  CrudDrawerForm,
+  CrudTable,
+  dateTimeColumn,
+  statusTagColumn,
+  useCrudForm,
+  useCrudTable,
+} from '@taizan/admin-ui'
+import { useRolePresetApi, type RolePresetView } from '../api/rolePreset'
+import {
+  ADMIN_STATUS_TAGS,
+  useAdminApi,
+  type AdminView,
+  type CreateAdminInput,
+  type UpdateAdminInput,
+} from '../api/admin'
+
+export default function PlatformAdminList() {
+  const api = useAdminApi()
+  const rolePresetApi = useRolePresetApi()
+  const [roleOptions, setRoleOptions] = useState<RolePresetView[]>([])
+  const [pwdTarget, setPwdTarget] = useState<AdminView | null>(null)
+  const [newPassword, setNewPassword] = useState('')
+
+  useEffect(() => {
+    rolePresetApi
+      .list({ page: 1, pageSize: 100, side: 'PLATFORM' })
+      .then((res) => setRoleOptions(res.items))
+      .catch(() => undefined)
+  }, [])
+
+  const table = useCrudTable<AdminView>({
+    list: api.list,
+    rowKey: 'id',
+    syncUrl: true,
+    searchSchema: [{ name: 'keyword', label: '用户名 / 显示名' }],
+  })
+
+  const form = useCrudForm<CreateAdminInput & UpdateAdminInput>({
+    get: (id) => api.get(id),
+    create: (values) =>
+      api.create(values).then((result) => {
+        if (result.initialPassword) {
+          Modal.info({
+            title: '初始口令',
+            content: `管理员「${result.admin.username}」的初始口令：${result.initialPassword}（只显示这一次，请线下转告）`,
+          })
+        }
+        return result
+      }),
+    update: (id, values) => api.update(id, { name: values.name, roleIds: values.roleIds }),
+    onSuccess: table.refresh,
+  })
+
+  return (
+    <>
+      <CrudTable
+        table={table}
+        title="平台管理员"
+        create=\{{ label: '新建管理员', onClick: () => form.openForm() }}
+        columns={[
+          { title: '用户名', dataIndex: 'username', key: 'username' },
+          { title: '显示名', dataIndex: 'name', key: 'name' },
+          statusTagColumn<AdminView>({
+            title: '状态',
+            dataIndex: 'status',
+            map: ADMIN_STATUS_TAGS,
+          }),
+          dateTimeColumn<AdminView>({ title: '最近登录', dataIndex: 'lastLoginAt' }),
+        ]}
+        actionsWidth={260}
+        actions={[
+          { key: 'edit', label: '编辑', onClick: (r) => form.openForm(r.id) },
+          {
+            key: 'resetPwd',
+            label: '重置口令',
+            onClick: (r) => {
+              setPwdTarget(r)
+              setNewPassword('')
+            },
+          },
+          {
+            key: 'enable',
+            label: '启用',
+            hidden: (r) => r.status === 'ACTIVE',
+            onClick: (r) => api.enable(r.id).then(table.refresh),
+          },
+          {
+            key: 'disable',
+            label: '停用',
+            danger: true,
+            hidden: (r) => r.status !== 'ACTIVE',
+            confirm: '停用后该管理员立即无法登录（不能停用自己，也不能停用最后一个启用中的管理员）',
+            onClick: (r) => api.disable(r.id).then(table.refresh),
+          },
+        ]}
+      />
+
+      <CrudDrawerForm form={form} title="平台管理员" width={480}>
+        <Form.Item name="username" label="用户名" rules={[{ required: true }]}>
+          <Input disabled={form.mode === 'edit'} placeholder="登录用户名，全局唯一" />
+        </Form.Item>
+        {form.mode === 'create' && (
+          <Form.Item name="password" label="初始口令">
+            <Input.Password placeholder="不填就随机生成，回填在成功提示里" />
+          </Form.Item>
+        )}
+        <Form.Item name="name" label="显示名" rules={[{ required: true }]}>
+          <Input />
+        </Form.Item>
+        <Form.Item name="roleIds" label="角色">
+          <Select
+            mode="multiple"
+            placeholder="不选就是一个角色都没有"
+            options={roleOptions.map((r) => ({ label: `${r.name}（${r.code}）`, value: r.id }))}
+          />
+        </Form.Item>
+      </CrudDrawerForm>
+
+      <Modal
+        title={`重置口令 —— ${pwdTarget?.username ?? ''}`}
+        open={pwdTarget !== null}
+        onCancel={() => setPwdTarget(null)}
+        onOk={() => {
+          if (!pwdTarget) return
+          void api.setPassword(pwdTarget.id, newPassword || undefined).then((result) => {
+            setPwdTarget(null)
+            if (result.initialPassword) {
+              Modal.info({
+                title: '新口令',
+                content: `新登录口令：${result.initialPassword}（只显示这一次，请线下转告；重置后旧 token 立即失效）`,
+              })
+            }
+          })
+        }}
+        okText="确定"
+        cancelText="取消"
+      >
+        <Input.Password
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          placeholder="不填就随机生成"
+          minLength={6}
+          maxLength={200}
+        />
+      </Modal>
+    </>
+  )
+}

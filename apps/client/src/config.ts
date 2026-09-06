@@ -1,0 +1,19 @@
+/**
+ * baseURL 与（H5 子域名解析用的）底域，一律来自 env，禁止在代码里写死域名——
+ * 反面教材见 knowledge `apps/client/src/api/request.ts` 的 `apiknow.taizan.vip`。
+ *
+ * `TARO_APP_` 前缀的变量由 Taro 在构建期注入到 `process.env`（H5/小程序都生效），
+ * 实际值在 `.env`/`.env.development`/`.env.production`（或部署时的环境变量）里配置，
+ * 本仓库不提供默认值以外的真实域名。
+ *
+ * @packageDocumentation
+ */
+
+/** C 端 API 基地址，例如 `https://api.example.com` 或本地开发的 `/api`（走 devServer 代理）。 */
+export const API_BASE = process.env.TARO_APP_API_BASE || '/api'
+
+/**
+ * H5 子域名解析 tenantSlug 用的底域，例如 `taizan.vip`（则 `demo.taizan.vip` → slug `demo`）。
+ * 不设置时 H5 只能靠路径 `/s/:slug/...` 解析。
+ */
+export const H5_BASE_DOMAIN = process.env.TARO_APP_H5_BASE_DOMAIN || undefined

@@ -1,0 +1,65 @@
+import { Button, View } from '@tarojs/components'
+import Taro, { useRouter } from '@tarojs/taro'
+import { useState } from 'react'
+
+import { formatCents } from '@taizan/contracts'
+import { pay, type WechatPayParams } from '@taizan/client-core'
+
+import './index.scss'
+
+/**
+ * 下单确认页：点「支付」走 `pay()` 适配（`@taizan/client-core/adapters/pay`），
+ * H5/小程序两端的调起差异全部封在那一层，这里只管拿到调起参数、调用、看结果。
+ *
+ * TODO(T3-6 之后)：后端尚未提供 C 端下单接口（`POST /api/client/orders` 之类），
+ * `@taizan/nest-payment` + `@taizan/wechatpay` 已经就绪（见 T2-3），接上之后把下面的
+ * `mockRequestOrder()` 换成真实下单请求即可，`pay()` 调用方式不用改。
+ * 这里用 `FakeProvider`（`@taizan/payment-core`）风格的假参数只是为了让两端的
+ * 「点击下单 → 走 pay() → 拿到结果」这条链路能被跑通、而不是卡在「后端没这个接口」。
+ */
+export default function OrderConfirm() {
+  const router = useRouter()
+  const { id, name, priceCents } = router.params
+  const [paying, setPaying] = useState(false)
+
+  async function submit() {
+    setPaying(true)
+    try {
+      const params = await mockRequestOrder(id ?? '')
+      const result = await pay(params)
+      if (result.ok) {
+        Taro.showToast({ title: '支付成功（mock）', icon: 'success' })
+        void Taro.reLaunch({ url: '/pages/index/index' })
+      } else {
+        Taro.showToast({ title: result.message, icon: 'none' })
+      }
+    } finally {
+      setPaying(false)
+    }
+  }
+
+  return (
+    <View className="confirm">
+      <View className="confirm__name">{decodeURIComponent(name ?? '')}</View>
+      <View className="confirm__price">¥{formatCents(Number(priceCents ?? 0))}</View>
+      <Button type="primary" loading={paying} onClick={submit}>
+        支付
+      </Button>
+      <View className="confirm__mock-tip">
+        联调提示：后端下单接口未就绪，这里用假参数走一遍 pay() 适配层。
+      </View>
+    </View>
+  )
+}
+
+/** 假下单：本该是 `POST /api/client/orders` 的返回值，见文件头 TODO。 */
+async function mockRequestOrder({{domainSlug}}Id: string): Promise<WechatPayParams> {
+  void {{domainSlug}}Id
+  return Promise.resolve({
+    timeStamp: String(Math.floor(Date.now() / 1000)),
+    nonceStr: Math.random().toString(36).slice(2),
+    package: 'prepay_id=mock',
+    signType: 'RSA',
+    paySign: 'mock-sign',
+  })
+}

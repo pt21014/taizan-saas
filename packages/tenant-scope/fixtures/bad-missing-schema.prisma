@@ -1,0 +1,16 @@
+// 验收用样本：注册表里登记了 schema 中并不存在（或没有 tenantId）的表。
+// 名字写错的后果与漏登记一样严重：那张真表实际上没被隔离。
+
+model ScopedAlpha {
+  id       String @id
+  tenantId String
+  name     String
+
+  @@index([tenantId, id])
+}
+
+// 只有 id 没有 tenantId：如果它被登记进 TENANT_MODELS，说明清单陈旧。
+model PlatformOnly {
+  id   String @id
+  memo String
+}

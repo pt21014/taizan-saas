@@ -1,0 +1,189 @@
+# {{scope}}/admin
+
+商家后台：装配 `@taizan/admin-ui`（T3-1/T3-2 的基座 + 路由/权限/CRUD 层），
+接的是 `apps/api` 的 `/api/admin/*` 真实接口——**没有 mock**。Vite 6 + React 18 + AntD 5 + react-router 6。
+
+## 1. 起步
+
+```bash
+pnpm install
+cp apps/admin/.env.example apps/admin/.env.local   # 本地开发留空即可，走 vite 代理
+pnpm -F {{scope}}/admin dev                          # http://localhost:5173
+```
+
+`vite.config.ts` 把 `/api` 代理到 `http://localhost:3000`（`apps/api` 的默认端口），
+所以开发时不需要在 `.env.local` 里填任何东西。3000 端口被占用时（比如本机同时在跑
+另一份 `apps/api`），把后端起在别的端口，跑前端前设 `API_PROXY_TARGET` 环境变量：
+
+```bash
+API_PROXY_TARGET=http://localhost:3060 pnpm -F {{scope}}/admin dev
+```
+
+生产构建（`pnpm -F {{scope}}/admin build`）没有 dev server 代理，`VITE_API_BASE` 必须
+填真实后端地址。
+
+## 2. 与后端联调
+
+```bash
+pnpm dev:infra                        # MySQL(3307) + Redis(6380)
+pnpm -F {{scope}}/api prisma:migrate
+pnpm -F {{scope}}/api seed              # 见下面的账号表
+pnpm -F {{scope}}/api dev               # http://localhost:3000，Swagger 在 /docs
+pnpm -F {{scope}}/admin dev             # http://localhost:5173
+```
+
+seed 账号（详见 `apps/api/README.md` 与 `apps/api/src/seed.ts`）：
+
+| 身份 | 手机号 | 密码 | 说明 |
+| --- | --- | --- | --- |
+| A 店店主 | `13800000000` | `123456` | 全部权限 |
+| A 店受限员工 | `13800000002` | `123456` | 只有 `{{domainSlug}}:list`，看不到「新增商品」按钮 |
+| B 店店主 | `13800000001` | `123456` | 套餐**已到期**，后台只读 |
+
+seed 还会生成一张**演示邀请**（`GET /api/public/invites/demo-staff-invite-token`，
+不限手机号、10 年有效），本地随便拿浏览器开 `http://localhost:5173/invites/demo-staff-invite-token`
+就能走一遍「加入店铺」的落地页，不用先在「员工」页里现点一次「邀请员工」。
+
+## 3. 页面清单与后端接口对应关系
+
+| 页面 | 路由 | 后端接口 |
+| --- | --- | --- |
+| 工作台 `Dashboard` | `/` | `GET /api/admin/auth/bootstrap`（quotas/tenant） |
+| 商品 `{{DomainPascal}}List` | `/{{domainSlug}}` | `/api/admin/{{domainSlug}}` 五件套 + `/export` |
+| 员工 `StaffList` | `/staff` | `/api/admin/staff`（含 `/invites`、`/transfer-owner`、`/:id/disable`、`/:id/enable`） |
+| 角色 `RoleList` | `/roles` | `/api/admin/roles`（含 `/permissions` 权限点目录） |
+| 账单 `BillingCenter` | `/billing` | `/api/admin/billing{,/plans,/orders}` |
+| 审计 `AuditList` | `/audit` | `/api/admin/audit-logs`（只读） |
+| 公告 `AnnouncementList` | `/announcements` | `/api/admin/announcements` + `/:id/read`（只读 + 标记已读） |
+| 个人设置 `ProfileSettings` | `/profile` | `/api/admin/profile/change-password` |
+| 邀请落地页（免登录） | `/invites/:token` | `/api/public/invites/:token`、`/:token/accept` |
+
+所有页面的路由都由 `src/App.tsx` 的 `buildRoutes(session.menus, componentMap)` 从
+后端下发的菜单树生成——`apps/api/src/registry/menus.ts` 的 `ADMIN_MENUS` 已经登记齐了
+全部 8 个菜单（`example-{{domainSlug}}` 的商品 + 框架自带的工作台/员工/角色/账单/审计/公告/
+个人设置），前端不再有任何静态路由分支。`/invites/:token` 是唯一的例外：它免登录，
+不经过服务端菜单树，直接挂在 `App.tsx` 里 `/login` 同一层级。
+
+### 员工模块几个不对称的地方（后端 T1-9 定的形状，前端照抄）
+
+- **没有「新建员工」，只有「邀请」**：`StaffList` 的「邀请员工」按钮打开一个抽屉，
+  生成一张邀请链接（`POST /api/admin/staff/invites`），可以限定手机号、挂初始角色、
+  设有效期；生成后原地展示链接（`<Input readOnly>` + 一键复制），发给被邀请人。
+- **没有「删除员工」，只有「停用/启用」**：`POST /:id/disable`、`/enable`。
+- **「改角色」直接覆盖 `roleIds`**（`PATCH /api/admin/staff/:id`），不是增量勾选。
+- **「转让店主」是独立的行操作**，只有当前登录身份是店主（`identity.isOwner`）才看得到，
+  转让后前端会重新 `bootstrap()` 刷新自己的权限/菜单（自己从店主降级）。
+
+### 角色模块
+
+- 权限点勾选树的选项来自 `GET /api/admin/roles/permissions`（运行时的权限点注册表，
+  已经滤掉 `platform-*`），不是前端写死的目录——后端加一个新权限点，这一页自动跟着更新。
+- `AdminRoleController` 没有 `GET /:id`，编辑走 `openWith(row.id, row)` 直接用列表已经
+  返回的字段回填，不用再打一次接口。
+
+### 公告模块
+
+- 方向是**平台 → 商家**：这一页读的是运营发布的平台公告，商家是读者，只有「列表 +
+  标记已读」，没有新建/编辑/删除。「商家自己发店内公告」是另一个独立的、还没落地的
+  业务需求（需要新的租户域表）。
+
+### 个人设置
+
+- 改密码（`POST /api/admin/profile/change-password`）成功后，后端会把这个账号名下
+  **所有店**的会话一起撤掉（含当前这一条）；前端拿到成功响应后立刻 `session.logout()`
+  并跳登录页，不跳的话下一个请求会拿到 `1140100`。
+
+## 4. 邀请落地页（`/invites/:token`）
+
+免登录页，被邀请人此刻可能连账号都没有。三态：
+
+1. 查询中（`GET /api/public/invites/:token`）；
+2. 无效——按 `reason`（`NOT_FOUND`/`USED`/`EXPIRED`/`SHOP_UNAVAILABLE`）显示对应文案；
+3. 有效——填手机号 + 密码提交（`POST /api/public/invites/:token/accept`）。手机号已有
+   账号时密码必须是它现有的登录密码，不区分「没有这个账号」与「密码不对」，一律回
+   `1140100`；员工数配额满了回 `1540301`，页面单独给出「联系店主升级套餐」的提示。
+
+这条接口刻意不下发 token（见 `invite.service.ts`），成功后跳登录页走一次正常登录。
+
+`src/api/invite.ts` 没有走 `useSession().request`：那套错误码分流会把
+`1140100`（`ErrorCode.UNAUTHENTICATED`）当成「未登录」直接清态跳登录页，把这一屏的
+错误提示和用户填的内容一起冲掉。这里自己拼了一个最小的信封客户端（剥包 + 抛
+`InviteApiError`），不接错误码分流。
+
+## 5. 如何加一个页面
+
+1. 后端：在 `apps/api` 对应模块里注册权限点（`*.permissions.ts`）与菜单
+   （`*.menus.ts`，`componentKey` 用 PascalCase），汇总进 `src/registry/{permissions,menus}.ts`。
+2. 前端：
+   - `src/api/<模块>.ts` 写接口函数，签名参考 `src/api/{{domainSlug}}.ts`（标准五件套）或
+     `src/api/staff.ts`（形状不对称时，接口层照抄后端真实路由，不用硬凑 CRUD）；
+   - `src/pages/<模块>/<模块>ListPage.tsx` 照抄 `{{DomainPascal}}ListPage.tsx` 的形状
+     （`useCrudTable` + `useCrudForm` + `<CrudTable>` + `<CrudDrawerForm>`）；
+   - `src/routes/component-map.ts` 加一行 `<ComponentKey>: lazy(() => import(...))`；
+   - 跑 `pnpm -F {{scope}}/admin sync-menus` 重新导出 `src/routes/__fixtures__/admin-menus.json`，
+     再跑 `pnpm -F {{scope}}/admin test`——`component-map.spec.ts`（spec 7）双向对账，
+     菜单和 component-map 两边只要有一边漏了都会红。
+3. 菜单点进去白屏的第一反应：看浏览器控制台有没有 `buildRoutes()`/`renderMenus()`
+   打的 `componentKey` 未登记警告，再看 `component-map.spec.ts` 是不是本该红而没红。
+
+## 6. spec 7 真源交接
+
+`componentKey` 是后端菜单注册表与前端映射表之间唯一的连接点。这份对账现在有两层：
+
+- **前端自己**：`src/routes/component-map.spec.ts` 用 `verifyComponentMap()` 拿
+  `__fixtures__/admin-menus.json`（`sync-menus` 从后端 `ADMIN_MENUS` 导出的快照）跟
+  `component-map.ts` 做双向对账；
+- **后端**：`apps/api/test/arch/menu-route-map.spec.ts`（蓝图 §8 spec 7）**静态解析**
+  `component-map.ts` 里 `defineComponentMap({ Key: lazy(...), ... })` 的顶层 key
+  （正则抓 `"标识符: lazy("` 这个书写惯例），不再依赖 `apps/api/src/registry/component-keys.ts`
+  那份手写清单——那份临时真源已经删掉了。改 `component-map.ts` 忘了同步没有意义：
+  这条 spec 每次都读的是它当下的文件内容，没有第二份可能过期的拷贝。
+
+## 7. e2e
+
+`e2e/`，`@playwright/test`，需要**真实后端 + 真实 Redis**（蓝图 §3.2「不 mock 网络层」）。
+
+```bash
+pnpm dev:infra
+pnpm -F {{scope}}/api prisma:migrate
+pnpm -F {{scope}}/api seed
+REDIS_URL=redis://127.0.0.1:6380/8 API_PORT=3060 pnpm -F {{scope}}/api dev   # 3000 被占时换端口
+API_PROXY_TARGET=http://localhost:3060 API_BASE=http://localhost:3060 pnpm -F {{scope}}/admin e2e
+```
+
+8 条用例（原 4 条 + T1-9 联调新增 4 条，落在 6 个 spec 文件里）：
+
+| # | 文件 | 断言 |
+| --- | --- | --- |
+| ① | `owner-{{domainSlug}}-crud.spec.ts` | 店主登录后商品增删改查全通 |
+| ② | `restricted-staff.spec.ts` | 受限员工看不到新增按钮，导出接口拿到 403 语义错误码 |
+| ③ | `expired-tenant-billing.spec.ts` | 到期租户只读横幅 + 新增被禁 + 账单页仍可下单 |
+| ④/⑧ | `change-password-logout.spec.ts` | 改密后自动登出回登录页，且**旧 token 立刻失效** |
+| ⑤ | `invite-and-role-change.spec.ts` | 店主邀请员工 → 邀请链接页完成加入 → 新员工登录成功 |
+| ⑥ | 同上（同一条用例接着写） | 改角色后新员工菜单实时变化（`/{{domainSlug}}` 从 404 变成真页面） |
+| ⑦ | `announcements.spec.ts` | 公告列表可见 seed 公告，可以标记已读 |
+
+**`login` 限流是跑重复几遍时唯一要注意的点**：`@taizan/ratelimit-core` 的 `login` 档按
+**客户端维度**计数（`clientLimit: 10`/5 分钟），**不分成功失败**——整套用例加起来打了
+9 次登录接口，卡在这个额度以内是刻意控制的（能省一次 `fetchAccessToken` 就从已登录
+页面的 `localStorage` 读 token，见 `fixtures.ts` 的 `readStoredToken`），但连续跑两轮
+（10 分钟内）会撞上同一个客户端计数器。本地反复调试时，先清一下这套 e2e 专用的
+Redis db（题面要求的 `REDIS_URL=redis://127.0.0.1:6380/8`）：
+
+```bash
+docker exec {{projectName}}-redis-dev redis-cli -n 8 flushdb
+```
+
+## 8. 已知未覆盖 / 需要后续补的东西
+
+- `{{DomainPascal}}ListPage` 的「导出」按钮走的是浏览器端把 `GET /api/admin/{{domainSlug}}/export` 的
+  JSON 结果转成一个可下载文件（没有专门的「生成 Excel」后端接口）。
+- 角色编辑页的权限点勾选是一个平铺的 `Checkbox.Group`（按模块分组），不是可折叠的树；
+  权限点数量还不多，暂时够用。
+- `AdminRoleController`/`AdminStaffController` 都没有 `GET /:id`，编辑表单统一走
+  `openWith()` 用列表页已有的行数据回填——这意味着如果某个字段列表接口不返回，
+  编辑页也拿不到，目前两边的字段是对齐的。
+- e2e 里「改角色」用到的 antd 多选下拉，在这台机器的 vite dev + antd cssinjs 组合下，
+  下拉项 `role="option"` 那层容器量出来的宽度是 0（文字在子节点里）——`invite-and-
+  role-change.spec.ts` 改成直接按文字定位点击，绕过了这个渲染怪癖，没有去动
+  `packages/admin-ui`（不在本轮改动范围内，也怀疑是环境相关，不一定是通用 bug）。
