@@ -1,7 +1,7 @@
 {
   "frameworkVersion": "0.0.0",
   "taizanVersion": "^0.1.0",
-  "generatedAt": "2026-09-06T03:31:00.148Z",
+  "generatedAt": "2026-09-06T04:03:54.286Z",
   "files": [
     {
       "path": ".dockerignore",
@@ -38,7 +38,7 @@
     {
       "path": ".prettierignore.hbs",
       "source": ".prettierignore",
-      "sha256": "36bf5a132f7736e3a3286198c31ffd822fec9c38be24d8882cf92796c556d919",
+      "sha256": "37b232e9ff17d4a5e0941489fa60cdc026b00bcce29635ef033c71c229c45012",
       "bucket": "root",
       "render": true,
       "binary": false
@@ -3286,7 +3286,7 @@
     {
       "path": "apps/site/vitest.config.ts",
       "source": "apps/site/vitest.config.ts",
-      "sha256": "ffd7e50d61822478122b2762201f6a9295db94b2fac0c2e83907f6a8d6816edc",
+      "sha256": "270ce8c26af91039ec121d416927d7453c033422872694106eab1056ba77a1a6",
       "bucket": "site",
       "render": false,
       "binary": false

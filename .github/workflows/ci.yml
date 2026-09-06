@@ -406,6 +406,29 @@ jobs:
       - name: Generate Prisma client（与其它 job 对齐，保证这里跑的是同一棵装配好的树）
         run: pnpm -F @taizan/api prisma:generate
 
+      - name: 建 shadow 库（service 容器只按 MYSQL_DATABASE 建了 taizan_ci 一个库）
+        # `prisma migrate diff --shadow-database-url` **不会自己建库**——它要的是一个
+        # 已经存在、可以随便建表删表的空库，连不上就直接
+        #   Error: P1003 Database `taizan_shadow` does not exist on the database server
+        # 而 mysql:8.0 镜像的 entrypoint 只认 `MYSQL_DATABASE` 那一个库名（taizan_ci），
+        # 第二个库没有任何声明式入口，只能在这里现建。
+        #
+        # 用 runner 自带的 mysql 客户端（ubuntu-latest 上 mysql-client 是预装的），
+        # 不走 `docker exec`：service 容器的名字是 Actions 生成的随机串，要先 `docker ps`
+        # 去捞，多一层脆。127.0.0.1:3306 是 service 已经映射出来的端口，job 起来时
+        # health-cmd 已经通过，直接连即可。
+        #
+        # 这个 job 的 DATABASE_URL / SHADOW_DATABASE_URL 都是 root（migrate diff 要
+        # CREATE/DROP 权限），root 在 mysql 镜像里对所有库天生全权，不需要再 GRANT。
+        #
+        # 库名不加反引号：`run: |` 是 bash，双引号串里的反引号会被当成命令替换。
+        # `taizan_shadow` 不是保留字，本来也不需要引用标识符。
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -u root -p"$MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE IF NOT EXISTS taizan_shadow CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+          mysql -h 127.0.0.1 -P 3306 -u root -p"$MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES LIKE 'taizan_shadow';"
+        env:
+          MYSQL_ROOT_PASSWORD: taizan_ci_root
+
       - name: schema-sync 未漂开（00-base/ 与 @taizan/prisma-base 的片段一致）
         # 这条与 spec 15（base.lock.json 的 sha256）互补：spec 15 守的是「lock 与本地一致」，
         # 这条守的是「本地与当前装着的框架版本一致」——升级了框架却忘了 sync，只有这条会红。

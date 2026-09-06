@@ -11,3 +11,6 @@ tools/create-taizan-saas/templates/
 # 同类模板快照散落在其他目录（tools/codegen/templates、tools/create-taizan-saas/extras、docs/templates），
 # 统一按扩展名忽略，而不是逐目录列举
 *.hbs
+
+# 构建期生成物（apps/site generate 脚本产出，已 gitignore）
+apps/site/src/styles/tokens.css

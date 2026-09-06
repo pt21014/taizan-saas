@@ -420,14 +420,38 @@ describe('manifest 与 --check', () => {
 
   it('`build:templates --check` 在没改过任何东西时通过', () => {
     // 这条会真的重新扫一遍 apps/，是整个生成器里唯一一条「模板没过期」的断言。
-    execFileSync(
-      'node',
-      ['--import', 'tsx', join(PKG_ROOT, 'scripts', 'build-templates.ts'), '--check'],
-      {
-        cwd: PKG_ROOT,
-        stdio: 'pipe',
-      },
-    )
+    //
+    // `stdio: 'pipe'` 是故意的（不让漂移清单混进正常测试输出），但代价是失败时
+    // execFileSync 抛的 Error 只有一句 `Command failed: node ...`，漂移清单躺在
+    // `error.stderr` 这个 Buffer 里，而 vitest 把它序列化成
+    //   Serialized Error: { ..., stderr: '<Buffer(360) ...>' }
+    // ——CI 上看得见「有 360 字节」，看不见是哪个文件漂了，只能本地重跑一遍才知道。
+    // 所以这里自己接住，把子进程的 stderr/stdout 解成文本拼进错误信息。
+    try {
+      execFileSync(
+        'node',
+        ['--import', 'tsx', join(PKG_ROOT, 'scripts', 'build-templates.ts'), '--check'],
+        {
+          cwd: PKG_ROOT,
+          stdio: 'pipe',
+        },
+      )
+    } catch (err) {
+      const e = err as Error & { stderr?: Buffer | string; stdout?: Buffer | string }
+      const text = (b: Buffer | string | undefined): string =>
+        b == null ? '' : (Buffer.isBuffer(b) ? b.toString('utf8') : b).trim()
+      // Node 有时已经把 stderr 拼进 message，有时没有（取决于平台/调用方式），
+      // 所以只补 message 里还没有的那部分，避免同一份漂移清单打印两遍。
+      const detail = [text(e.stderr), text(e.stdout)]
+        .filter((t) => t && !e.message.includes(t))
+        .join('\n')
+      throw new Error(
+        ['build:templates --check 失败（模板快照与 apps/ 不一致）：', e.message, detail]
+          .filter(Boolean)
+          .join('\n'),
+        { cause: err },
+      )
+    }
   })
 
   it('每个端至少有一个文件（漏抓一整个端不该静默）', () => {

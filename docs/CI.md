@@ -130,6 +130,88 @@ CLI 自己从 `process.argv[1]` 所在目录向上找包根来定位框架的 `s
 > 把 `\r\n` / `\r` 归一成 `\n` 再算摘要，写文件时也只写 LF；`.gitattributes` 又钉了
 > `* text=auto eol=lf`。Windows 生成、Linux 校验，两边算出来是同一个 hash。
 
+
+## 0.2 第三轮：shadow database 与「快照过期」
+
+第三次真跑（run 34010154658）`quality` / `arch` / `api-e2e` 转绿，剩下两个：
+
+| job | 报错 | 根因 |
+|---|---|---|
+| `migrate-check` | `Error: P1003 Database taizan_shadow does not exist` | service 容器没建这个库 |
+| `unit` | `build:templates --check` 报两个文件「内容漂移」 | **模板快照过期**，不是构建期改写 |
+
+### ④ `migrate diff --shadow-database-url` 不会自己建库
+
+`mysql:8.0` 镜像的 entrypoint 只认 `MYSQL_DATABASE` 这**一个**库名（这个 job 里是
+`taizan_ci`）。第二个库没有任何声明式入口。而 `prisma migrate diff --shadow-database-url`
+要的是一个**已经存在**、可以随便建表删表的空库——它会往里重放整个 migrations 历史再读回
+结构，但**不会替你 `CREATE DATABASE`**，连不上就直接 P1003。
+
+（`prisma migrate dev` 会自己建 shadow 库，`migrate diff` 不会。两条命令在这一点上不同，
+容易按前者的经验想当然。）
+
+修法：在 migrate diff 之前用 runner 自带的 `mysql` 客户端现建一个：
+
+```yaml
+- name: 建 shadow 库
+  run: |
+    mysql -h 127.0.0.1 -P 3306 -u root -p"$MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE IF NOT EXISTS taizan_shadow CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+  env:
+    MYSQL_ROOT_PASSWORD: taizan_ci_root
+```
+
+三个细节：
+
+- **不走 `docker exec`**。service 容器的名字是 Actions 生成的随机串，得先 `docker ps` 去捞，
+  多一层脆。`127.0.0.1:3306` 是 service 已经映射出来的端口，job 起来时 health-cmd 已经通过。
+- **不加反引号**。`run: |` 是 bash，双引号串里的反引号会被当成命令替换；`taizan_shadow`
+  不是保留字，本来也不需要引用标识符。
+- **不用再 `GRANT`**。这个 job 的 `DATABASE_URL` / `SHADOW_DATABASE_URL` 都是 root
+  （migrate diff 要 CREATE/DROP 权限），root 在 mysql 镜像里对所有库天生全权。
+
+本地用 `pnpm dev:infra` 的 mysql（3307）验证过：建库前 `migrate diff` 就是那句 P1003，
+建库后 `No difference detected.` 且退出 0。
+
+### ⑤ 「内容漂移」这次不是构建期改写，是忘了重跑快照
+
+前两次 `build:templates --check` 报漂移（`apps/site` 的 `sitemap.xml` 与 `tokens.css`）都是
+**构建期产物混进了源码树**，修法是把它们移出 git、让 build 自己生成。这一次报的是
+
+```
+· 内容漂移：.prettierignore.hbs        ← .prettierignore
+· 内容漂移：apps/site/vitest.config.ts ← apps/site/vitest.config.ts
+```
+
+看起来像同一类，其实不是。上一个 commit 改了这两个源文件（给 `.prettierignore` 加
+`apps/site/src/styles/tokens.css`、给 site 的 vitest 加 `testTimeout`），**但没有重跑
+`pnpm build:templates`**。快照落后于源文件，`--check` 就该红——这正是它存在的意义。
+
+判据很干脆：干净克隆里跑完 `pnpm install → prisma:generate → pnpm build`（全量，含六个
+app）之后 `git status --porcelain` **是空的**，没有任何受控文件被 build 改写；而
+`build:templates --check` 在 build 之前就已经红了。构建期改写这个嫌疑可以排除。
+
+修法就是脚本自己提示的那句：`pnpm build:templates` 重新快照，然后看一眼 diff
+（只多了那两个源文件的改动 + manifest 里对应的两条 sha256，没有别的东西跟着变）。
+
+**改了 `apps/**` / 根配置里被快照覆盖的文件，同一个 commit 里就要带上重新生成的
+`templates/`。** 本地进 commit 前跑一次 `pnpm build:templates:check` 就能提前发现。
+
+### ⑥ 让 `--check` 的失败信息在 CI 上看得见
+
+上面那两个文件名，其实第一次 CI 红的时候是**看不到的**。`generator.spec.ts` 里那条用例用
+`execFileSync(..., { stdio: 'pipe' })` 跑 `build-templates.ts --check`，失败时抛的 Error
+只有一句 `Command failed: node ...`，漂移清单躺在 `error.stderr` 这个 Buffer 里，而 vitest
+把它序列化成
+
+```
+Serialized Error: { status: 1, ..., stderr: '<Buffer(360) ...>' }
+```
+
+——只知道「有 360 字节」，不知道是哪个文件，只能本地重跑一遍才看得见。现在这条用例自己接住
+异常，把子进程的 stderr/stdout 解成文本拼进错误信息（`e.message` 里已经有的那部分不重复拼），
+CI 日志里直接就是那两行「内容漂移：xxx」。
+
+
 ---
 
 ## 1. 各 job 做什么 · 本地等价命令
@@ -198,6 +280,11 @@ env 取值以 `apps/api/.env.example` 为准；CI 里显式列在 job 的 `env:`
 pnpm -F @taizan/api taizan:schema-check       # 00-base/ 与当前装着的 @taizan/prisma-base 一致
                                               # CI 里等价地写成 node packages/prisma-base/dist/cli/sync.js
                                               # apps/api/prisma/schema --check（绕开 .bin，理由见 §0.1 ③）
+
+# shadow 库要先存在——migrate diff 不会自己建（见 §0.2 ④）。本地 dev mysql 是 3307：
+mysql -h 127.0.0.1 -P 3307 -u root -ptaizan_dev_root -e "CREATE DATABASE IF NOT EXISTS taizan_shadow;"
+export SHADOW_DATABASE_URL="mysql://root:taizan_dev_root@127.0.0.1:3307/taizan_shadow"
+
 cd apps/api && pnpm exec prisma migrate diff \
   --from-migrations prisma/migrations \
   --to-schema-datamodel prisma/schema \
