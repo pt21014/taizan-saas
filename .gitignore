@@ -4,6 +4,9 @@ dist
 .env
 .env.*
 !.env.example
+!.env.*.example
+!.env.example.hbs
+!.env.*.example.hbs
 coverage
 *.log
 .DS_Store
