@@ -1,0 +1,9 @@
+# 全仓统一 LF：本机 core.autocrlf=true 会在 checkout 时把 LF 换成 CRLF，
+# 与 editorconfig / prettier / 生成器模板对账冲突，用 attributes 钉死。
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.tgz binary
