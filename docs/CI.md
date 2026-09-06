@@ -53,12 +53,92 @@ pnpm build --filter './packages/*' --filter './tools/*'
 只在包源码真的变了的时候才重新构建那个包。pnpm store 的缓存则由每个 job `setup-node` 步骤
 里已有的 `cache: pnpm` 负责，不需要额外配置。
 
+## 0.1 build 之外，还有三样「本地有、干净 checkout 没有」
+
+修完 §0 之后再跑（run 34009292273），`unit` 和 `api-e2e` 转绿，另外三个 job 换了个姿势继续红。
+根因是同一类，只是这一次缺的不是 `dist/`：
+
+| job | 报错 | 缺的是什么 |
+|---|---|---|
+| `quality` | `Module '"@prisma/client"' has no exported member 'Announcement'`（一屏 TS2305 / TS2694 / TS7006） | **Prisma client 没生成** |
+| `arch` | `sh: 1: tsx: not found` | **根 `package.json` 没有 `tsx`** |
+| `migrate-check` | `sh: 1: taizan-schema-sync: not found` / `spawn ENOENT` | **workspace 包的 bin 软链没建起来** |
+
+### ① Prisma client 是产物，不进仓库
+
+`apps/api` 的 service 层大量 `import type { Announcement, Prisma } from '@prisma/client'`。
+这些名字来自 `prisma generate` 写进 `node_modules/.prisma/client` 的产物；没跑 generate 时
+`@prisma/client` 只是个运行时壳子，`tsc` 会把每一个模型名报成 TS2305，顺带把所有依赖推断的
+回调参数报成 TS7006——看起来像「代码坏了」，实际只是少跑了一步。
+
+本地 `node_modules` 里 `.prisma/client` 常年都在，所以这个依赖一直隐身。`unit` job 在 §0 那轮
+已经踩过并加了这一步，`quality` 漏了。修法：凡是 typecheck 或执行 `apps/api` 代码的 job，
+在 `build packages` 之后统一加
+
+```bash
+pnpm -F @taizan/api prisma:generate
+```
+
+`quality` / `arch` / `migrate-check` 三个 job 都加上了（`unit` / `api-e2e` 本来就有）。
+这一步不连数据库：`apps/api/prisma.config.ts` 在场时 Prisma 会打印
+`Prisma config detected, skipping environment variable loading.`，`DATABASE_URL` 没设也能 generate。
+
+### ② 根 script 用了 `tsx`，根就必须依赖 `tsx`
+
+根 `package.json` 的 `check:arch` 和 `check:peer-deps` 都是 `tsx scripts/*.ts` 开头，但 `tsx`
+当时只是 `apps/api` 的 devDependency。pnpm 只把**直接依赖**的 bin 放进 `<pkg>/node_modules/.bin`，
+所以干净装完之后根本没有 `node_modules/.bin/tsx`——CI 上 `pnpm check:arch` 第一行就
+`sh: 1: tsx: not found`。
+
+本地一直没事，是因为根 `node_modules/.bin/tsx` 是历史某次安装留下的残留（同一批残留还有
+`vite` / `sass` / `terser` / `jiti`，它们同样不是根的直接依赖）。**这类残留是本地环境最容易
+骗人的地方：它让一个缺失的依赖看起来像装好了。**
+
+修法：把 `tsx` 加进根 `devDependencies`（`^4.19.2`，与 `apps/api` 同一条 specifier，pnpm 解析到
+同一个 4.23.13，`pnpm-lock.yaml` 只多三行）。这一条同时修好 `arch` 的 `check:arch` 和
+`quality` 里排在 typecheck 后面、当时还没轮到的 `check:peer-deps`。
+
+### ③ workspace 包的 bin 软链只在 install 那一刻建，过期不补
+
+`apps/api` 的 `taizan:schema-check` 走的是 `apps/api/node_modules/.bin/taizan-schema-sync`。
+这个 shim 是 pnpm 照 `@taizan/prisma-base` 的 `bin` 字段建的，而**建的时机是 `pnpm install`**。
+全新 checkout 上 install 必然跑在 build 之前，那一刻 `packages/prisma-base/dist/cli/sync.js`
+还不存在，于是 install 日志里刷出一批
+
+```
+[WARN] Failed to create bin at .../apps/api/node_modules/.bin/taizan-schema-sync.
+       ENOENT: no such file or directory, open '.../packages/prisma-base/dist/cli/sync.js'
+```
+
+一共五个 bin 建失败（`taizan-schema-sync` / `taizan-verify-schema` / `taizan-rbac-sync` /
+`taizan-env-example` / `taizan-rotate-key`），**而后面那步 build 不会回头补建**。
+实测 pnpm 11 上二次 `pnpm install --frozen-lockfile`、乃至加 `--force`，只要 lockfile 与
+node_modules 状态没变就是一句 `Already up to date`，bin 依然不在。
+
+所以 CI 里不能走 `.bin`，直接跑编译产物：
+
+```yaml
+run: node packages/prisma-base/dist/cli/sync.js apps/api/prisma/schema --check
+```
+
+CLI 自己从 `process.argv[1]` 所在目录向上找包根来定位框架的 `schema/`，目标目录按 cwd 解析，
+两者都跟有没有 bin 无关。本地开发机上 `dist/` 常年在、install 时链得上，
+`pnpm -F @taizan/api taizan:schema-check` 照旧可用，两条命令跑的是同一个 `sync.js`。
+
+> 顺带排除一个当时的怀疑：`base.lock.json` 的 sha256 **不会**被 CRLF/LF 影响。
+> `packages/prisma-base/src/cli/sync.ts` 里的 `hashSchemaContent()` 先 `normalizeEol()`
+> 把 `\r\n` / `\r` 归一成 `\n` 再算摘要，写文件时也只写 LF；`.gitattributes` 又钉了
+> `* text=auto eol=lf`。Windows 生成、Linux 校验，两边算出来是同一个 hash。
+
+---
+
 ## 1. 各 job 做什么 · 本地等价命令
 
 ### `quality` —— 静态检查与「文档/依赖是否同步」
 
 | CI 步骤 | 本地等价 | 守什么 |
 |---|---|---|
+| Generate Prisma client | `pnpm -F @taizan/api prisma:generate` | 不是检查，是前置：typecheck 要 `.prisma/client` 的类型（§0.1 ①） |
 | Lint | `pnpm lint` | eslint（turbo 分发到各包） |
 | Typecheck | `pnpm typecheck` | `tsc --noEmit` |
 | Format check | `pnpm format:check` | prettier |
@@ -116,6 +196,8 @@ env 取值以 `apps/api/.env.example` 为准；CI 里显式列在 job 的 `env:`
 
 ```bash
 pnpm -F @taizan/api taizan:schema-check       # 00-base/ 与当前装着的 @taizan/prisma-base 一致
+                                              # CI 里等价地写成 node packages/prisma-base/dist/cli/sync.js
+                                              # apps/api/prisma/schema --check（绕开 .bin，理由见 §0.1 ③）
 cd apps/api && pnpm exec prisma migrate diff \
   --from-migrations prisma/migrations \
   --to-schema-datamodel prisma/schema \

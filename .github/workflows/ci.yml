@@ -24,7 +24,7 @@ name: CI
 # ## 每个 job 都要先 build packages/tools（首跑真红过的坑）
 #
 # `quality`（typecheck）/ `arch`（test:arch、check:arch）/ `api-e2e`（seed、e2e）/
-# `migrate-check`（taizan:schema-check 依赖 @taizan/prisma-base 的 bin）都在全新 checkout 上
+# `migrate-check`（schema-check 跑的就是 @taizan/prisma-base 的 dist/cli/sync.js）都在全新 checkout 上
 # `import` 或 `require` workspace 包的**编译产物**（`dist/`），不是源码。本地开发机上 `dist/`
 # 常年在（谁记得上一次删过 `packages/*/dist`），这个依赖一直隐身；GitHub Actions 每次都是
 # 全新 checkout，没有先 build 就直接暴露成 `Cannot find module '@taizan/billing-rules'` /
@@ -34,6 +34,22 @@ name: CI
 # 只 build `./packages/*` 和 `./tools/*`（不含 `./apps/*`）：这四个 job 谁都不需要
 # 四个前端 app 的产物，跑一遍 `pnpm build` 反而白白多编译几分钟。`unit` job 已经跑全量
 # `pnpm build`（含 apps），不再重复加这一步。
+#
+# ## 「本地有、干净 checkout 没有」的另外两样
+#
+# 光 build 还不够，还有两样东西本地常年在、CI 上每次都要现造：
+#
+# 1. **Prisma client**。`.prisma/client` 是 `prisma generate` 的产物，不进仓库。没有它，
+#    `import type { Announcement } from '@prisma/client'` 全部 TS2305/TS2694。凡是 typecheck
+#    或跑 `apps/api` 代码的 job，`build packages` 之后都要 `pnpm -F @taizan/api prisma:generate`。
+# 2. **workspace 包的 bin 软链**。pnpm 只在 install 那一刻按 bin 字段建 `.bin/xxx`，此时
+#    `packages/*/dist` 还是空的，于是 `taizan-schema-sync` 等五个 bin 全部建失败并被跳过；
+#    build 完也不会补建（见 migrate-check 里那条 step 的注释）。要用这些 CLI 就直接
+#    `node <包>/dist/...`，别走 `.bin`。
+#
+# 顺带一提 `tsx`：根 `package.json` 的 `check:arch` / `check:peer-deps` 都以 `tsx` 开头，
+# 所以 `tsx` 必须是**根**的 devDependency。以前它只在 `apps/api` 里，本地根 `.bin/tsx`
+# 是历史安装留下的残留，CI 上干净装完根本没有——`sh: 1: tsx: not found`。
 #
 # ## 缓存
 #
@@ -103,6 +119,15 @@ jobs:
 
       - name: Build packages（typecheck 要 import 编译产物，全新 checkout 没有 dist）
         run: pnpm build --filter './packages/*' --filter './tools/*'
+
+      - name: Generate Prisma client（typecheck 要 .prisma/client 的类型）
+        # `apps/api` 的 service 层大量 `import type { Announcement, Prisma } from '@prisma/client'`。
+        # 未 generate 时 `@prisma/client` 只导出运行时壳子，那些名字一个都不存在，tsc 会刷出
+        # 一屏 TS2305 / TS2694 / TS7006——看起来像「代码坏了」，实际只是少跑了一步。
+        # 本地开发机上 `.prisma/client` 常年在（谁记得上一次删过 node_modules），
+        # 这个依赖一直隐身；`unit` job 已经踩过同一个坑并加了这一步，quality 漏了。
+        # generate 不连库：prisma.config.ts 在场时 Prisma 跳过 env 加载，无需 DATABASE_URL。
+        run: pnpm -F @taizan/api prisma:generate
 
       - name: Lint
         run: pnpm lint
@@ -199,6 +224,9 @@ jobs:
 
       - name: Build packages（test:arch / check:arch 都 import @taizan/prisma-base 等包的编译产物）
         run: pnpm build --filter './packages/*' --filter './tools/*'
+
+      - name: Generate Prisma client（spec 与副本里的 spec 都按 apps/api 的真实依赖跑）
+        run: pnpm -F @taizan/api prisma:generate
 
       - name: 架构约束套件（16 条，按编号输出）
         run: pnpm test:arch
@@ -372,13 +400,27 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build packages（taizan:schema-check 依赖 @taizan/prisma-base 的 bin，bin 指向 dist/cli/sync.js）
+      - name: Build packages（schema-check 跑的是 @taizan/prisma-base 的编译产物 dist/cli/sync.js）
         run: pnpm build --filter './packages/*' --filter './tools/*'
+
+      - name: Generate Prisma client（与其它 job 对齐，保证这里跑的是同一棵装配好的树）
+        run: pnpm -F @taizan/api prisma:generate
 
       - name: schema-sync 未漂开（00-base/ 与 @taizan/prisma-base 的片段一致）
         # 这条与 spec 15（base.lock.json 的 sha256）互补：spec 15 守的是「lock 与本地一致」，
         # 这条守的是「本地与当前装着的框架版本一致」——升级了框架却忘了 sync，只有这条会红。
-        run: pnpm -F @taizan/api taizan:schema-check
+        #
+        # 为什么是 `node <dist 路径>` 而不是 `pnpm -F @taizan/api taizan:schema-check`：
+        # 那条 script 走 `apps/api/node_modules/.bin/taizan-schema-sync`，而这个 shim 是 pnpm
+        # **在 install 时**照 @taizan/prisma-base 的 bin 字段建的。全新 checkout 上 install 必然
+        # 跑在 build 之前，那一刻 `packages/prisma-base/dist/cli/sync.js` 还不存在，pnpm 只打一行
+        #   [WARN] Failed to create bin at .../.bin/taizan-schema-sync. ENOENT ...
+        # 就跳过，**后面再 build 也不会回头补建**（pnpm 11 上二次 install、乃至 `--force`，
+        # 只要 lockfile 与 node_modules 状态没变就是 "Already up to date"，不重建 bin）。
+        # 本地开发机上 dist 常年在，install 时链得上，所以这个坑只在 CI 复现。
+        # 直接用 node 跑编译产物，绕开 shim 这一层：CLI 自己会从脚本位置向上找包根定位 schema/，
+        # 目标目录按 cwd 解析，两者都与是否有 bin 无关。
+        run: node packages/prisma-base/dist/cli/sync.js apps/api/prisma/schema --check
 
       - name: migrate diff（migrations 重放后的结构必须等于 schema）
         # --exit-code：0 = 没差异；2 = 有差异（step 红）。有差异意味着有人改了 schema
