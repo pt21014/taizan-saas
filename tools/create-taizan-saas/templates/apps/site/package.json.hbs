@@ -10,7 +10,9 @@
     "build": "pnpm run generate && tsc --noEmit && vite build && tsx scripts/generate-seo.ts",
     "preview": "vite preview",
     "lint": "eslint .",
+    "pretypecheck": "pnpm run generate",
     "typecheck": "tsc --noEmit",
+    "pretest": "pnpm run generate",
     "test": "vitest run",
     "e2e": "playwright test"
   },

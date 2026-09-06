@@ -1,7 +1,7 @@
 {
   "frameworkVersion": "0.0.0",
   "taizanVersion": "^0.1.0",
-  "generatedAt": "2026-09-06T02:47:13.024Z",
+  "generatedAt": "2026-09-06T03:31:00.148Z",
   "files": [
     {
       "path": ".dockerignore",
@@ -2932,17 +2932,17 @@
       "binary": false
     },
     {
-      "path": "apps/site/.gitignore",
+      "path": "apps/site/.gitignore.hbs",
       "source": "apps/site/.gitignore",
-      "sha256": "622d46d1acb02aca9c308266762b7d23dbafcf3412bbd8bd0fca7eb56d73281e",
+      "sha256": "2eeeff4ce4a176e6a389317b35a7aef5e963cd7fec86582150b4c4290ab519f4",
       "bucket": "site",
-      "render": false,
+      "render": true,
       "binary": false
     },
     {
       "path": "apps/site/README.md.hbs",
       "source": "apps/site/README.md",
-      "sha256": "9fb6ec4ddee06251dc739e59ebe721cac905a2fcb0787c719c009858d35ea8d4",
+      "sha256": "dd2ae81f4459e7f690c43b8754620338e910d2c1d7e6ee569438033b945abb2e",
       "bucket": "site",
       "render": true,
       "binary": false
@@ -2998,7 +2998,7 @@
     {
       "path": "apps/site/package.json.hbs",
       "source": "apps/site/package.json",
-      "sha256": "b8600fa41be0bc32c24e73e1950576ad2372a41f2032ae4596ada42e0d4171d3",
+      "sha256": "7f62b98b49c642f46c5e313ff66530663f2064a0ea1ddfc1cd703f5480cdc8f8",
       "bucket": "site",
       "render": true,
       "binary": false
@@ -3252,14 +3252,6 @@
       "binary": false
     },
     {
-      "path": "apps/site/src/styles/tokens.css.hbs",
-      "source": "apps/site/src/styles/tokens.css",
-      "sha256": "aef8eb694dbe1967358ff10fd8872ab143970b7c204cfd6237f626940efce17c",
-      "bucket": "site",
-      "render": true,
-      "binary": false
-    },
-    {
       "path": "apps/site/src/test/setup.ts",
       "source": "apps/site/src/test/setup.ts",
       "sha256": "aa44dce1370537bc49d59e34a4a8a11de8011ceab01f98f9e9f4f73b6075b732",
@@ -3286,7 +3278,7 @@
     {
       "path": "apps/site/vite.config.ts.hbs",
       "source": "apps/site/vite.config.ts",
-      "sha256": "7920a250fafa0aeaa33c7bd4a2e0bc4717d91c95fd187bb4c8909d96e7963c8f",
+      "sha256": "f4667b556e830a28d4c8c269cb921ffaca0ba1c6536c309d4f7abc9690f493ee",
       "bucket": "site",
       "render": true,
       "binary": false

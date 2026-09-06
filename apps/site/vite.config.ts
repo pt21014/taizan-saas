@@ -1,4 +1,7 @@
-import { defineConfig } from 'vite'
+import { existsSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 
 /**
@@ -13,8 +16,32 @@ import react from '@vitejs/plugin-react'
  * 所以生产构建不需要另配一个 `VITE_API_BASE`——这是与 apps/admin/apps/platform
  * 唯一的差异：那两个后台的 API 服务器可能跨域，官网不会。
  */
+
+/**
+ * `src/styles/tokens.css` 是 `scripts/generate-tokens.ts` 的产物，不进 git
+ * （见 `apps/site/.gitignore`）。`dev`/`build` 脚本都已经把 `pnpm run generate`
+ * 接在最前面，正常走 `pnpm -F @taizan/site dev|build` 不会碰到这里——这个插件
+ * 只是给「绕开 package.json 脚本直接跑 `vite`/`vite build`」的情况一个好懂的
+ * 报错，替掉 postcss 那句 `ENOENT: ... open '.../tokens.css'`。
+ */
+function requireGeneratedTokens(): Plugin {
+  const tokensPath = fileURLToPath(new URL('./src/styles/tokens.css', import.meta.url))
+  return {
+    name: 'taizan-require-generated-tokens',
+    buildStart() {
+      if (!existsSync(tokensPath)) {
+        this.error(
+          `找不到 ${resolve(tokensPath)}。\n` +
+            '这份文件由 `pnpm run generate`（scripts/generate-tokens.ts）生成，不受版本管理。\n' +
+            '请先跑一次 `pnpm -F @taizan/site generate`，或直接用 `pnpm -F @taizan/site dev|build`（已经包含这一步）。',
+        )
+      }
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [requireGeneratedTokens(), react()],
   server: {
     port: 5176,
     proxy: {

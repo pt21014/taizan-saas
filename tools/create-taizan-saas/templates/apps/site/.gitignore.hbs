@@ -6,7 +6,7 @@ public/robots.txt
 public/sitemap.xml
 
 # `tokens.css` 由 `scripts/generate-tokens.ts` 从 `@taizan/tokens` 生成，
-# `pnpm -F @taizan/site dev|build` 都会先重新写一遍——纯构建期产物，不应该进 git。
+# `pnpm -F {{scope}}/site dev|build` 都会先重新写一遍——纯构建期产物，不应该进 git。
 # 之前误提交过一份，`packages/tokens` 改了之后它没跟着重新生成就过期了，CI 重新
 # `generate` 出来的内容与提交的不一致，导致 `build:templates --check`（模板快照
 # 对账）报「内容漂移」而红。现在改成不追踪：本地/CI 缺这份文件时，`dev`/`build`

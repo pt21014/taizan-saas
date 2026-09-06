@@ -120,12 +120,26 @@ const SKIP_DIRS = new Set([
   'tmp',
 ])
 
+/**
+ * 精确路径跳过：源码树里混进去的构建期产物。
+ *
+ * `robots.txt`/`sitemap.xml` 不需要在这里列——它们生成到 `dist/`，整个目录已经在
+ * `SKIP_DIRS` 里。但 `apps/site/src/styles/tokens.css` 是个例外：
+ * `scripts/generate-tokens.ts` 把它写进**源码树**（`src/styles/`，不是 `dist/`），
+ * 而这个脚本用 `readdirSync` 直接扫磁盘——本地跑过一次 `pnpm -F @taizan/site dev|build`
+ * 之后它就物理存在于 `apps/site/src/styles/` 下，`walk()` 会照单全收，把它当成
+ * 「apps/ 里的源文件」快照进 templates/。它现在已经从 git 里移除（见
+ * `apps/site/.gitignore`），但只要在磁盘上存在就必须显式排除，不能指望它「不存在」。
+ */
+const SKIP_FILES = new Set(['apps/site/src/styles/tokens.css'])
+
 /** 跳过的文件（精确名或后缀）。 */
 function shouldSkipFile(name: string, repoRel: string): boolean {
   if (name === '.DS_Store' || name.endsWith('.log') || name.endsWith('.tsbuildinfo')) return true
   // .env 是本机私货；.env.example 必须带走（生成项目靠它启动）。
   if (name === '.env' || (name.startsWith('.env.') && !name.endsWith('.example'))) return true
   if (repoRel.endsWith('.last-run.json')) return true
+  if (SKIP_FILES.has(repoRel)) return true
   return false
 }
 

@@ -14,6 +14,45 @@
 
 ---
 
+## 0. 为什么每个 job 都要先 build 包
+
+这是仓库第一次真跑 GitHub Actions（run 34008416754）暴露出来的坑，四个 job 全红：
+
+| job | 报错 | 直接原因 |
+|---|---|---|
+| `quality` | typecheck：`Cannot find module '@taizan/billing-rules'` | 只装了依赖，没编译 workspace 包 |
+| `arch` | `Failed to resolve entry for package "@taizan/prisma-base"` | 同上 |
+| `migrate-check` | `taizan-schema-sync` 这个 bin 指向不存在的 `dist/cli/sync.js` | 同上 |
+| `api-e2e` | seed 找不到 `@taizan/contracts/dist/index.js` | 同上 |
+
+根因都是同一个：`packages/*` 的 `package.json` 里 `main`/`exports`/`bin` 指向的是
+`dist/**`，而 `dist/` 是 `tsup` 编译出来的产物，不在 git 里（也不应该在）。本地开发机上
+`pnpm install` 之后 `dist/` 常年都在——谁会没事去删 `packages/*/dist`——这个「其实依赖一次
+构建」的事实因此被本地环境悄悄掩盖了很久。GitHub Actions 的每个 job 都是一次全新
+`actions/checkout`，`pnpm install --frozen-lockfile` 只做符号链接和下载依赖，不会触发任何
+包的 `build`；`quality` / `arch` / `migrate-check` / `api-e2e` 这四个 job 在 install 之后
+直接 `import`/`require` 或执行 workspace 包的编译产物，第一次在纯净环境里跑就必然全红。
+
+`unit` job 恰好没有这个问题——它本来就要跑 `pnpm build`（全量 `turbo run build`，含四个
+前端 app）再跑 `pnpm test`，build 已经在那一步做了。
+
+修法：四个受影响的 job 都在 `pnpm install` 之后、真正用到 workspace 包之前，加一步
+
+```bash
+pnpm build --filter './packages/*' --filter './tools/*'
+```
+
+只构建 `packages/*` 与 `tools/*`，不含 `apps/*`——这四个 job 谁都用不到四个前端 app 的
+构建产物，图省事跑全量 `pnpm build` 只会白白多等前端编译的那几分钟。`unit` job 已经在跑
+全量 `pnpm build`，不重复加这一步。
+
+代价是四个 job 各自要多跑一次同样的包构建。用 `actions/cache` 缓存 `.turbo` 与
+`node_modules/.cache/turbo`（与 `unit` job 同一段配置、同一个 cache key）来对冲：
+同一次 push 里五个 job 并行跑、彼此看不到对方本次写入的缓存，但只要有过一次成功的构建
+（哪怕是上一次 push 留下的），turbo 的内容寻址缓存就能让后续这一步在几秒内跳过真正的编译，
+只在包源码真的变了的时候才重新构建那个包。pnpm store 的缓存则由每个 job `setup-node` 步骤
+里已有的 `cache: pnpm` 负责，不需要额外配置。
+
 ## 1. 各 job 做什么 · 本地等价命令
 
 ### `quality` —— 静态检查与「文档/依赖是否同步」
@@ -245,10 +284,12 @@ config 里那层改写照样生效，写出来只是为了让日志里一眼看�
 - **验收里的 `@taizan/*` 不是从 registry 装的**（见 §5「已知未覆盖点」）。
 - **`check:arch` 只证明 4 类**，不是 16 条都做了注入证明。这 4 类是任务分解 T4-2 点名的
   验收条目，也是历史上真出过事故的 4 类。其余 12 条目前只靠各自 spec 内部的哨兵。
-- **CI 没在 GitHub 上真跑过**：本仓库当前没有 commit 也没有远端。三个 workflow 用
-  `@action-validator/cli` 校验通过（并用一份故意写坏的 workflow 验过 validator 本身会红），
-  各 job 的命令逐条在本地跑过，但 `services:` 容器编排、缓存命中率、总时长这三项要等
-  第一次真跑才能确认。
+- **CI 首跑（run 34008416754）四个 job 全红过**：`quality` / `arch` / `migrate-check` /
+  `api-e2e` 都是「全新 checkout 没有先 build workspace 包，`dist/` 不存在」——本地一直有
+  `dist` 所以从没暴露过，见 §0。已在这四个 job 里补上 `pnpm build --filter './packages/*'
+  --filter './tools/*'`，并用 `actions/cache` 缓存 `.turbo`；`@action-validator/cli`
+  校验两个 workflow 语法通过，四个 job 需要的命令也在本地逐条验证过，但 `services:`
+  容器编排、跨 job 的缓存命中率、总时长这三项仍要等下一次真跑才能确认。
 
 ---
 

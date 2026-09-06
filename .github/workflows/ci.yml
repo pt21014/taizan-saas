@@ -21,11 +21,27 @@ name: CI
 # turbo 图跑两遍，只为了在 UI 上多一个绿勾。前端构建真正开始变慢（>2 分钟）的那天
 # 再拆，届时拆的理由是并行度，不是分类学。
 #
+# ## 每个 job 都要先 build packages/tools（首跑真红过的坑）
+#
+# `quality`（typecheck）/ `arch`（test:arch、check:arch）/ `api-e2e`（seed、e2e）/
+# `migrate-check`（taizan:schema-check 依赖 @taizan/prisma-base 的 bin）都在全新 checkout 上
+# `import` 或 `require` workspace 包的**编译产物**（`dist/`），不是源码。本地开发机上 `dist/`
+# 常年在（谁记得上一次删过 `packages/*/dist`），这个依赖一直隐身；GitHub Actions 每次都是
+# 全新 checkout，没有先 build 就直接暴露成 `Cannot find module '@taizan/billing-rules'` /
+# `Failed to resolve entry for package "@taizan/prisma-base"` 这类找不到模块的错误
+# ——四个 job 在首次真跑时全部这样红过。
+#
+# 只 build `./packages/*` 和 `./tools/*`（不含 `./apps/*`）：这四个 job 谁都不需要
+# 四个前端 app 的产物，跑一遍 `pnpm build` 反而白白多编译几分钟。`unit` job 已经跑全量
+# `pnpm build`（含 apps），不再重复加这一步。
+#
 # ## 缓存
 #
 # 两层：pnpm store（`setup-node` 的 `cache: pnpm`）+ turbo 的本地任务缓存。
 # turbo 缓存的 key 带 `github.sha`、restore-keys 退到分支/全局，这样每次都能命中
-# 上一次的产物，只重跑真正变了的包。
+# 上一次的产物，只重跑真正变了的包。五个 job 都接了同一段 `actions/cache`
+# （key 相同），这样即使五个 job 并行跑、彼此看不到对方本次的缓存写入，下一次 push
+# 也能吃到这一次任何一个 job 落下的 turbo 缓存，四个 job 各自的 build 步骤不会一直是冷跑。
 
 on:
   pull_request:
@@ -71,8 +87,22 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
+      - name: Restore turbo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .turbo
+            node_modules/.cache/turbo
+          key: turbo-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ github.ref_name }}-
+            turbo-${{ runner.os }}-
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Build packages（typecheck 要 import 编译产物，全新 checkout 没有 dist）
+        run: pnpm build --filter './packages/*' --filter './tools/*'
 
       - name: Lint
         run: pnpm lint
@@ -153,8 +183,22 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
+      - name: Restore turbo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .turbo
+            node_modules/.cache/turbo
+          key: turbo-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ github.ref_name }}-
+            turbo-${{ runner.os }}-
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Build packages（test:arch / check:arch 都 import @taizan/prisma-base 等包的编译产物）
+        run: pnpm build --filter './packages/*' --filter './tools/*'
 
       - name: 架构约束套件（16 条，按编号输出）
         run: pnpm test:arch
@@ -246,8 +290,22 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
+      - name: Restore turbo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .turbo
+            node_modules/.cache/turbo
+          key: turbo-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ github.ref_name }}-
+            turbo-${{ runner.os }}-
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Build packages（seed / e2e 都 import @taizan/contracts 等包的编译产物）
+        run: pnpm build --filter './packages/*' --filter './tools/*'
 
       - name: Generate Prisma client
         run: pnpm -F @taizan/api prisma:generate
@@ -300,8 +358,22 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
+      - name: Restore turbo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .turbo
+            node_modules/.cache/turbo
+          key: turbo-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ github.ref_name }}-
+            turbo-${{ runner.os }}-
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Build packages（taizan:schema-check 依赖 @taizan/prisma-base 的 bin，bin 指向 dist/cli/sync.js）
+        run: pnpm build --filter './packages/*' --filter './tools/*'
 
       - name: schema-sync 未漂开（00-base/ 与 @taizan/prisma-base 的片段一致）
         # 这条与 spec 15（base.lock.json 的 sha256）互补：spec 15 守的是「lock 与本地一致」，

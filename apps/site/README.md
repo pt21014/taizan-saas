@@ -14,14 +14,20 @@ pnpm -F @taizan/site dev                          # http://localhost:5176
 `vite.config.ts` 把 `/api` 代理到 `http://localhost:3000`（`apps/api` 的默认端口），
 本地开发不需要在 `.env.local` 里填任何东西。
 
-`dev`/`build` 之前都会先跑一遍 `pnpm run generate`（见 `package.json`），它只做一件事：
+`dev`/`build`/`typecheck`/`test` 之前都会先跑一遍 `pnpm run generate`（`dev`/`build`
+直接接在脚本最前面，`typecheck`/`test` 靠 `pretypecheck`/`pretest` 钩子），它只做一件事：
 
 | 脚本 | 作用 |
 |---|---|
 | `scripts/generate-tokens.ts` | `@taizan/tokens` 的 `toScssVariables()` → `src/styles/tokens.css`（CSS 自定义属性） |
 
-`tokens.css` 是**派生文件**，不要手改；改了源头（`packages/tokens`）后重新跑
-`pnpm dev`/`pnpm build` 即可同步。
+`tokens.css` 是**派生文件**，不要手改，也**不受版本管理**（见 `.gitignore`）；改了
+源头（`packages/tokens`）后重新跑 `pnpm dev`/`pnpm build` 即可同步——早先这份文件
+被提交进了 git，`packages/tokens` 改了之后它没跟着重新生成，导致 CI 里重新
+`generate` 出来的内容与提交的不一致，把 `build:templates --check` 冲红（同一类根因见
+下面 `robots.txt`/`sitemap.xml` 的说明）。缺这份文件直接跑 `vite`/`vite build`（绕开
+`pnpm run generate`）会在 `vite.config.ts` 里的检查插件那里得到一句好懂的报错，
+而不是 postcss 那句 `ENOENT`。
 
 `robots.txt` / `sitemap.xml` 由 `scripts/generate-seo.ts` 生成（`src/config/NAV.ts` 的
 `ALL_PAGES` → 两个文件），但**只在 `pnpm build` 里、`vite build` 之后**才跑，直接写进
