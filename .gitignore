@@ -25,3 +25,4 @@ playwright-report/
 
 # 本地需求笔记，不入库
 多租户SaaS 基座.txt
+scratch_*.json
