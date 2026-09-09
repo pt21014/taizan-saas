@@ -22,3 +22,6 @@ playwright-report/
 # @taizan/prisma-base 的 .env 只是 `prisma validate` 解析 env("DATABASE_URL") 用的占位值，
 # 不指向任何真实数据库，必须随仓库走，否则 CI 上 validate 直接失败。
 !packages/prisma-base/.env
+
+# 本地需求笔记，不入库
+多租户SaaS 基座.txt
