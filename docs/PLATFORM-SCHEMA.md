@@ -25,7 +25,7 @@
 | 索引 | 每张租户表必须有 `@@index([tenantId, id])`；软删表的唯一索引必须带 `deletedAt` | `packages/prisma-base/src/schema.spec.ts` |
 | 外键 | **一条 relation 都不建**（含不建指向 `Tenant` 的外键） | 同上（`allowRelations` 默认放行业务片段，框架片段为零） |
 
-为什么禁可空 `tenantId`：xiaodian 的 `MaterialFolder` 因为 `tenantId` 可空被移出隔离名单，
+为什么禁可空 `tenantId`：真实项目里出现过某张表因为 `tenantId` 可空被移出隔离名单，
 从此那张表就是个例外——而**例外是最容易在下一次重构里被忘掉的东西**。拆表多了 3 张表，
 换来隔离名单零例外。
 

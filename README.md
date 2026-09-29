@@ -1,13 +1,19 @@
 # taizan-saas
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/pt21014/taizan-saas/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/pt21014/taizan-saas/actions/workflows/ci.yml)
+[![Node](https://img.shields.io/badge/node-%3E%3D22-339933.svg)](package.json)
+
 **一套把多租户 SaaS 的「地基」做完的框架：新项目只写业务模块，隔离、计费、权限、支付、升级路径全都是既成事实。**
 
 形态是 **`create-taizan-saas` 生成器 + `@taizan/*` npm 包**。
 本仓库自带六个可运行的端，它们既是参考应用（证明各包装得起来），也是生成器模板。
 框架升级靠改版本号，不靠复制粘贴。
 
-设计细节见 [`docs/框架设计蓝图.md`](docs/框架设计蓝图.md)，任务拆解见 [`docs/任务分解.md`](docs/任务分解.md)，
-文档索引见 [`docs/README.md`](docs/README.md)。
+taizan-saas 以 **MIT 许可证**开源，作为长期维护的项目运行。欢迎提 issue 报告问题、讨论设计，
+也欢迎 PR——动手之前请先读 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+
+设计细节见 [`docs/框架设计蓝图.md`](docs/框架设计蓝图.md)，文档索引见 [`docs/README.md`](docs/README.md)。
 
 ---
 
@@ -23,6 +29,25 @@
 
 框架把这些做成**不变量 + 静态断言**：不是文档里的建议，是 CI 里会红的测试。
 完整清单见 [`docs/SECURITY-INVARIANTS.md`](docs/SECURITY-INVARIANTS.md)。
+
+---
+
+## 项目状态与路线图
+
+目前处于 **0.x 早期阶段**：可发布的 `@taizan/*` 包与 `create-taizan-saas` 版本均为 `0.1.0`，尚未发布到 npm。
+
+- **1.0 之前 API 可能有破坏性变更。** 每一次行为变更都通过 [Changesets](.changeset/README.md) 记录，
+  版本号纪律与发布流程见 [`docs/RELEASE.md`](docs/RELEASE.md)，业务项目升级步骤见 [`docs/UPGRADE.md`](docs/UPGRADE.md)。
+- 各能力的**安全不变量**已由 CI 断言，不属于「可能变」的范围：
+  变的是 API 形状，不是 [`docs/SECURITY-INVARIANTS.md`](docs/SECURITY-INVARIANTS.md) 里的约束。
+
+进行中：
+
+| 事项 | 位置 |
+| --- | --- |
+| 生成器 CLI | `tools/create-taizan-saas` |
+| 业务模块代码生成（plop 模板） | `tools/codegen` |
+| 官网 + 自助注册 | `apps/site` |
 
 ---
 
@@ -77,8 +102,8 @@
 | 目录 | 内容 |
 | --- | --- |
 | `tools/tsconfig` / `tools/eslint-config` / `tools/prettier-config` | 三个共享配置包 |
-| `tools/create-taizan-saas` | 生成器 CLI（T4-1，**进行中**） |
-| `tools/codegen` | plop 模板，`pnpm gen:module <name>` 一次生成业务模块七处（T4-1，**进行中**） |
+| `tools/create-taizan-saas` | 生成器 CLI（**进行中**） |
+| `tools/codegen` | plop 模板，`pnpm gen:module <name>` 一次生成业务模块七处（**进行中**） |
 | `scripts/gen-error-codes.mjs` | 从源码生成 `docs/ERROR-CODES.md`；`--check` 供 CI |
 | `scripts/check-peer-deps.ts` | 发布前闸门：断言零框架依赖包真的零框架依赖 |
 | `deploy/checks/*.sh` | 线上只读自检：隔离 / 计费 / 限流伪造 / health / cron 单实例 |
@@ -94,7 +119,7 @@
 pnpm install
 
 # 2) 起基础设施：MySQL(宿主 3307) + Redis(宿主 6380)
-#    端口刻意避开 3306/6379——这台机器上的老项目 compose 已经占了那两个
+#    端口刻意避开 MySQL/Redis 默认的 3306/6379，免得与本机已有服务冲突
 pnpm dev:infra
 
 # 3) 建表（第一次会生成 prisma/migrations/<时间戳>_init）
@@ -166,12 +191,12 @@ taizan-saas/
 ├─ packages/        26 个 @taizan/* 包（见「能力总览」）+ _smoke 工具链样板包
 ├─ tools/           三个共享配置包 + 生成器 + codegen
 ├─ deploy/          Docker / PM2 / nginx / 部署脚本 / 线上只读自检
-├─ docs/            蓝图、任务分解、契约与红线文档（见 docs/README.md）
-└─ scripts/         仓库级脚本（错误码生成、peer 依赖校验、changeset 检查）
+├─ docs/            蓝图、契约与红线文档（见 docs/README.md）
+└─ scripts/         仓库级脚本（错误码生成、peer 依赖校验、changeset 检查、包内 LICENSE 同步）
 ```
 
 `apps` 职责一句话：`api` 全部后端；`admin` 商家日常经营；`platform` 平台运营与收费；
-`client` C 端触达；`app-*` 原生壳与推送场景。官网 `apps/site` 尚未落地（**进行中**）。
+`client` C 端触达；`app-*` 原生壳与推送场景。官网 `apps/site` 仍在**进行中**。
 
 各端与各包都有自己的 README，讲的是**这个包怎么用、哪里容易踩**，与本文不重复。
 最值得先读的三份：[`apps/api/README.md`](apps/api/README.md)、
@@ -196,28 +221,6 @@ taizan-saas/
 
 ---
 
-## 与两个老项目的关系
-
-框架的来源是两个真实在跑的多租户 SaaS：
-
-- **knowledge**（知识付费 SaaS）—— 隔离决策函数、限流与 `resolveIps`、微信开放平台链路、
-  app-ui、8 条硬性约定的原文；
-- **xiaodian**（连锁门店 SaaS）—— 全局默认拒绝守卫、env zod 校验、密钥轮换、
-  租户开通事务、微信支付服务商模式、审计表结构。
-
-关系只有一条：**只作来源，不回迁。**
-
-两个老项目继续按自己的节奏跑，不会改成依赖 `@taizan/*`——回迁的成本（每个包一次
-adapter + 一轮回归）远高于收益，而且会把框架的演进绑在两个存量项目的排期上。
-框架从它们那里拿走的是**代码与踩坑史**：`docs/SECURITY-INVARIANTS.md` 里每一条
-「为什么」都是那两个项目上真实发生过的事，`docs/多租户SaaS基座-抽取评估报告.md`
-记录了逐个模块「搬 / 改 / 新写」的判断。
-
-新 SaaS 项目从 `pnpm create taizan-saas` 开始，不从复制 knowledge 开始——
-这是整个框架存在的理由。
-
----
-
 ## 工具链
 
 pnpm workspace + turbo 2.x + TypeScript 5.7+ + vitest 3.x + ESLint 9（flat config）+
@@ -229,3 +232,18 @@ Changesets。Node ≥ 22。
 
 国内网络下 `pnpm install` 慢的话，在 `.npmrc` 加 `registry=https://registry.npmmirror.com`。
 本仓库默认保持官方源；`npm publish` 固定走官方源，与 install 的镜像无关。
+
+---
+
+## 参与贡献
+
+开发环境、提交前必跑的检查、何时需要 changeset、改动安全相关代码的额外要求，
+都在 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+
+## 安全问题
+
+发现安全漏洞**不要开公开 issue**，按 [`SECURITY.md`](SECURITY.md) 走 GitHub 私密漏洞报告。
+
+## 许可证
+
+[MIT](LICENSE)

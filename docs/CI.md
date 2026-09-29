@@ -429,7 +429,7 @@ config 里那层改写照样生效，写出来只是为了让日志里一眼看�
 
 编号外还有三条同样跑在 `test/arch/` 里的约束，登记在 `index.spec.ts` 的 `EXTRA_SPECS`：
 `guard-order.spec.ts`（守卫链顺序，蓝图 §4.3）、`plan-order-fulfill.spec.ts`（T1-5：把钱变成权益
-的代码只能有一份）与 `response-shape.spec.ts`（蓝图 §9「knowledge CLAUDE.md 8 条不变量」第 8 条
+的代码只能有一份）与 `response-shape.spec.ts`（蓝图 §9「8 条核心不变量」第 8 条
 点名的「统一响应包」spec：控制器不许 `res.json(`/`res.send(` 绕过信封、`BizException` 首参不许
 是裸数字字面量——不在 §8 的 16 条编号内，见 `docs/SECURITY-INVARIANTS.md` K8）。
 新增任何 `test/arch/*.spec.ts` 都必须登记进这两张表之一，否则
@@ -518,7 +518,7 @@ pnpm acceptance     # 蓝图 §6 的 9 条，全绿才算可交付
 | ⑨ | 续期 | Fake 回调（HMAC 签名，`/api/public/pay/wechat/notify`）→ 租户 `planExpireAt` 推到未来、后台恢复可写、`AuditLog` 一条 `plan-order.fulfill`；**重复推送不重复兑现** |
 
 ⑧ 的三段缺一不可。只断言「到期后写不了」而不断言「续费路径仍然可写」，守不住
-「到期 → 只读 → 续不了费 → 永远到期」那个死循环（knowledge 上真出过）。
+「到期 → 只读 → 续不了费 → 永远到期」那个死循环（真实生产环境出过）。
 
 ### 与 `pnpm create:demo`（T4-1）的分工
 

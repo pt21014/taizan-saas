@@ -385,7 +385,7 @@ pnpm -F @taizan/admin test                # component-map 对账
 
 - 开发环境发现不了：本地只有一个租户，全平台 = 这个租户。
 - 测试也发现不了：除非你专门造两个租户交叉验证（`apps/api/test/tenant-isolation.e2e-spec.ts` 就是干这个的）。
-- 这是 xiaodian 2026-08 的真实事故形态。
+- 这是真实发生过的事故形态。
 
 **谁拦**：`apps/api/test/arch/tenant-models.spec.ts` 扫全部 `prisma/schema/**/*.prisma`，
 带 `tenantId` 的 model 不在清单里就红；反向（清单里有、schema 里没这列）也红。
