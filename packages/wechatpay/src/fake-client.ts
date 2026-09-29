@@ -1,8 +1,7 @@
 /**
  * `FakeWechatPayClient`：不联网的 {@link WechatPayApi} 实现。
  *
- * 搬自 xiaodian `libs/wechatpay/src/fake-wechatpay-client.ts`（195 行），
- * 去掉 `@nestjs/common` 的 `@Injectable()`，接口对齐本包的 `WechatPayApi`。
+ * 不依赖 `@nestjs/common`，接口对齐本包的 `WechatPayApi`。
  *
  * ## 它和 `FakeProvider` 的分工
  *

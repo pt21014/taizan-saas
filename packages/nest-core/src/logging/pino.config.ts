@@ -17,7 +17,7 @@ export interface PinoFactoryOptions {
  *
  * 两个关键点：
  * 1. **traceId 从 {@link currentContext} 取**，用 `mixin` 挂在每一行上。
- *    老项目断的就是这一环：pino-http 自己生成了一个 reqId，业务代码里手打的日志
+ *    最容易断的就是这一环：pino-http 自己生成了一个 reqId，业务代码里手打的日志
  *    又没有任何 id，同一次请求的两行日志在 grep 里对不上。
  * 2. **脱敏走 `formatters.log`** 而不是 pino 的 `redact` 选项，原因见 `redact.ts` 顶部注释。
  */

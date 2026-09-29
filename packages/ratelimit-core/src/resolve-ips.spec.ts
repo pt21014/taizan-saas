@@ -44,7 +44,7 @@ describe('resolveIps 正常链路', () => {
 })
 
 describe('resolveIps 伪造 XFF —— 不变量 6 的正面战场', () => {
-  // knowledge CLAUDE.md 第 6 条：「实测过：伪造后限流 key 直接变成伪造值，限流形同虚设」
+  // 蓝图 §9 核心不变量第 6 条：「实测过：伪造后限流 key 直接变成伪造值，限流形同虚设」
   it('攻击者自带一段伪造 IP，client 不被带偏', () => {
     const r = at(`9.9.9.9, ${REAL_CLIENT}, ${EDGE}`)
     expect(r.client).not.toBe('9.9.9.9')

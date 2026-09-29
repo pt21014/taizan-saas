@@ -1,7 +1,7 @@
 /**
  * `LockService`：Redis 分布式锁（蓝图 §4.7）。
  *
- * 这是「4 实例并发跑 cron」那条线上活故障的根治点。老项目 knowledge 的
+ * 这是「4 实例并发跑 cron」这类线上故障的根治点。典型场景：
  * `order-close.service.ts` / `profit-sharing.service.ts` 用的是裸 `setInterval`，
  * pm2 cluster 起 4 个进程之后，同一笔订单被关了 4 次、同一笔分账被发起了 4 次。
  * 那不是「多跑几遍浪费点 CPU」，是**重复的对外副作用**。

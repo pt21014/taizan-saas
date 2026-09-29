@@ -18,7 +18,7 @@
  * ## 无上下文一律抛，绝不放行
  *
  * `getTenantId()` 取不到就传空串给决策函数，由它抛 `NO_CONTEXT`。执行层**不能**
- * 自己写 `if (!tenantId) return query(args)`——那正是老项目 xiaodian 的洞：没登录 /
+ * 自己写 `if (!tenantId) return query(args)`——那是典型的隔离漏洞：没登录 /
  * 没解析出租户时退化成查全表。
  *
  * ## 叠加顺序

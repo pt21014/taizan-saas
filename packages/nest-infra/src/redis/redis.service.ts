@@ -1,7 +1,7 @@
 /**
  * `RedisService`：ioredis 的薄封装 + `redis` 健康探针。
  *
- * 薄到什么程度：**不做降级、不做重试、不吞异常**。老项目（knowledge）那份
+ * 薄到什么程度：**不做降级、不做重试、不吞异常**。一种常见做法是让
  * `RedisService` 在连不上时静默退回进程内存，理由是「本地开发也要能跑」——
  * 那个决定的代价是：线上 Redis 抖一下，限流额度立刻变成「额度 × 进程数」，
  * 分布式锁变成「每个进程都是 leader」，而日志里只有一行 warn。
@@ -10,7 +10,7 @@
  * 把这台实例摘出去。要在没有 Redis 的机器上开发，就传一个 `ioredis-mock`
  * 进来（`InfraModule.forRoot({ redis })`），而不是让生产代码里长一条降级分支。
  *
- * 从老项目原样搬过来的只有一个方法：{@link RedisService.takeOnce}（`GETDEL`）。
+ * 除基础读写外，只额外提供一个原子方法：{@link RedisService.takeOnce}（`GETDEL`）。
  *
  * @packageDocumentation
  */
@@ -119,8 +119,7 @@ export class RedisService {
   /**
    * 取一次就删（`GETDEL`）。**一次性凭据必须用这个**。
    *
-   * 从 knowledge `apps/api/src/infra/redis.service.ts` 原样搬过来的理由也一并搬：
-   * 先 `GET` 再 `DEL` 的话，两个进程可能同时 `GET` 到同一个 state 都判为有效，
+   * 为什么必须原子：先 `GET` 再 `DEL` 的话，两个进程可能同时 `GET` 到同一个 state 都判为有效，
    * 而 state 的全部意义就在于只能用一次。蓝图 §8 第 12 条把这条写成了机器可扫的约束。
    */
   async takeOnce(logicalKey: string): Promise<string | null> {

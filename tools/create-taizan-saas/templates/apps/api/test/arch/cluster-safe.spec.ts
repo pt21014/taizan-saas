@@ -1,8 +1,8 @@
 /**
  * 蓝图 §8 **spec 12**：集群安全静态扫描。
  *
- * 守的是 knowledge 那条线上活故障：pm2 cluster 起 4 个进程之后，
- * `order-close.service.ts` / `profit-sharing.service.ts` 里的裸 `setInterval`
+ * 守的是一类真实发生过的线上故障：pm2 cluster 起 4 个进程之后，
+ * 关单、分账服务里的裸 `setInterval`
  * 变成了「同一笔订单被关 4 次、同一笔分账被发起 4 次」。那不是「浪费点 CPU」，
  * 是**重复的对外副作用**——钱真的多付了。
  *

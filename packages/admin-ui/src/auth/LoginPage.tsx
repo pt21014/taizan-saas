@@ -36,7 +36,7 @@ export interface LoginPageProps {
 }
 
 /**
- * 账密登录页（蓝图 §5.2，形状搬自 xiaodian 的登录页 + `BrandChooserPage`）。
+ * 账密登录页（蓝图 §5.2）。
  *
  * 名下多店时 `login()` 会返回一份选店列表而不是 token，这里原地切到 `<ShopChooserPage>`，
  * 选中后带着 `tenantId` 再调一次 `login()`——后端只有一个 `/auth/login` 接口，

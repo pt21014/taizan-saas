@@ -4,7 +4,7 @@ import { Dropdown, Space } from 'antd'
 import { useSession } from '../session'
 
 /**
- * 顶栏店铺切换器（蓝图 §5.2，形状搬自 knowledge 的 `ShopSwitcher.tsx`）。
+ * 顶栏店铺切换器（蓝图 §5.2）。
  *
  * 一号多店场景下 token 一次只绑一家店，切店必须向服务端换一张新 token——
  * `switchTenant()` 换完之后**整页重载**，理由见 `session/store.ts`：各页面组件状态里

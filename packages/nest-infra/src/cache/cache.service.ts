@@ -68,7 +68,7 @@ export class CacheService {
    * 微信网页授权 state、短信验证码、一次性登录票据。
    *
    * 先 `get` 再 `del` 的写法在多进程下会让同一个 state 被两个进程都判为有效，
-   * 而 state 的全部意义就在于只能用一次（knowledge 不变量 7）。
+   * 而 state 的全部意义就在于只能用一次（蓝图 §9 核心不变量第 7 条）。
    */
   async takeOnce<T>(ns: string, key: string): Promise<T | null> {
     const raw = await this.redis.takeOnce(this.keyOf(ns, key))

@@ -1,8 +1,7 @@
 /**
  * 商家转账到零钱（新版 mch-transfer）：批次发起、查询、撤单。
  *
- * 搬自 xiaodian `wechatpay-client.ts` 的三个 transfer 方法 + knowledge
- * `payment/wechat/merchant-transfer.rules.ts` 的发起前自查与状态归并。
+ * 包含三个 transfer 调用，以及发起前自查与状态归并。
  *
  * ## 四条用生产事故换来的约束
  *

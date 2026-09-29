@@ -41,7 +41,7 @@ describe('createTenantExtension', () => {
     const { tenant, controls } = setup(undefined)
 
     await expectScopeError(modelOf(tenant, 'goods').findMany(), 'NO_CONTEXT')
-    // 关键断言：没有任何查询真的发出去。老项目那版是 `return query(args)` 放行。
+    // 关键断言：没有任何查询真的发出去。反面写法是 `return query(args)` 放行。
     expect(controls.calls).toHaveLength(0)
   })
 

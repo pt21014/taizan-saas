@@ -53,7 +53,7 @@ function variant(fontSize: number, weight: FontWeightKey, leading: LineHeightKey
   }
 }
 
-/** 常用文本层级，键名与用法对齐 knowledge 的 `type.*`，值全部来自 token 换算。 */
+/** 常用文本层级，按用途命名，值全部来自 token 换算。 */
 export const textVariants = {
   display: variant(typography.fontSize.xxl, 'bold', 'tight'),
   title: variant(typography.fontSize.xl, 'bold', 'tight'),

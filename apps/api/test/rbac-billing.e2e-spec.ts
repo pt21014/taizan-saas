@@ -890,7 +890,7 @@ describe('⑤ BILLING_ENFORCE=false（灰度期：算而不拦）', () => {
       .send({ name: `冻结的店在灰度期也不该能写 ${RUN}`, priceCents: 100 })
     expect(
       codeOf(res.body),
-      '把 BILLING_ENFORCE 关掉排查问题时，所有被封的违规店一起恢复营业——那是 knowledge 踩过的坑。',
+      '把 BILLING_ENFORCE 关掉排查问题时，所有被封的违规店一起恢复营业——这个坑在真实生产环境中踩过。',
     ).toBe(1440301)
   })
 })

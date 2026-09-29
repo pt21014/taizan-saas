@@ -6,7 +6,7 @@
  * {@link HttpClient}、{@link TokenCache}、{@link TicketStore}、{@link OneTimeStore}，
  * 包内自带内存实现（单机与单测够用），生产实现由 app 侧用 `@taizan/nest-infra` 适配。
  *
- * knowledge `CLAUDE.md` 第 7 条（本包的存在理由）：
+ * 蓝图 §9 核心不变量第 7 条（本包的存在理由）：
  *
  * > **微信网页授权的 state 必须服务端签发 + 回调核销**（随机 32 字节、5 分钟 TTL、
  * > 一次性、绑定租户），前端另存一份做本地比对。少了这层校验，攻击者用自己账号的 code

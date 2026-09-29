@@ -1,7 +1,7 @@
 /**
  * 集群安全静态扫描（蓝图 §8 第 12 条）。
  *
- * 守的是 knowledge 那条线上活故障：pm2 cluster 起 4 个进程之后，
+ * 守的是一类典型的线上故障：pm2 cluster 起 4 个进程之后，
  * `order-close.service.ts` / `profit-sharing.service.ts` 里的裸 `setInterval`
  * 变成了「同一笔订单被关 4 次、同一笔分账被发起 4 次」。
  *
@@ -114,7 +114,7 @@ export function scanClusterSafety(
           rule: 'timer',
           code,
           message:
-            '裸 setInterval / setTimeout 在多实例下会每个进程各跑一份（knowledge 线上活故障）。' +
+            '裸 setInterval / setTimeout 在多实例下会每个进程各跑一份（会造成重复的对外副作用）。' +
             '定时任务请用 @LeaderCron；确实只是一次性延时/超时，请在上一行加 ' +
             `// ${ALLOW_MARKER} <理由>`,
         })

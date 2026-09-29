@@ -48,7 +48,7 @@ export interface TenantResolverStrategy {
  *
  * - `/api/public/*`：自助注册、找回密码、扫码进店前的落地页——**这时候店铺还不存在**，
  *   或者请求方压根还没选店。中间件失败关闭会把注册页变成 404，
- *   而那正是 knowledge 上真实发生过的事故（蓝图 spec 16 的守护对象）。
+ *   而那正是生产上真实发生过的事故（蓝图 spec 16 的守护对象）。
  * - `/api/platform/*`：平台超管天然跨租户，给它解析一个 tenantId 反而会让
  *   `prisma.tenant` 悄悄把查询限制在某一家店，平台后台会看到「数据不见了」。
  *

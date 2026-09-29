@@ -1,6 +1,6 @@
 /**
  * baseURL 与（H5 子域名解析用的）底域，一律来自 env，禁止在代码里写死域名——
- * 反面教材见 knowledge `apps/client/src/api/request.ts` 的 `apiknow.taizan.vip`。
+ * 反面教材是在 request 函数里硬编码 `api.example.com` 这类线上域名。
  *
  * `TARO_APP_` 前缀的变量由 Taro 在构建期注入到 `process.env`（H5/小程序都生效），
  * 实际值在 `.env`/`.env.development`/`.env.production`（或部署时的环境变量）里配置，

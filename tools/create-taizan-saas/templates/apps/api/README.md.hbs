@@ -19,7 +19,7 @@
 pnpm install
 
 # 1) 起 MySQL(3307) + Redis(6380)
-#    端口刻意避开 3306/6379——这台机器上的老项目 compose 已经占了那两个
+#    端口刻意避开 MySQL/Redis 默认的 3306/6379，免得与本机已有服务冲突
 pnpm dev:infra
 
 # 2) 建表（第一次会生成 prisma/migrations/<时间戳>_init）

@@ -126,7 +126,7 @@ await this.prisma.tenant.{{domainSlug}}.findMany({ where: { tenantId, status } }
 每处必须在 `src/tenancy/raw-reasons.ts` 登记**且**在用点写 `// raw-reason: <理由>`，缺一个就红。
 
 新增带 `tenantId` 的表必须同步进 `src/tenancy/tenant-models.ts` 的 `registry.register([...])`。
-**漏登记 = 那张表完全没有隔离，而且不报错**（这是 xiaodian 2026-08 的真实事故形态：
+**漏登记 = 那张表完全没有隔离，而且不报错**（这是真实发生过的事故形态：
 开发环境只有一个租户，全平台就等于这个租户，所以本地永远发现不了）。
 有 `deletedAt` 的表还要进 `SOFT_DELETE_MODELS`——漏了 `delete()` 会**真的物理删掉行**。
 
@@ -219,7 +219,7 @@ await this.prisma.tenant.{{domainSlug}}.findMany({ where: { tenantId, status } }
 响应一律 `{ code, message, data }`，`code=0` 成功。
 **业务错误 = HTTP 200 + 业务码**（抛 `BizException`），传输层错误（401/403/404/429/500）
 走 `HttpException` 并同样包成信封。逃生口是 `@RawResponse()`（支付回调、文件下载），
-**不是硬编码路径前缀**——knowledge 试过按前缀判断，支付回调换了个前缀之后返回值被包成信封，
+**不是硬编码路径前缀**——有项目试过按前缀判断，支付回调换了个前缀之后返回值被包成信封，
 微信收到非 `SUCCESS` 于是重推了 8 小时。
 
 错误码 7 位 `DD HHH NN` = 域段 2 位 + HTTP 语义 3 位 + 序号 2 位。
@@ -234,7 +234,7 @@ await this.prisma.tenant.{{domainSlug}}.findMany({ where: { tenantId, status } }
 ### 9. 建租户只有一条路
 
 平台后台开通与自助注册**调同一个** `@taizan/provision` 的编排函数，
-控制器里不许再拼一遍那个事务。两条路一定会漂——xiaodian 的表现是：
+控制器里不许再拼一遍那个事务。两条路一定会漂——真实出过的表现是：
 自助注册建出来的租户**没有 owner 角色**，商家登录进去一个菜单都看不到。
 
 ⛔ spec：`apps/api/test/arch/provision-single-path.spec.ts`；框架包
@@ -296,7 +296,7 @@ await this.prisma.tenant.{{domainSlug}}.findMany({ where: { tenantId, status } }
 ### 14. cron 必须 `@LeaderCron`
 
 禁止裸 `@Cron`、禁止 `setInterval`。生产是多实例（PM2 cluster / 多容器），
-裸 cron 的表现是**同一件事被做 N 遍**——knowledge 的线上活故障就是到期提醒
+裸 cron 的表现是**同一件事被做 N 遍**——真实的线上故障就是到期提醒
 给同一个商家发了 4 条短信。`setInterval` 更糟：它连 `CronRun` 表里都不留痕，
 只能靠商家投诉发现。
 

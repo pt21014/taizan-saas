@@ -24,7 +24,7 @@
  *
  * ## 与反面教材的对照
  *
- * 老项目 xiaodian 的 `tenant.extension.ts` 有三个洞，本文件逐条堵死，并在
+ * 朴素的租户扩展实现常见三个洞，本文件逐条堵死，并在
  * `plan.spec.ts` 里逐条留了证明用例：
  *
  * - **无上下文即放行**（`if (!ctx?.tenantId || !MODELS.has(model)) return query(args)`）：
@@ -169,7 +169,7 @@ interface Locator {
  * 拒绝调用方自带的、与当前租户不一致的归属声明。
  *
  * 两种绕过方式都堵：标量 `tenantId`（写成别人的 id），以及关系写 `tenant: { connect }`
- * ——后者正是 xiaodian 那版扩展「检测到就跳过注入」的洞。
+ * ——后者对应朴素实现里「检测到就跳过注入」的洞。
  */
 function assertOwnershipNotOverridden(
   payload: Record<string, unknown>,

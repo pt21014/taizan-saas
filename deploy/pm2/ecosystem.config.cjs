@@ -3,8 +3,8 @@
  *
  * ── 为什么 cluster 模式在这个框架里是安全的 ──────────────────────────────────
  *
- * 老项目（xiaodian）的 ecosystem 配置写死 `exec_mode: 'fork'`，注释直接说明
- * 「如需多核可改 cluster，但注意 cron 重复触发」——那是因为它的定时任务用的是
+ * 常见的 ecosystem 配置会写死 `exec_mode: 'fork'`，并附一句
+ * 「如需多核可改 cluster，但注意 cron 重复触发」——那是因为定时任务用的是
  * `@nestjs/schedule` 的 `@Cron`，这类任务绑在**进程自己的内存定时器**上，
  * cluster 开 4 个实例就是 4 份定时器，同一个任务一次 tick 跑 4 遍
  * （重复发通知、重复扣费、重复生成账单，都是真实事故）。
@@ -105,7 +105,7 @@ module.exports = {
       ...common,
       name: 'taizan-api',
       // 'max' = 按 CPU 核数起对应数量的实例。也可以写具体数字（例如线上机器还跑着
-      // 别的站点、要给别人留 CPU 时）——机器上跑法可参考 knowledge 的经验：
+      // 别的站点、要给别人留 CPU 时）——可参考一组生产实测数据：
       // 4 实例约 2500 req/s，单实例常驻内存约 140MB，按这个数量级估算要留多少给别的站。
       instances: process.env.PM2_INSTANCES || 'max',
       env: {

@@ -1,13 +1,12 @@
 /**
  * 微信支付 V3 的签名与验签。纯函数，只用 `node:crypto`。
  *
- * 两个方向别搞混（搬自 knowledge `payment/wechat/v3-sign.ts` 的开篇注释）：
+ * 两个方向别搞混：
  * - **我们发出去的请求**：用商户私钥签，微信用我们上传的商户证书验；
  * - **微信回给我们的应答与回调**：用微信支付公钥（或平台证书）验，证明确实是微信发的。
  *
- * 本文件是 xiaodian `libs/wechatpay/src/sign.ts` 与 knowledge `v3-sign.ts` 的合并：
- * 前者贡献「平台证书 / 微信支付公钥双模式选 PEM」（`selectVerifyPem`），
- * 后者贡献「按官方文档逐字节比对的待签名串构造」（`buildSignMessage`）与时间戳新鲜度检查。
+ * 本文件提供两块能力：「平台证书 / 微信支付公钥双模式选 PEM」（`selectVerifyPem`），
+ * 以及「按官方文档逐字节比对的待签名串构造」（`buildSignMessage`）与时间戳新鲜度检查。
  */
 import {
   X509Certificate,
@@ -123,7 +122,7 @@ export function buildAuthorization(input: {
 }
 
 /**
- * 按响应/回调头里的 `Wechatpay-Serial` 选出验签用的 PEM（搬自 xiaodian `sign.ts`）：
+ * 按响应/回调头里的 `Wechatpay-Serial` 选出验签用的 PEM：
  * - 等于公钥 ID（`PUB_KEY_ID_...`）→ 用微信支付公钥（新版）
  * - 等于平台证书序列号 → 用平台证书（旧版，兼容）
  * - 都不匹配 → 返回 `null`，调用方必须当成验签失败
@@ -156,7 +155,7 @@ export function selectVerifyPem(opts: {
  *
  * 待验签串是 `时间戳\n随机串\n报文主体\n`，用微信支付公钥（或平台证书）验
  * `Wechatpay-Signature`。**这一步不能省**：只解密不验签的话，任何拿到 APIv3 密钥的一方
- * 都能伪造回调；而验签能证明报文确实由微信私钥签发（这段话搬自 knowledge `v3-sign.ts`）。
+ * 都能伪造回调；而验签能证明报文确实由微信私钥签发。
  *
  * 支持两种模式：把 `credentials` 整个传进来，函数按 `serial` 自己选 PEM。
  *

@@ -4,12 +4,12 @@
 # 它回答的问题只有一个：
 #   「攻击者每次换一个 X-Forwarded-For 前缀，还能不能无限次地打我们的登录接口。」
 #
-# 这不是假想的攻击。knowledge 线上真的被这么绕过去过（CLAUDE.md 第 6 条）：
+# 这不是假想的攻击，真实生产环境中被这么绕过去过（蓝图 §9 核心不变量第 6 条）：
 #
-#   链路是 客户端 → EdgeOne → nginx → Node，nginx 用 $proxy_add_x_forwarded_for 追加，
+#   典型链路是 客户端 → CDN → nginx → Node，nginx 用 $proxy_add_x_forwarded_for 追加，
 #   所以 XFF 开头几段是客户端自己写的、可任意伪造（实测过：伪造后限流 key 直接变成
 #   伪造值，限流形同虚设）。可信的只有末尾由基础设施追加的段，段数由 TRUSTED_PROXY_HOPS
-#   控制（当前 2）。
+#   控制（上面这条链路为 2）。
 #
 # 单测能证明 resolveIps 这个函数是对的，但证明不了**线上这条链路**是对的：
 # nginx 的反代配置漏了 X-Forwarded-For、CDN 换了一层、TRUSTED_PROXY_HOPS 配错了一位数，

@@ -1,9 +1,8 @@
 /**
  * 微信支付回调：验签 → AES-256-GCM 解密 → 归一化成 `@taizan/payment-core` 的事件。
  *
- * 搬自 xiaodian `libs/wechatpay/src/wechatpay-callback.ts`（双模式验签 + 直连/服务商
- * `openid` / `sub_openid` 兼容）与 knowledge `v3-sign.ts` 的 `decryptResource`，
- * 归一化输出换成蓝图 §4.12 的 `CallbackEvent` / `RefundEvent`。
+ * 支持平台证书 / 微信支付公钥双模式验签，兼容直连 `openid` 与服务商 `sub_openid`，
+ * 归一化输出为蓝图 §4.12 的 `CallbackEvent` / `RefundEvent`。
  *
  * ## 三道关卡，一道都不能省
  *

@@ -27,7 +27,7 @@ const appendix = `
 # 本地 compose（deploy/docker/docker-compose.dev.yml）对应的取值：
 #   DATABASE_URL=mysql://taizan:taizan_dev@127.0.0.1:3307/taizan_dev
 #   REDIS_URL=redis://127.0.0.1:6380/0
-# 端口刻意避开 3306/6379：这台机器上的老项目 compose 已经占了那两个。
+# 端口刻意避开 MySQL/Redis 默认的 3306/6379，免得与本机已有服务冲突。
 #
 # 三把 JWT 密钥各自 >=32 位且必须互不相同（loadEnv 的跨字段校验会拦）：
 #   openssl rand -base64 48

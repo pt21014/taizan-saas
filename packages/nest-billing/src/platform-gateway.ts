@@ -1,10 +1,11 @@
 /**
  * `PlatformGateway`：业务侧问「这家店能不能干这件事」的**唯一入口**。
  *
- * 接口形状来自《多租户SaaS基座-抽取评估报告》里的三方法思路（`getTenant` / `hasFeature`
- * / `checkQuota`），本包按实际用法补了 `consumeQuota` / `releaseQuota` / `invalidate`。
+ * 接口形状以三个读方法为核心（`getTenant` / `hasFeature` / `checkQuota`），
+ * 本包按实际用法补了 `consumeQuota` / `releaseQuota` / `invalidate`。
  * 之所以要有这么一层接口而不是让守卫直接查库：将来平台侧若从「同库同进程」平移成
- * 独立控制面服务（评估报告的方案 B），需要替换的就只有这一个实现类。
+ * 独立的控制面服务（租户、套餐、配额由单独的平台服务托管，业务服务经 RPC/HTTP 查询），
+ * 需要替换的就只有这一个实现类，守卫与业务代码都不用动。
  *
  * ## 本文件不做任何判定
  *
@@ -154,8 +155,7 @@ interface CounterRow {
  *
  * 形状坏了一律当 **`null`（全部可用）**，而不是 `[]`（一个都没有）——
  * 坏数据的代价必须落在平台身上（少收点钱），不能落在商家身上
- * （整个后台突然全变灰，而商家什么都没做）。knowledge 的 `normalizePlanFeatures`
- * 也是这么取舍的。
+ * （整个后台突然全变灰，而商家什么都没做）。
  */
 export function normalizeFeatures(raw: unknown): string[] | null {
   if (!Array.isArray(raw)) return null

@@ -41,7 +41,7 @@ function makeService(quotas: Record<string, number | null>): {
 describe('QuotaService 从上下文取租户', () => {
   it('压根没有请求上下文时抛错，而不是静默不限量', async () => {
     const { service } = makeService({ STAFF: 0 })
-    // knowledge 的老实现在这里是 `if (!tenantId) return`——队列 job 里配额就此彻底失效。
+    // 反面写法是 `if (!tenantId) return`——队列 job 里配额就此彻底失效。
     await expect(service.consume('STAFF')).rejects.toThrow(MissingRequestContextError)
   })
 

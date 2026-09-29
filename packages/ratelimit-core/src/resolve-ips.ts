@@ -1,7 +1,7 @@
 /**
  * 从 `X-Forwarded-For` 里解析出**可信的**客户端 IP 与入口 IP。
  *
- * ## 这条不变量的完整原文（knowledge `CLAUDE.md` 第 6 条，一字不改地抄在这里）
+ * ## 这条不变量的完整表述（蓝图 §9 核心不变量第 6 条，「为什么」见 `docs/SECURITY-INVARIANTS.md`）
  *
  * > **取客户端 IP 只能用 `RateLimitService.resolveIps`，绝不能取 `X-Forwarded-For` 的第一段**。
  * > 链路是 客户端 → EdgeOne → nginx → Node，nginx 用 `$proxy_add_x_forwarded_for` 追加，

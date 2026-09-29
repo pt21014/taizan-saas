@@ -11,7 +11,7 @@
  * 照旧走授权接入 / 自填凭据——界面上要把这句话说出来（见 `canIssueAccessToken`）。
  *
  * 接口形状取自 `wx-relay-login` skill（拿真 client_id 实测，不是照文档猜的），
- * 错误码与文案搬自 knowledge `infra/wechat-relay/relay.rules.ts`。
+ * 错误码与文案经过生产验证。
  *
  * ## 服务端会话签发的安全规则（五条，每条对应一个真实事故面）
  *

@@ -18,7 +18,7 @@ pnpm -F @taizan/client dev:weapp
 ## baseURL 从哪来
 
 `src/config.ts` 读取 `process.env.TARO_APP_API_BASE`；本仓库**不在代码里写死任何域名**
-（反面教材见 knowledge `apps/client/src/api/request.ts` 硬编码的 `apiknow.taizan.vip`）。
+（反面教材是在 request 函数里硬编码 `api.example.com` 这类线上域名）。
 需要联到某个环境时，在对应的 `.env.development` / `.env.production`（或部署环境变量）里设置：
 
 ```

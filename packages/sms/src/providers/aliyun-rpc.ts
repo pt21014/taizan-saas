@@ -1,7 +1,6 @@
 /**
  * 阿里云 RPC 风格签名（HMAC-SHA1）+ `SendSms` provider。
  *
- * 签名部分照搬自 `D:\project\knowledge\apps\api\src\infra\sms\sign.ts`。
  * 与 TC3 完全不同的算法，别照抄：参数排序拼串，HMAC-SHA1，且百分号编码有
  * 三处特例。
  */

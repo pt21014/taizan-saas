@@ -226,7 +226,7 @@ describe('createFetchHttpClient', () => {
 })
 
 describe('分账', () => {
-  it('抽佣向下取整、30% 封顶（搬自 knowledge profit-sharing.rules）', () => {
+  it('抽佣向下取整、30% 封顶', () => {
     expect(calcCommissionCents(999, 1000)).toBe(99)
     expect(calcCommissionCents(10_000, 9999)).toBe(3000)
   })

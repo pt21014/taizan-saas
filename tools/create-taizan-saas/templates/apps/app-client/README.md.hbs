@@ -4,7 +4,7 @@ C 端会员 App（Expo + expo-router），对应蓝图 §5.4 / 任务 T3-7。装
 
 ## 版本选择
 
-与来源仓库 knowledge（`apps/app-student`）保持一致，选用 **Expo SDK 57**：`expo ~57.0.19`、`react 19.2.3`、`react-native 0.86.3`、`expo-router ~57.0.19`（Expo 从 SDK 57 起把配套包版本号与 SDK 号统一，`expo-router`/`expo-constants`/`expo-updates` 等包版本号直接对齐 `57.x`）。没有另选「最新 SDK」——57 就是写这份代码时的最新稳定版。
+选用 **Expo SDK 57**：`expo ~57.0.19`、`react 19.2.3`、`react-native 0.86.3`、`expo-router ~57.0.19`（Expo 从 SDK 57 起把配套包版本号与 SDK 号统一，`expo-router`/`expo-constants`/`expo-updates` 等包版本号直接对齐 `57.x`）。没有另选「最新 SDK」——57 就是写这份代码时的最新稳定版。
 
 ## 本地开发
 
@@ -17,7 +17,7 @@ pnpm -F {{scope}}/app-client start  # 启动 Metro，二维码用 Expo Go 扫
 
 ## baseURL / 租户 slug 配置
 
-`src/api.ts` 按下面优先级取值，**不写死任何域名做兜底**（knowledge 的 `apps/app-student` 把 `https://apiknow.{{projectSlug}}.vip/api` 焊进代码当 fallback，换环境要改代码重发版，是本项目要避免的反面教材）：
+`src/api.ts` 按下面优先级取值，**不写死任何域名做兜底**（把 `https://api.{{rootDomain}}/api` 这类线上域名焊进代码当 fallback，换环境就要改代码重发版，是本项目要避免的反面教材）：
 
 1. 环境变量 `EXPO_PUBLIC_API_BASE` / `EXPO_PUBLIC_TENANT_SLUG`（Expo 会在打包时把 `EXPO_PUBLIC_*` 内联进产物，适合按 EAS Build profile 覆盖）；
 2. 其次是 `app.json` 里 `expo.extra.apiBase` / `expo.extra.tenantSlug`（当前示例值指向本机 `http://localhost:3000/api`，`tenantSlug: "demo"`，联调前请改成真实值）。

@@ -1,5 +1,5 @@
 /**
- * 蓝图 §9「knowledge `CLAUDE.md` 8 条不变量」第 8 条点名的「统一响应包」spec。
+ * 蓝图 §9「8 条核心不变量」第 8 条点名的「统一响应包」spec。
  *
  * `docs/SECURITY-INVARIANTS.md` 第 6 节的待补清单第 3 条一直写着「蓝图点名的那个文件名
  * 从未落地」——这份文件补上它。两条静态断言，都是「正则/AST 都不跑，只看字符串结构」的
@@ -15,7 +15,7 @@
  *   走这条）；
  * - 文件在 {@link FILE_WHITELIST} 里——目前只有 `packages/nest-payment/src/notify.controller.ts`
  *   一条：支付回调读的是应答报文顶层字段，套上信封微信会读到顶层 `code` 是数字 `0`，
- *   判定失败后持续重投（knowledge 真实事故：重推了 8 小时）。该文件实际上通过
+ *   判定失败后持续重投（真实生产事故：重推了 8 小时）。该文件实际上通过
  *   `@RawResponse()` + `res.status(...)`（不调 `.json`/`.send`）已经合规，白名单只是
  *   按任务要求把「这份文件例外」的理由写成一等公民，而不是让人看代码猜。
  *
@@ -127,7 +127,7 @@ const FILE_WHITELIST: readonly { file: string; reason: string }[] = [
     file: 'packages/nest-payment/src/notify.controller.ts',
     reason:
       '统一支付回调控制器（蓝图 §4.12）：微信等渠道读应答报文顶层字段，套上信封后顶层 code ' +
-      '会变成数字 0，渠道判定失败并持续重投——knowledge 真实事故重推了 8 小时。' +
+      '会变成数字 0，渠道判定失败并持续重投——真实生产事故中重推了 8 小时。' +
       '两条路由都已带 @RawResponse()，且实际走 res.status(...) + 返回体（不调 .json/.send），' +
       '这里整份文件豁免只是把「这份是回调控制器」的理由钉死，不靠人读代码猜。',
   },

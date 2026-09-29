@@ -1,9 +1,8 @@
 /**
  * 直连商户 / 服务商（partner）两种模式的下单报文与路径构造。**纯函数，不发请求。**
  *
- * 搬自 xiaodian `libs/wechatpay/src/wechatpay-client.ts` 里 jsapi / native / h5 三个方法的
- * 报文分支，和 knowledge `wechat-partner.service.ts` 的 `sp_appid / sub_appid / sub_openid`
- * 那段注释——那段是拿生产事故换来的，原样保留。
+ * 覆盖 jsapi / native / h5 三种下单的报文分支。下面关于 `sp_appid / sub_appid / sub_openid`
+ * 的说明是拿生产事故换来的，改动前务必读完。
  *
  * ## 服务商模式的三个坑
  *

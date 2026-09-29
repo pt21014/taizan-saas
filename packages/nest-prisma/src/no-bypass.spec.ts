@@ -103,7 +103,7 @@ describe('执行层没有绕开决策函数（源码扫描）', () => {
   it('extensions/tenant.ts 不对「没有租户上下文」做任何短路放行', () => {
     const code = CODE.get(DECISION_CONSUMER) ?? ''
 
-    // 老项目的洞长这样：`if (!ctx?.tenantId || !MODELS.has(model)) return query(args)`
+    // 典型的洞长这样：`if (!ctx?.tenantId || !MODELS.has(model)) return query(args)`
     expect(code).not.toMatch(/if\s*\(\s*!?\s*tenantId/)
     expect(code).not.toMatch(/if\s*\(\s*!\s*registered/)
     // 也不能自己判断「模型在不在名单里」——那是决策函数的第一步。

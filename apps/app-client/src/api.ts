@@ -14,7 +14,7 @@ const extra = (Constants.expoConfig?.extra ?? {}) as ClientExtra
 /**
  * baseURL 与租户 slug 都从 `app.json` 的 `extra`（或同名 `EXPO_PUBLIC_*` env，优先级更高，
  * 方便 EAS Build 按环境覆盖）读——**不写死具体域名当兜底**。
- * knowledge 的反面教材是把 `https://apiknow.taizan.vip/api` 焊进代码当 fallback，
+ * 反面教材是把 `https://api.example.com/api` 这类线上域名焊进代码当 fallback，
  * 换一套环境就得改代码重发版；这里留空时交给 `tenant-missing`/启动态自己提示配置缺失。
  */
 export const API_BASE = process.env.EXPO_PUBLIC_API_BASE?.trim() || extra.apiBase || ''

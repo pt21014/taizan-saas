@@ -1,7 +1,7 @@
 {
   "frameworkVersion": "0.0.0",
   "taizanVersion": "^0.1.0",
-  "generatedAt": "2026-09-06T04:03:54.286Z",
+  "generatedAt": "2026-09-29T02:45:26.116Z",
   "files": [
     {
       "path": ".dockerignore",
@@ -46,7 +46,7 @@
     {
       "path": "CLAUDE.md.hbs",
       "source": "docs/templates/CLAUDE.md.hbs",
-      "sha256": "1465ea1096f24c501531cc89fb0c69c124ddd39d08399e5fbfd14ac10eaa1bf3",
+      "sha256": "ef1869388fbabc847399cb0e3df03edb8438f1425e51aaecc45ac558d446ff30",
       "bucket": "root",
       "render": true,
       "binary": false
@@ -406,7 +406,7 @@
     {
       "path": "apps/api/.env.example.hbs",
       "source": "apps/api/.env.example",
-      "sha256": "7b029a97b9695d1c96855d46e9c7621d13af4009a08e707f0e2a73589bf0eb48",
+      "sha256": "8be4ac1e7254552a96a7af41d5a6e566cc1deb329d518c577072615a4a088290",
       "bucket": "api",
       "render": true,
       "binary": false
@@ -414,7 +414,7 @@
     {
       "path": "apps/api/README.md.hbs",
       "source": "apps/api/README.md",
-      "sha256": "a13145f35e56bb2c29a33ecd5b58d8fe7337c6f4b0501c477a8ffb29edd6d231",
+      "sha256": "68e65d374eadf8ba5a287aa306bf590a32302c8e553776d8ad88b909d791d597",
       "bucket": "api",
       "render": true,
       "binary": false
@@ -542,7 +542,7 @@
     {
       "path": "apps/api/scripts/gen-env-example.ts.hbs",
       "source": "apps/api/scripts/gen-env-example.ts",
-      "sha256": "567a9d23c6d65a90a0846602a49f5f50ac0409ebc9b4ca5e32c85b90357da172",
+      "sha256": "58612647d66fb04523f30a2839faa6b832806cf9a443734f1ca71990e903eacf",
       "bucket": "api",
       "render": true,
       "binary": false
@@ -1430,7 +1430,7 @@
     {
       "path": "apps/api/src/modules/platform/plan-order/plan-order.service.ts",
       "source": "apps/api/src/modules/platform/plan-order/plan-order.service.ts",
-      "sha256": "71a02dd56120a59312b69c684aab2de6bfc16b50ea04797960eef76b3b4877a3",
+      "sha256": "5d6994bf21aaf2327f3e173f3fb41c9020ceff74a360f6f3c240d6d0eb604657",
       "bucket": "api",
       "render": false,
       "binary": false
@@ -1606,7 +1606,7 @@
     {
       "path": "apps/api/src/modules/public/public.controller.ts",
       "source": "apps/api/src/modules/public/public.controller.ts",
-      "sha256": "7546f1ead5e96fe9ca0b1de3e055165cf9da71e708b471b15ffce5645f7d01a8",
+      "sha256": "2e10e63f32880ff7ee683990aefa1b83a881a7be3e564eee32abb882442d26db",
       "bucket": "api",
       "render": false,
       "binary": false
@@ -1630,7 +1630,7 @@
     {
       "path": "apps/api/src/modules/public/signup/signup.controller.ts",
       "source": "apps/api/src/modules/public/signup/signup.controller.ts",
-      "sha256": "97fda8b671f098cedbcfe70250d09cb6ca088277b4221e2d50305dc5db52badf",
+      "sha256": "d66f4e169c1dbf0bcb80d7c71a90837d06eec9507f5e7555e455138d5c28d2da",
       "bucket": "api",
       "render": false,
       "binary": false
@@ -1702,7 +1702,7 @@
     {
       "path": "apps/api/src/registry/jobs.ts.hbs",
       "source": "apps/api/src/registry/jobs.ts",
-      "sha256": "541a2d5955c8082b04cd81c9f7bb83a4a56421417bcbafd876bca8839d128ad2",
+      "sha256": "a3ee64a446beccabc5e9cd90a74a896e86d2c5ef01097a6e37130f15eafe6b77",
       "bucket": "api",
       "render": true,
       "binary": false
@@ -1774,7 +1774,7 @@
     {
       "path": "apps/api/src/tenancy/tenant-models.ts.hbs",
       "source": "apps/api/src/tenancy/tenant-models.ts",
-      "sha256": "08e845de0d48103471cd297912ff92db6e8ee0db8166b23db99748ab93294c3f",
+      "sha256": "1a5033340d44991f6b1007dd38012844a1806d71b3f463ac64527ecb1effa611",
       "bucket": "api",
       "render": true,
       "binary": false
@@ -1814,7 +1814,7 @@
     {
       "path": "apps/api/test/arch/cluster-safe.spec.ts",
       "source": "apps/api/test/arch/cluster-safe.spec.ts",
-      "sha256": "009a675614f321fb3ae4bbab076408d8d6b69614d86bf2583671cc28ebba4b73",
+      "sha256": "fb697380c97192b77247f8a9a3b7597dc009abbbf1b8b05c2b9c3a2b6352e41e",
       "bucket": "api",
       "render": false,
       "binary": false
@@ -1822,7 +1822,7 @@
     {
       "path": "apps/api/test/arch/guard-default-deny.spec.ts",
       "source": "apps/api/test/arch/guard-default-deny.spec.ts",
-      "sha256": "44d33a64594d4c5a6d69d832e383b83721c8d5ab52f7fb961c995e6c68861b04",
+      "sha256": "bad85e076b9c6d9e99ae0c3d0d879448168f18133b922fd9bab7a75b384553c1",
       "bucket": "api",
       "render": false,
       "binary": false
@@ -1838,7 +1838,7 @@
     {
       "path": "apps/api/test/arch/index.spec.ts.hbs",
       "source": "apps/api/test/arch/index.spec.ts",
-      "sha256": "7b3cb328fe217846f85bfecd16a0ab0cf25e6fb13183ef8740a9feb23150ef3f",
+      "sha256": "926a2f27a5906ea2b7d69cc990e1640bd92e559fe2a0a77641164725ceb15946",
       "bucket": "api",
       "render": true,
       "binary": false
@@ -1862,7 +1862,7 @@
     {
       "path": "apps/api/test/arch/no-manual-tenant-filter.spec.ts.hbs",
       "source": "apps/api/test/arch/no-manual-tenant-filter.spec.ts",
-      "sha256": "182710ec59fa446b041f25fd75a7013526843dd6fa6830da89ce4dd92f3953fd",
+      "sha256": "65624e41726a59f885b582b369fb5fd2d60341269fd0a5287b0a8d4c82822ead",
       "bucket": "api",
       "render": true,
       "binary": false
@@ -1878,7 +1878,7 @@
     {
       "path": "apps/api/test/arch/plan-order-fulfill.spec.ts",
       "source": "apps/api/test/arch/plan-order-fulfill.spec.ts",
-      "sha256": "fde31d4d50021609183f07c2c88d8af70ec90f16a46445b0fe9548aa7d575f1e",
+      "sha256": "e3181a0f9fdbae955a36821a1c24ae4d8958ef17eca38958cf23426c797edc28",
       "bucket": "api",
       "render": false,
       "binary": false
@@ -1886,7 +1886,7 @@
     {
       "path": "apps/api/test/arch/provision-single-path.spec.ts",
       "source": "apps/api/test/arch/provision-single-path.spec.ts",
-      "sha256": "96f0b7cfbf46b639f1bfeaa686117fb0aaab6456978073a145786340dfcb3130",
+      "sha256": "935f9732b1e2cc07364f219453f9adef7be797e3c07452ae21b6af530417ff71",
       "bucket": "api",
       "render": false,
       "binary": false
@@ -1902,7 +1902,7 @@
     {
       "path": "apps/api/test/arch/response-shape.spec.ts",
       "source": "apps/api/test/arch/response-shape.spec.ts",
-      "sha256": "17309a08261d2d5677a52e113a4d188f7c274d33d44b7fbe5dc5acbd735d8269",
+      "sha256": "a557fc256baf9d1cfa49e694c157f47eeb682ac797289abac372897fc185a898",
       "bucket": "api",
       "render": false,
       "binary": false
@@ -1910,7 +1910,7 @@
     {
       "path": "apps/api/test/arch/tenant-middleware.spec.ts",
       "source": "apps/api/test/arch/tenant-middleware.spec.ts",
-      "sha256": "92e612c73de0d184f1ea376549ae55e9e80ed426f03554b5dd1f7efcc7e74637",
+      "sha256": "9c1c449da27902d49c40501f4fc58413c8a2dd0ab240f9aadaed3da15fa0224d",
       "bucket": "api",
       "render": false,
       "binary": false
@@ -1918,7 +1918,7 @@
     {
       "path": "apps/api/test/arch/tenant-models.spec.ts.hbs",
       "source": "apps/api/test/arch/tenant-models.spec.ts",
-      "sha256": "3ab3bc772200a9b170c301ead6fc4f0bc3776e46adc7b13c43d7b4e3efffa955",
+      "sha256": "dd5cb35fc94e20ca1e8d718f04a11511fc21e224e95116dde48ff1f7c03786cf",
       "bucket": "api",
       "render": true,
       "binary": false
@@ -1958,7 +1958,7 @@
     {
       "path": "apps/api/test/rbac-billing.e2e-spec.ts.hbs",
       "source": "apps/api/test/rbac-billing.e2e-spec.ts",
-      "sha256": "fa714786d930545428434be48ca6f4dde1adb8304359f3f427bb2d3920089a3b",
+      "sha256": "5f5114057cc439cf712faf8f90b5db38ff176db36a79f3c27f2f720ab11988f4",
       "bucket": "api",
       "render": true,
       "binary": false
@@ -2022,7 +2022,7 @@
     {
       "path": "apps/app-client/README.md.hbs",
       "source": "apps/app-client/README.md",
-      "sha256": "58905b96a6e898b156666c4b1b4b99f4d044416b3ed31ed80cb08e5f14e738c3",
+      "sha256": "95d633e080165dc2ac3dd19dc09903fae620d97d5762ad2b2655448573772c5f",
       "bucket": "app-client",
       "render": true,
       "binary": false
@@ -2126,7 +2126,7 @@
     {
       "path": "apps/app-client/src/api.ts.hbs",
       "source": "apps/app-client/src/api.ts",
-      "sha256": "bb19a8b847d815bb1fb349c218b4473db75ae786bea93eb2b74b14e9e201aa01",
+      "sha256": "a0a0c83ae832f0f415d71f5004ef3f35616e92703f6e591446e28d4883547b0f",
       "bucket": "app-client",
       "render": true,
       "binary": false
@@ -2342,7 +2342,7 @@
     {
       "path": "apps/client/README.md.hbs",
       "source": "apps/client/README.md",
-      "sha256": "18f2961e81dbc0c5da0ccc34a44e9bce561a0b45c4f9656ae4913552f6d0615e",
+      "sha256": "928ba22b365c2283bee93e399c35bf6284e096842bd9cfebe573096732945784",
       "bucket": "client",
       "render": true,
       "binary": false
@@ -2366,7 +2366,7 @@
     {
       "path": "apps/client/config/index.ts.hbs",
       "source": "apps/client/config/index.ts",
-      "sha256": "f0f21629895293dd6fba1db8c23c5b34b01448c22afd883b9581c79f208e9a82",
+      "sha256": "2a5b7516700ccc705d5b85e78e1d15e8efaa0204405087afcb2ea07f5d15e238",
       "bucket": "client",
       "render": true,
       "binary": false
@@ -2430,7 +2430,7 @@
     {
       "path": "apps/client/src/config.ts.hbs",
       "source": "apps/client/src/config.ts",
-      "sha256": "45151c8e7c50cbbdb1afd26caab5ae19ec839e2a7174a1ceca7f8adf45ad72d5",
+      "sha256": "953a1c6c5e6f500e74ea12601bf12d27b632ca4641b7c9e007e735a5b321bbab",
       "bucket": "client",
       "render": true,
       "binary": false
@@ -3302,7 +3302,7 @@
     {
       "path": "deploy/README.md.hbs",
       "source": "deploy/README.md",
-      "sha256": "7de2b43a058008c07e9f01620df85c35d0fb82c5524914f8cfab5c530ae5ae36",
+      "sha256": "59856b338ad3de26e780ee9751661cbaf63ac4258bbb8b413c9614f295728c77",
       "bucket": "deploy",
       "render": true,
       "binary": false
@@ -3334,7 +3334,7 @@
     {
       "path": "deploy/checks/ratelimit-spoof-check.sh.hbs",
       "source": "deploy/checks/ratelimit-spoof-check.sh",
-      "sha256": "636aa32f8a1476e16f500dae5ce74ea999763c4c621a2c184c576d872540b64f",
+      "sha256": "4f0bd6a769d5c4da9e657693968d4d554bdfa5b66125abfc842f9a0bad2dfc2e",
       "bucket": "deploy",
       "render": true,
       "binary": false
@@ -3374,7 +3374,7 @@
     {
       "path": "deploy/docker/docker-compose.dev.yml.hbs",
       "source": "deploy/docker/docker-compose.dev.yml",
-      "sha256": "2265e2057df02c22fa2eb3912941cee438be7398fa09d86bf86fdb9c56fb3e3a",
+      "sha256": "e085935e0596a9a07e7fc11311c7fb931a802d0154feee9d07fedffa21682921",
       "bucket": "deploy",
       "render": true,
       "binary": false
@@ -3422,7 +3422,7 @@
     {
       "path": "deploy/nginx/api.conf.hbs",
       "source": "deploy/nginx/api.conf",
-      "sha256": "7904310516b7f413c2733516a1abd1c411a8cc0ab8fc1cc96e36013667dfd3d5",
+      "sha256": "ef30fa1223cb0c82cbf06b111db67c1f7d426ec2e2bcbd0b5146b6b6f87f8c76",
       "bucket": "deploy",
       "render": true,
       "binary": false
@@ -3478,7 +3478,7 @@
     {
       "path": "deploy/pm2/ecosystem.config.cjs.hbs",
       "source": "deploy/pm2/ecosystem.config.cjs",
-      "sha256": "3b4e775963d0a9322b2821c4150b7373779729048496ae64b598bb633ed3650a",
+      "sha256": "95a793f43781682a693c35c41e1d10bb7174cd64c157ce2100b323f02e8f8361",
       "bucket": "deploy",
       "render": true,
       "binary": false

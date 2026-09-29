@@ -1,7 +1,7 @@
 /**
  * 微信网页授权的 state 签发/核销，与 `redirect_uri` 的安全重建。
  *
- * knowledge `CLAUDE.md` 第 7 条（蓝图 §9 不变量 7）原话：
+ * 蓝图 §9 核心不变量第 7 条：
  *
  * > **微信网页授权的 state 必须服务端签发 + 回调核销**（`OauthStateStore`：随机 32 字节、
  * > 5 分钟 TTL、一次性、绑定租户），前端另存一份做本地比对。少了这层校验，攻击者用自己账号的
@@ -14,7 +14,7 @@
  *    两个进程可能同时 get 到同一个 state 都判为有效，而一次性正是它的全部意义
  *    （蓝图 §8 第 12 条：一次性凭据必须走 `takeOnce`）。接口上刻意不给 `get`，
  *    调用方想写错也写不出来。
- * 2. **state 必须存跨进程的地方**。knowledge 实测：pm2 开 4 个实例时，进程 A 签发的 state
+ * 2. **state 必须存跨进程的地方**。生产实测：pm2 开 4 个实例时，进程 A 签发的 state
  *    回调大概率落到进程 B，放进程内存就永远核销不了——**四次登录里约三次失败**。
  *    而表现极具迷惑性：微信那边授权成功、浏览器也乖乖跳回了首页，只是人没登上。
  *    所以 {@link MemoryOneTimeStore} 只给单机与单测用，生产必须换 Redis 实现。
@@ -231,7 +231,7 @@ export interface BuildAuthorizeUrlInput {
  * 拼开放平台的**代授权页**地址（商家扫码/点击授权给平台的那一页）。
  *
  * 与 {@link buildOAuthUrl} 是两件事：那个是「学员登录」，这个是「商家把号授权给平台」。
- * 两者的 state 也是两套（knowledge 里就是 `OauthStateStore` 与 `WxAuthStateStore` 两个类），
+ * 两者的 state 也是两套（应当是两个独立的 store），
  * **不要合并**：登录那边租户是输入（比对一致即可），授权这边租户是输出
  * （授权结果该落到哪个租户名下的唯一依据）。
  */
@@ -253,7 +253,7 @@ export function buildAuthorizeUrl(input: BuildAuthorizeUrlInput): string {
  * {@link OneTimeStore} 的内存实现。
  *
  * **只够单机与单测**。cluster 下签发与核销大概率落在不同进程，永远核销不了——
- * knowledge 实测四次登录约三次失败。生产必须换成 Redis 的 `GETDEL` 实现
+ * 生产实测四次登录约三次失败。生产必须换成 Redis 的 `GETDEL` 实现
  * （app 侧用 `@taizan/nest-infra` 的 `CacheService.takeOnce` 适配，见 README）。
  *
  * 没有后台清扫定时器：裸 `setInterval` 在 cluster 下是被禁的（蓝图 §8 spec 12），

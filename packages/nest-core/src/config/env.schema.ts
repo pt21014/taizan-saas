@@ -6,7 +6,7 @@ import { z } from 'zod'
  * 三条不可退让：
  * 1. 三套 JWT 密钥各自 ≥32 位、互相独立——共用一把密钥意味着 member token 可以冒充 staff。
  * 2. `CRYPTO_KEYS` 是 **keyId → 64 hex** 的 JSON 映射（不是单把裸密钥），
- *    配合 `CRYPTO_KEY_CURRENT` 支持幂等轮换；老项目那种单 `CRYPTO_KEY` 换密钥要停机。
+ *    配合 `CRYPTO_KEY_CURRENT` 支持幂等轮换；单把 `CRYPTO_KEY` 的配法换密钥要停机。
  * 3. dev 后门开关（`SMS_RETURN_DEV_CODE` / `WECHAT_DEV_FAKE_LOGIN`）默认关，
  *    且由 {@link assertNoDevCodeInProd} 在生产环境二次拒启。
  *

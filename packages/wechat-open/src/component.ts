@@ -1,9 +1,9 @@
 /**
  * 平台级凭据链：`component_access_token` 与预授权码。
  *
- * 搬自 knowledge `infra/wechat-open/component.service.ts`，去掉 Nest / Prisma / Redis 依赖，
+ * 不依赖 Nest / Prisma / Redis，
  * 把「存哪儿」收成 {@link TokenCache} 与 {@link TicketStore} 两个注入口。
- * 保留下来的三条经验（每条都对应一次线上故障）：
+ * 三条经验（每条都对应一次线上故障）：
  *
  * 1. **提前刷新**：卡在最后一秒去换新的，正好赶上并发请求时会有几个用到刚过期的 token。
  * 2. **并发强刷要搭同一趟车**：微信一签发新 token 就把旧的作废，两个并发的强刷会互相拆台，

@@ -2,7 +2,7 @@
 
 集群安全的基础设施层（蓝图 §4.7 / §4.11 / §8 第 12 条）。
 
-老项目 knowledge 线上有一条活故障：pm2 cluster 起 4 个进程，`order-close.service.ts` /
+一类典型的线上故障：pm2 cluster 起 4 个进程，`order-close.service.ts` /
 `profit-sharing.service.ts` 里的裸 `setInterval` 于是每 30 秒同时跑 4 遍——同一笔订单被关 4 次、
 同一笔分账被发起 4 次。这不是「浪费点 CPU」，是**重复的对外副作用**。本包就是那条故障的根治面。
 
@@ -72,7 +72,7 @@ await cache.set('platform:plan', id, dto, 300) // 平台级放行
   「到点做一次」。
 - **cron 用 `setTimeout` 逐次重排，不用 `setInterval`。** cron 表达式的间隔不是固定的
   （夏令时那天 `0 9 * * *` 之间隔的是 23 或 25 小时）。这是本包唯一允许出现调度定时器的地方。
-- **Redis 不可用就响亮地失败**，不像老项目那样静默退回进程内存。降级的代价是限流额度变成
+- **Redis 不可用就响亮地失败**，不静默退回进程内存。降级的代价是限流额度变成
   「额度 × 进程数」、锁变成「每个进程都是 leader」，而日志里只有一行 warn。
 - **幂等结果本体存 Redis，不落表。** `IdempotencyKey` 表只有 `resultHash`——那些结果里最常见的
   就是支付回调原文，落库等于把三方报文明文摊在一张谁都能查的表上。

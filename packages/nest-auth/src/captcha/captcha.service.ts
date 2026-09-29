@@ -1,7 +1,7 @@
 /**
  * 图形验证码：自绘 SVG，不引第三方库。
  *
- * ## 为什么不用 `svg-captcha`（xiaodian 用的那个）
+ * ## 为什么不用 `svg-captcha`
  *
  * 三条：它只有 CommonJS 产物（本仓全 ESM，要 `createRequire` 绕一圈）；
  * 它自带一份字体数据，装进来 ~200 KB 全是为了画四个字符；

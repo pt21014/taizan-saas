@@ -318,7 +318,7 @@ describe('isEncrypted', () => {
     expect(isEncryptedValue('wx_plain_secret')).toBe(false)
   })
 
-  it('裸 base64（xiaodian 的老格式）不认', () => {
+  it('裸 base64（无版本前缀的旧式密文）不认', () => {
     expect(isEncryptedValue(Buffer.from('anything').toString('base64'))).toBe(false)
   })
 

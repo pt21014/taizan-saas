@@ -3,7 +3,7 @@
  *
  * ## 这个包存在的理由
  *
- * 老项目 knowledge 线上有一条活故障：pm2 cluster 起 4 个进程，
+ * 一类典型的线上故障：pm2 cluster 起 4 个进程，
  * `order-close.service.ts` / `profit-sharing.service.ts` 里的裸 `setInterval`
  * 于是每 30 秒同时跑 4 遍——同一笔订单被关 4 次、同一笔分账被发起 4 次。
  * 这不是「浪费点 CPU」，是重复的对外副作用。

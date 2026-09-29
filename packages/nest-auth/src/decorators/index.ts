@@ -27,7 +27,7 @@ export const RATE_LIMIT_KEY = 'taizan:auth:rate-limit'
  * 显式声明这个路由（或整个控制器）**不需要登录**。
  *
  * 全局守卫是默认拒绝的，所以「忘了写装饰器」的后果是 401 而不是裸奔——
- * 这正是 xiaodian 那条约定的价值（蓝图 §9）。反过来，公开路由是**主动开的洞**，
+ * 这正是「全局 APP_GUARD 默认拒绝」这条约定的价值（蓝图 §9 工程基础约定）。反过来，公开路由是**主动开的洞**，
  * 必须同时用 {@link RateLimited} 声明限流档位，否则它就是一个免费的爆破入口。
  * `GlobalAuthGuard` 见到没有档位的 `@Public()` 会打一条 warn，spec 5 会把它升级成 CI 失败。
  */

@@ -20,7 +20,7 @@ const HAIRLINE = colors.gray[300] ?? '#d0d3d9'
 
 /**
  * 单序列趋势图（蓝图 §5.4，商家端「数据」屏用）。不画图例（标题已经说明是什么）、
- * 坐标退到背景，只标峰值，其余靠手指按住读数——搬自 knowledge 的最小实现。
+ * 坐标退到背景，只标峰值，其余靠手指按住读数——刻意保持最小实现。
  */
 export function TrendChart({ data }: { data: TrendPoint[] }) {
   const [w, setW] = useState(0)

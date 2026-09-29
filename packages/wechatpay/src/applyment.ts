@@ -1,9 +1,8 @@
 /**
  * 特约商户进件（applyment4sub）：表单 → 微信进件报文的纯函数映射 + 提交/查询/图片上传。
  *
- * 整体搬自 xiaodian `libs/wechatpay/src/applyment.ts`（160 行）与
- * `wechatpay-client.ts` 里的 `uploadMerchantMedia` / `submitApplyment` /
- * `queryApplymentByBusinessCode`。
+ * 包含表单映射，以及 `uploadMerchantMedia` / `submitApplyment` /
+ * `queryApplymentByBusinessCode` 三个调用。
  *
  * 敏感字段（姓名/身份证号/手机号/邮箱/银行卡号）经 `encryptFn`（RSAES-OAEP）加密，
  * 请求头必须带 `Wechatpay-Serial` = 加密所用公钥的 ID/序列号。

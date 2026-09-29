@@ -17,7 +17,7 @@
  *
  * `/api/public` 在 `TENANT_FREE_PREFIXES` 里（蓝图 §8 spec 16）：注册的这一刻
  * 租户还不存在，中间件按 slug 找不到租户会失败关闭，把注册页变成 404——
- * 那是 knowledge 上真实发生过的事故。`test/arch/tenant-middleware.spec.ts`
+ * 这类事故在真实生产环境中发生过。`test/arch/tenant-middleware.spec.ts`
  * 对 `/api/public/signup*` 逐条断言。
  *
  * @packageDocumentation

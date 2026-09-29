@@ -12,7 +12,7 @@ export interface RankRow {
 const MUTED = colors.gray[500] ?? '#8a8f98'
 const TRACK = colors.gray[100] ?? '#f0f1f3'
 
-/** 排行条：单色、数据端圆角、条间留底色间隙——搬自 knowledge 的最小实现。 */
+/** 排行条：单色、数据端圆角、条间留底色间隙——刻意保持最小实现。 */
 export function RankBars({ rows }: { rows: RankRow[] }) {
   if (rows.length === 0) {
     return (

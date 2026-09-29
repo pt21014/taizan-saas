@@ -112,7 +112,7 @@ const COMMENT_LINE = /^\s*(?:\/\/|\/\*|\*)/
 const RULE_MESSAGE: Record<IpSourceViolation['rule'], string> = {
   'x-forwarded-for':
     '直接读 X-Forwarded-For。这个头的开头几段是客户端自己写的、可任意伪造' +
-    '（knowledge 实测过：伪造后限流 key 直接变成伪造值，限流形同虚设）。' +
+    '（实测过：伪造后限流 key 直接变成伪造值，限流形同虚设）。' +
     '只能用 @taizan/ratelimit-core 的 resolveIps，从末尾倒数 TRUSTED_PROXY_HOPS 段。',
   'req-ip':
     '直接读 req.ip。它的值取决于 express 的 trust proxy 配置，' +

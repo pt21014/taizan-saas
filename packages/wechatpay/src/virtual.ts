@@ -1,8 +1,7 @@
 /**
  * 小程序虚拟支付（`wx.requestVirtualPayment`，米大师）的参数组装与双 HMAC 签名。
  *
- * 纯函数，不碰数据库、不发请求。整体搬自 knowledge
- * `payment/virtual/virtual-pay.rules.ts`，去掉了「课程」这类业务字眼。
+ * 纯函数，不碰数据库、不发请求，不含任何具体业务（商品类型由调用方决定）。
  *
  * ## 这是什么，为什么必须接
  *

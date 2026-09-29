@@ -14,8 +14,7 @@ export interface ShopChooserPageProps {
 }
 
 /**
- * 一号多店的选店页（蓝图 §5.2，形状搬自 xiaodian 的 `BrandChooserPage.tsx`，
- * 「多品牌」改成「多店」）。登录接口 `needChooseShop: true` 时展示，
+ * 一号多店的选店页（蓝图 §5.2）。登录接口 `needChooseShop: true` 时展示，
  * 卡片本身不带经营数据——那是「全部店铺」那一屏（T3-2 范畴）的事，这里只解决
  * 「登录时选进哪一家」。
  */

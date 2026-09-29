@@ -6,9 +6,8 @@
  * base64 输出；请求头还必须带 `Wechatpay-Serial` = 所用公钥的 ID / 证书序列号，
  * 微信要靠它选对私钥来解——少了这个头，密文是对的也解不开。
  *
- * 搬自 xiaodian `libs/wechatpay/src/sign.ts` 的 `rsaEncryptOaep` / `selectEncryptPem`
- * 与 knowledge `v3-sign.ts` 的 `encryptSensitive`（两者算法一致，node 的
- * `RSA_PKCS1_OAEP_PADDING` 默认 oaepHash 就是 sha1，这里显式写出来免得将来 node 改默认值）。
+ * 算法：RSAES-OAEP + sha1（node 的 `RSA_PKCS1_OAEP_PADDING` 默认 oaepHash 就是 sha1，
+ * 这里显式写出来免得将来 node 改默认值）。
  */
 import { constants as cryptoConstants, publicEncrypt } from 'node:crypto'
 

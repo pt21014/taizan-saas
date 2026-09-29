@@ -16,7 +16,7 @@ import {
 } from './sign'
 import type { WechatPayCredentials } from './types'
 
-/** 自签一对 RSA 密钥当作「微信的」和「商户的」，验证签名链路自洽（搬自 knowledge v3-sign.spec.ts）。 */
+/** 自签一对 RSA 密钥当作「微信的」和「商户的」，验证签名链路自洽。 */
 let priv: string
 let pub: string
 

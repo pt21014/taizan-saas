@@ -13,7 +13,7 @@
  * 所以这里的做法是：**两次调用同一个规则函数，只改 `enforcing` 入参**。
  * 判定权 100% 留在 `@taizan/billing-rules`，本文件只负责比对两次的结果。
  *
- * knowledge 的老实现踩过的坑正是这个：`tenant-billing.service.ts` 里
+ * 一种常见的错误实现正是这样：在计费服务里写
  * `if (!result.allow && !this.enforcing && result.code === 'EXPIRED')` 这行 ——
  * 靠 `result.code === 'EXPIRED'` 手工把硬闸门摘出去，后台跟着开关一起放行，
  * 于是开关关着时冻结一家店的实际效果是「学员立刻进不去，商家后台还能写满 7 天」。
@@ -78,7 +78,7 @@ export function evaluateWithShadow(
   }
 }
 
-/** warn 文案。格式与 knowledge 的 `[BILLING_ENFORCE=false] 若开启将拦下：…` 保持一致，便于 grep 日志。 */
+/** warn 文案。格式固定为 `[BILLING_ENFORCE=false] 若开启将拦下：…`，便于 grep 日志。 */
 export function shadowWarning(
   view: TenantGateView,
   result: ShadowGateResult,

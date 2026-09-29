@@ -68,7 +68,7 @@ describe('伪造 XFF 绕不过限流（不变量 6 的集成验收）', () => {
   it('每次换一个伪造前缀，限流 key 不变，照样在第 11 次被拦', async () => {
     h = await createHarness()
     // 攻击者的手法：每次请求换一个 X-Forwarded-For 前缀，指望换出一个新的限流桶。
-    // knowledge 实测过的那次事故就是这么被绕过去的（限流 key 直接变成伪造值）。
+    // 生产上实测过的那次事故就是这么被绕过去的（限流 key 直接变成伪造值）。
     for (let i = 0; i < LOGIN_TIER.clientLimit; i += 1) {
       await post(`10.0.0.${i}, 172.16.9.${i}, ${HONEST_XFF}`).expect(201)
     }

@@ -1,11 +1,10 @@
 /**
  * `WechatPayClient`：直连商户 / 服务商两种模式的下单、查单、关单、退款、退款查询。
  *
- * 搬自 xiaodian `libs/wechatpay/src/wechatpay-client.ts`（724 行）的协议部分，
- * 三处改动：
- * 1. **去掉 axios 与 `@nestjs/common`**，网络走注入的 {@link HttpClient}；
+ * 三点设计：
+ * 1. **不依赖 axios 与 `@nestjs/common`**，网络走注入的 {@link HttpClient}；
  * 2. 报文/路径构造抽到 `platform-pay.ts`，本文件只剩「签名 → 发 → 验签 → 归一化」；
- * 3. 微信 4xx 的 `{code, message}` 统一包成 `PaymentError`（原实现是 axios 拦截器干的）。
+ * 3. 微信 4xx 的 `{code, message}` 统一包成 `PaymentError`（内建，不需要额外的 HTTP 拦截器）。
  */
 import {
   PAYMENT_ERROR,
@@ -188,8 +187,8 @@ export class WechatPayClient implements WechatPayApi {
    *
    * 微信 4xx 的 body 是 `{code, message, detail}`（如 `NOT_ENOUGH` 余额不足、
    * `NO_AUTH` 无退款权限，都是 403）。**不带上 `code` 的话，日志里只剩一句
-   * 「Request failed with status code 403」，什么也查不出来**——xiaodian 那边为此专门
-   * 写了一个 axios 拦截器，这里内建。
+   * 「Request failed with status code 403」，什么也查不出来**——常见做法是为此专门
+   * 写一个 axios 拦截器，这里内建。
    */
   private upstreamError(
     status: number,

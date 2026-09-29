@@ -77,21 +77,21 @@ docker compose -f deploy/docker/docker-compose.dev.yml up -d   # 只借它的 my
 ## 2. cluster 为什么是安全的（PM2 / Docker 副本数 > 1）
 
 `deploy/pm2/ecosystem.config.cjs` 默认 `exec_mode: 'cluster'`、`instances: 'max'`。
-跟老项目（xiaodian 固定 `fork`、knowledge 要求「cluster 前提是 Redis 可用」）的
-差异只有一处根本变化：**cron 不再靠单进程假设活着，靠 Redis leader 锁**
+跟常见做法（固定 `fork`，或要求「cluster 前提是 Redis 可用」）相比，
+根本变化只有一处：**cron 不再靠单进程假设活着，靠 Redis leader 锁**
 （`@taizan/nest-infra` 的 `@LeaderCron`，见 ecosystem 文件里那段大注释）——
 CI 静态扫描（`cluster-safe/scan.ts`）直接把 `@nestjs/schedule` 的 `@Cron` 和裸
 `setInterval` 判违规，框架里没有第二条路可以绕开这条约束去写「假装单进程」的定时任务。
 `CRON_ENABLED` / `QUEUE_ENABLED` 两个 env 用来把「只跑 HTTP」和「跑任务」两组进程
 分开（可选，多数项目不需要），ecosystem 文件里给了两组配置的示例。
 
-## 3. 与老项目部署方式的关键差异
+## 3. 与常见部署方式的关键差异
 
-| 项 | 老项目（xiaodian / knowledge） | {{projectName}} |
+| 项 | 常见做法 | {{projectName}} |
 |---|---|---|
-| 多实例 | xiaodian 固定 fork；knowledge cluster 但要求 Redis 前提 | cluster 默认开，cron 靠 Redis leader 锁而非「只有一个进程」的假设 |
+| 多实例 | 固定 fork；或 cluster 但要求 Redis 前提 | cluster 默认开，cron 靠 Redis leader 锁而非「只有一个进程」的假设 |
 | 支付回调 | nginx 反代按普通请求处理 | `rawBody: true` 是**装配硬要求**（main.ts 与 e2e 必须用同一段 `configureApp`）；nginx 侧同一 location 刻意不加任何改写请求体的指令 |
-| X-Forwarded-For | knowledge 线上真的因为漏配这行被绕过限流（CLAUDE.md 第 6 条） | 本仓全部 nginx 模板都带 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` 并在旁边写了「缺了它会发生什么」；`deploy/checks/ratelimit-spoof-check.sh` 就是打这里 |
+| X-Forwarded-For | 真实生产环境出现过因漏配这行被绕过限流（蓝图 §9 核心不变量第 6 条） | 本仓全部 nginx 模板都带 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` 并在旁边写了「缺了它会发生什么」；`deploy/checks/ratelimit-spoof-check.sh` 就是打这里 |
 | 业务错误的 HTTP 语义 | 视项目而定 | 统一收口：业务错误一律 **HTTP 200 + 7 位业务码**（`{code,message,data}`），只有认证/限流/未知异常走真实 HTTP 状态码——`tenant-isolation-check.sh` 断言的是响应体里的 `code:1240300`，不是 HTTP 403 |
 | `/health` | 各自实现 | 裸 JSON（`@RawResponse()`），任一依赖 down → **503**；Nginx/PM2/容器编排按状态码摘流量 |
 

@@ -5,7 +5,7 @@ import prodConfig from './prod'
 
 /**
  * baseURL 与 tenantSlug 一律来自 env（`TARO_APP_API_BASE`），**不允许写死域名**——
- * 反面教材见 knowledge `apps/client/src/api/request.ts` 把 `apiknow.{{projectSlug}}.vip` 硬编码在
+ * 反面教材是把 `api.{{rootDomain}}` 这类线上域名硬编码在
  * request 函数体内：换一次环境（测试/生产/自建部署）就得改代码重新发版。
  * Taro 会把 `TARO_APP_` 前缀的 env 变量自动注入到 `process.env`（H5/小程序都生效），
  * `src/config.ts` 直接 `process.env.TARO_APP_API_BASE` 读取即可。

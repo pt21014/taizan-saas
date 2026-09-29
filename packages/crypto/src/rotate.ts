@@ -1,9 +1,8 @@
 /**
  * 密钥轮换：`planRotation` 出计划、`executeRotation` 按计划推进。
  *
- * 幂等的实现方式与 xiaodian 的 `rotate-crypto-key.ts` 有一处关键差别：
- * 老脚本靠「能否用新密钥解开」判断这行换过没有——每行都要试解一次，且中途改了密钥
- * 就再也分不清状态。这里靠 **keyId 列**判断：只捞 `keyIdColumn = from` 的行，
+ * 幂等的实现方式：常见的朴素做法是靠「能否用新密钥解开」判断这行换过没有——每行都要
+ * 试解一次，且中途改了密钥就再也分不清状态。这里靠 **keyId 列**判断：只捞 `keyIdColumn = from` 的行，
  * 换完写回 `keyIdColumn = to`。所以第二次跑同一条命令，查询本身就返回 0 行，
  * 改动数天然为 0；中断续跑也不需要额外的进度表。
  *
@@ -15,7 +14,7 @@ import type { EncryptedColumn } from './columns'
 import { CryptoError, DecryptError, UnknownKeyIdError } from './errors'
 import type { CredentialVault } from './vault'
 
-/** 每批扫描行数。默认 200，与 xiaodian 的 BATCH 一致，避免长事务锁表。 */
+/** 每批扫描行数。默认 200，批量不宜过大，避免长事务锁表。 */
 export const DEFAULT_BATCH_SIZE = 200
 
 /** {@link planRotation} 的选项。 */

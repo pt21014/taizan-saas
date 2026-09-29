@@ -1,9 +1,7 @@
 /**
  * 微信官方分账（profitsharing）：添加接收方、发起分账、查询、回退、查询回退。
  *
- * 搬自 knowledge `payment/wechat/wechat-partner.service.ts` 的分账五个方法与
- * `profit-sharing.rules.ts` 的抽佣计算（后者已经进了 `@taizan/payment-core` 的
- * `calcCommissionCents`，这里直接复用）。
+ * 抽佣计算在 `@taizan/payment-core` 的 `calcCommissionCents`，这里直接复用。
  *
  * ## 为什么必须走官方分账
  *
@@ -64,7 +62,7 @@ function subMchIdOf(cfg: WechatPayConfig): string {
  *
  * `name`（商户全称）在 `type=MERCHANT_ID` 时是必填的，且**必须用微信支付公钥加密**——
  * 少了它微信只回一句笼统的「请求参数错误」，不会告诉你缺的是哪个字段。
- * 这一条是 knowledge 项目在生产环境逐个试报文形状试出来的。
+ * 这一条是在生产环境逐个试报文形状试出来的。
  */
 export async function addProfitSharingReceiver(
   api: WechatPayApi,

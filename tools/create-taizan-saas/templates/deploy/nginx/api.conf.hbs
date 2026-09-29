@@ -69,8 +69,8 @@ server {
         # 直接透传客户端头，或者干脆不设置这个头），效果是**每个访客在应用侧看到的都是
         # nginx 自己的地址**——限流的 key 全部收敛成同一个 IP，变成"全站共用一份额度"：
         # 一个人登录失败 10 次，全站所有人一起被锁；反过来攻击者也可以对着一个不设防的头
-        # 疯狂伪造前缀，把限流基数冲到失效。这正是 knowledge 线上真实出过的事故
-        # （CLAUDE.md 第 6 条），`deploy/checks/ratelimit-spoof-check.sh` 就是打这里的。
+        # 疯狂伪造前缀，把限流基数冲到失效。这类事故在真实生产环境中发生过
+        # （蓝图 §9 核心不变量第 6 条），`deploy/checks/ratelimit-spoof-check.sh` 就是打这里的。
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 

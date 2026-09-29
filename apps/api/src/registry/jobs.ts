@@ -16,8 +16,8 @@
  * ## 约定
  *
  * 任务名带模块前缀（`goods.sync`），死信落 `JobDeadLetter` 并可在平台后台重放；
- * cron 一律 `@LeaderCron`（裸 `@Cron` 会在 4 个 PM2 实例上各跑一遍，这是 knowledge
- * 线上真实发生过的故障，由 `cluster-safe.spec.ts`（spec 12）看着）。
+ * cron 一律 `@LeaderCron`（裸 `@Cron` 会在 4 个 PM2 实例上各跑一遍，这是
+ * 真实生产环境中发生过的故障，由 `cluster-safe.spec.ts`（spec 12）看着）。
  *
  * @packageDocumentation
  */

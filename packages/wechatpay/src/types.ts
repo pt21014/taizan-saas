@@ -10,8 +10,7 @@ import { PAYMENT_ERROR, PaymentError, type ProviderConfig } from '@taizan/paymen
 /**
  * 一套微信支付商户凭据。
  *
- * 搬自 xiaodian `libs/wechatpay/src/types.ts` 的 `TenantPayCredentials`，
- * 去掉了 `notifyHost`（回调地址属于「这次下单」而不是「这套凭据」，蓝图里由 CreateOrderReq 传）。
+ * 刻意不含 `notifyHost`（回调地址属于「这次下单」而不是「这套凭据」，蓝图里由 CreateOrderReq 传）。
  *
  * ## 平台证书模式 vs 微信支付公钥模式
  *
@@ -65,7 +64,7 @@ export interface WechatPayPartnerConfig {
    *
    * 小程序一店一号时必填：`openid` 是在**商家自己的小程序** appid 下签发的，
    * 报文里不带 sub_appid 而用 `sp_openid` 表达，微信会直接拒单（openid 与 appid 不匹配）。
-   * 搬自 knowledge `wechat-partner.service.ts` 里那段用生产事故换来的注释。
+   * 这条是用生产事故换来的。
    */
   subAppId?: string
   credentials: WechatPayCredentials
@@ -163,8 +162,8 @@ export interface HttpRequest {
    * 请求体。
    *
    * **必须与签名时用的那串字节完全一致**：传字符串就原样发出去，
-   * 交给 HTTP 库重新序列化对象是签名必挂的经典错误（xiaodian 那边靠
-   * `transformRequest: [(d) => d]` 关掉 axios 的二次序列化，我们干脆不给对象）。
+   * 交给 HTTP 库重新序列化对象是签名必挂的经典错误（用 axios 时得靠
+   * `transformRequest: [(d) => d]` 关掉二次序列化，我们干脆不给对象）。
    */
   body?: string | Uint8Array
 }

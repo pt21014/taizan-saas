@@ -1,8 +1,7 @@
 /**
  * 腾讯云点播（VOD）的两种签名：客户端上传签名、播放地址防盗链 Key。
  *
- * 照搬自 `D:\project\knowledge\apps\api\src\infra\tencent\vod-sign.ts`。纯函数、
- * 无 IO，便于单测——签错的直接后果是视频传不上去或播不出来，线上排查成本很高。
+ * 纯函数、无 IO，便于单测——签错的直接后果是视频传不上去或播不出来，线上排查成本很高。
  *
  * 防盗链**只能用 Key 模式，不能用 Referer 白名单**：iOS 微信的 WebKit 拉
  * `<video>`（尤其 Range 请求）不带 Referer，安卓 X5 会带——同一个链接安卓能播、

@@ -62,7 +62,7 @@ export function splitAmount(totalCents: number, weights: readonly number[]): num
 /**
  * 按万分比算抽佣金额（分），**向下取整**。
  *
- * 搬自 knowledge `payment/wechat/profit-sharing.rules.ts`：向下取整而不是四舍五入，
+ * 向下取整而不是四舍五入，
  * 理由同 {@link splitAmount}——宁可平台少收一分，也不能让分账金额超过可分余额。
  *
  * @param baseCents - 计算基数（通常是订单实付金额，分）

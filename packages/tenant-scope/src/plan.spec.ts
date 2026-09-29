@@ -96,7 +96,7 @@ describe('非租户域模型', () => {
 })
 
 describe('反面教材 ①：无上下文即放行', () => {
-  // xiaodian 那版是 `if (!ctx?.tenantId || !MODELS.has(model)) return query(args)`，
+  // 反面写法是 `if (!ctx?.tenantId || !MODELS.has(model)) return query(args)`，
   // 没解析出租户 = 查全表。这里必须抛错。
   it('租户域模型上没有 tenantId 时抛 NO_CONTEXT，而不是查全表', () => {
     expect(() => plan('findMany', {}, { tenantId: '' })).toThrow(TenantScopeError)
@@ -191,14 +191,14 @@ describe('创建类操作：注入 data.tenantId', () => {
     })
   })
 
-  it('create 时调用方伪造别的 tenantId 直接抛错（knowledge 原实现是静默覆盖）', () => {
+  it('create 时调用方伪造别的 tenantId 直接抛错（而不是静默覆盖）', () => {
     expect(() => plan('create', { data: { title: 'x', tenantId: OTHER } })).toThrow(
       TenantScopeError,
     )
   })
 
   it('create 时用关系写 tenant: { connect } 绕过标量注入也抛错', () => {
-    // xiaodian 那版遇到 `tenant` 字段就跳过注入，等于把归属交给调用方。
+    // 反面写法遇到 `tenant` 字段就跳过注入，等于把归属交给调用方。
     expect(() => plan('create', { data: { tenant: { connect: { id: OTHER } } } })).toThrow(/关系写/)
   })
 

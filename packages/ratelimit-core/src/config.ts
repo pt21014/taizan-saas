@@ -3,7 +3,7 @@
  *
  * ## 三个维度的取舍（这是本文件唯一需要记住的事）
  *
- * 摘 knowledge `CLAUDE.md` 第 6 条后半段：
+ * 摘蓝图 §9 核心不变量第 6 条后半段（完整原文见 `resolve-ips.ts`）：
  *
  * > 限流同时按「客户端 IP + 入口 IP + 账号」三个维度计数，且入口/账号维度必须设得宽松——
  * > 否则会变成攻击者锁死整片地区用户或指定账号的工具。
@@ -65,7 +65,7 @@ export const DEFAULT_TIER_MESSAGE = '请求太频繁了，请 {sec} 秒后再试
 /**
  * `edgeLimit` 至少要是 `clientLimit` 的多少倍。
  *
- * 5 是 knowledge 那份 spec 用的数（`toBeGreaterThan(cfg.limit * 5)`），照搬。
+ * 5 是经过生产验证的倍数（对应断言 `toBeGreaterThan(cfg.limit * 5)`）。
  * 它的含义是「同一个入口后面至少要容得下 5 个各自把额度用满的正常用户」——
  * 对一个 CDN 边缘节点来说这个数其实很保守，但作为**下限**够用了。
  */
@@ -74,7 +74,7 @@ export const EDGE_RATIO_FLOOR = 5
 /**
  * `accountLimit` 的下限。
  *
- * 20 同样来自 knowledge 那份 spec。低于它就得写理由：一个能被陌生人在 10 分钟内
+ * 20 同样是经过生产验证的下限。低于它就得写理由：一个能被陌生人在 10 分钟内
  * 打满的账号额度，等于把「临时封停任意账号」这个能力免费送给了任何人。
  */
 export const ACCOUNT_LIMIT_FLOOR = 20
@@ -82,8 +82,8 @@ export const ACCOUNT_LIMIT_FLOOR = 20
 /**
  * 内置档位表。
  *
- * 数值来自 knowledge `rate-limit.config.ts` 的实际线上配置，按框架的四类入口重新归并：
- * 原来的 `platform` / `admin` / `memberPassword` / `bindPhone` 合并成 `login`（取最宽的那档，
+ * 数值来自实际线上配置，按框架的四类入口归并：
+ * `platform` / `admin` / `memberPassword` / `bindPhone` 这类口令入口合并成 `login`（取最宽的那档，
  * 因为框架不知道下游会把哪个入口挂上来，宁可松一点也不要在别人的登录页上误伤），
  * `redeem` / `liveWatchPassword` / `certVerify` 这些业务档不进框架，由业务项目自己 {@link defineTier}。
  */

@@ -154,7 +154,7 @@ const EXTRA_SPECS: readonly { file: string; why: string }[] = [
   {
     file: 'response-shape',
     why:
-      '蓝图 §9「knowledge CLAUDE.md 8 条不变量」第 8 条点名的「统一响应包」spec：' +
+      '蓝图 §9「8 条核心不变量」第 8 条点名的「统一响应包」spec：' +
       '控制器不许 res.json(/res.send( 绕过信封、BizException 首参不许是裸数字字面量。' +
       '不在 §8 的 16 条编号内，登记在这里而不是 SPECS。',
   },
@@ -469,7 +469,7 @@ describe('spec 11 · 加密列注册表 ↔ schema ↔ 轮换脚本', () => {
   it('每个 *Enc 列都有配对的 keyId 列', () => {
     expect(
       cryptoReport.missingKeyIdColumn,
-      '没有 keyId 列，轮换到一半的行分不清新旧密钥——xiaodian 缺的就是这个。',
+      '没有 keyId 列，轮换到一半的行分不清新旧密钥——真实事故里缺的就是这个。',
     ).toEqual([])
   })
 
