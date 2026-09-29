@@ -4,7 +4,7 @@ name: CI
 #
 # 五个 job，按「越便宜的越先红」排：
 #
-#   quality      —— lint / typecheck / format / peer-deps / changeset / 错误码总表同步
+#   quality      —— lint / typecheck / format / peer-deps / changeset / 错误码总表同步 / 包内 LICENSE 同步
 #   unit         —— build + 全量单测（含 apps/* 的前端构建，见下面「为什么没有单独的 web-build」）
 #   arch         —— 蓝图 §8 的 16 条架构约束，外加「守卫真的会红」的机器证明
 #   api-e2e      —— 真 MySQL + Redis 的隔离/权限/计费 e2e
@@ -148,6 +148,10 @@ jobs:
       - name: Check error-code doc（docs/ERROR-CODES.md 必须与 @taizan/contracts 同步）
         # 手改过总表 / 加了错误码没重跑生成器，这一步红。
         run: pnpm docs:error-codes --check
+
+      - name: Check package LICENSE（每个可发布包目录里的 LICENSE 必须与根目录一致）
+        # npm 不会把根 LICENSE 打进子包；新增包没跑 `pnpm license:sync`，这一步红。
+        run: pnpm license:check
 
   unit:
     name: unit（build + 全量单测，含前端构建）

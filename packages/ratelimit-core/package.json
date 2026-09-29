@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "三维度限流决策（客户端 IP / 入口 IP / 账号）+ resolveIps 从 X-Forwarded-For 末尾倒数取可信客户端 IP + Redis 不可用时退回进程内计数（弱化但不放行）。零框架依赖，store 靠注入。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/ratelimit-core"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

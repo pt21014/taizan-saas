@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "RBAC 执行层：权限点/菜单/功能项注册表（代码即真源）、@RequirePermission + PermissionsGuard、@DataScope() 拦截器、bootstrap 下发组装、注册表→DB 镜像同步与 taizan-rbac-sync 命令。所有判定与裁剪逻辑委托给 @taizan/rbac-core，本包只做 Nest 接线与 DB 同步。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/nest-rbac"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

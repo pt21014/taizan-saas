@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "多租户隔离的决策层：零运行时依赖的纯函数 planTenantScope + 租户模型注册机 + schema 双向比对器与 CLI。执行层（Prisma extension）在 @taizan/nest-prisma。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/tenant-scope"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

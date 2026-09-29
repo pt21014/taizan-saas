@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "租户开通的唯一一条路：平台后台开通 / 官网自助注册 / 批量导入都调 provisionTenant()。泛型 tx 鸭子类型，不 import @prisma/client，零框架依赖；配套 spec 14 的扫描器盯着别处再拼一遍建租户事务。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/provision"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

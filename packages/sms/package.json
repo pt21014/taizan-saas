@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "短信 Provider 接口 + registry（主/备自动切换）+ mock 兜底 + 模板契约；腾讯云 TC3-HMAC-SHA256 与阿里云 RPC HMAC-SHA1 两套签名纯函数。零框架依赖，只用 node:crypto，HTTP 走注入的 HttpClient 接口，不 import axios。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/sms"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

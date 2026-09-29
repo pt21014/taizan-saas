@@ -29,6 +29,8 @@
     "create:demo": "node scripts/create-demo.mjs",
     "acceptance": "bash scripts/acceptance.sh",
     "docs:error-codes": "node scripts/gen-error-codes.mjs",
+    "license:sync": "node scripts/sync-license.mjs",
+    "license:check": "node scripts/sync-license.mjs --check",
     "version-packages": "changeset version",
     "release": "changeset publish"
   },

@@ -1,0 +1,45 @@
+name: 功能建议
+description: 提议新能力，或改进现有包 / 生成器的设计
+title: 'feat: '
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先说清楚要解决的问题，再谈方案。涉及破坏性变更或安全不变量的，请在下面注明。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 在什么场景下，现在的框架做不到或做起来别扭？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 期望的 API、配置或行为。可以附伪代码。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案
+      description: 包括「在业务项目里自己实现」为什么不够。
+    validations:
+      required: false
+  - type: input
+    id: scope
+    attributes:
+      label: 涉及的包或目录
+      description: 例如 `@taizan/billing-rules`、`tools/codegen`
+    validations:
+      required: false
+  - type: checkboxes
+    id: impact
+    attributes:
+      label: 影响面
+      options:
+        - label: 可能是破坏性变更（需要 major）
+        - label: 涉及租户隔离 / 计费 / 认证 / 加密 / 支付 / 限流（docs/SECURITY-INVARIANTS.md）
+        - label: 我愿意提交 PR 实现

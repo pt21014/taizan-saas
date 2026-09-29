@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "支付的 Nest 装配层（蓝图 §4.12）：按 PayChannel 注册 Provider、租户级商户密钥解密解析、统一回调控制器（验签 → 幂等 → 归一化 → 按 outTradeNo 前缀路由到领域处理器）、下单/查单/退款编排、@PaymentHandler 发现，以及供 e2e 驱动整条回调链路的 FakeProvider + TestKit。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/nest-payment"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

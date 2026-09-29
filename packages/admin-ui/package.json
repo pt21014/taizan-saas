@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "apps/admin 与 apps/platform 共用的后台基座层（蓝图 §5.2）：request（基于 @taizan/contracts 的 createEnvelopeClient）、session（zustand，来自 /auth/bootstrap 的唯一真源）、布局与登录选店、只读闸门、服务端菜单渲染与权限路由（buildRoutes/renderMenus/RequirePermission/usePerm）、CRUD 层（useCrudTable/useCrudForm/CrudTable/CrudDrawerForm）、预签名直传上传组件。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/admin-ui"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

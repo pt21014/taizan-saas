@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "对象存储 Provider 接口 + 腾讯云 COS 实现（公读/私读预签名/直传）+ VOD 上传签名与播放防盗链 Key + 强制租户前缀的 key builder。零框架依赖，只用 node:crypto，HTTP 走注入的 HttpClient 接口，不 import axios/cos-nodejs-sdk-v5。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/storage"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

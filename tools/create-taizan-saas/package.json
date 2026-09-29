@@ -4,6 +4,11 @@
   "type": "module",
   "description": "taizan-saas 项目生成器：pnpm create taizan-saas <name>，产出一个多租户 SaaS 骨架（api + admin + platform + site + client + app-*）",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "tools/create-taizan-saas"
+  },
   "keywords": [
     "taizan",
     "saas",

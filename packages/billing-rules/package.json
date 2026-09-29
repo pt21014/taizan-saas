@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "套餐 / 配额 / 功能开关 / 到期闸门 / 续费白名单 / 续期日期计算的纯函数集合。零框架依赖，只依赖 @taizan/contracts 的错误码，可在裸 node 环境跑单测。算错会锁错商家或漏收钱，四条不可退让写在 src/index.ts 文件头。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/billing-rules"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

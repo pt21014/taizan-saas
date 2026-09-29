@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "Taro 四端（H5 + 微信小程序，App 侧另见 @taizan/app-ui）C 端基座：复用 @taizan/contracts 的 createEnvelopeClient 写一份 ≤40 行的 Taro.request 传输适配、tenantSlug 解析（H5 路径/子域名，小程序启动参数）、member 登录态、pay/share/login/media 四个跨端适配、打烊页与店铺不可用页的路由常量。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/client-core"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -1,0 +1,61 @@
+name: 缺陷报告
+description: 框架包、生成器或参考应用的行为与文档不符
+title: 'bug: '
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先搜索已有 issue。**安全漏洞不要在这里提**，请按 SECURITY.md 走私密报告。
+  - type: input
+    id: scope
+    attributes:
+      label: 涉及的包或目录
+      description: 例如 `@taizan/nest-auth`、`create-taizan-saas`、`apps/admin`
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: '`@taizan/*` / `create-taizan-saas` 的版本号，或本仓库的 commit'
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 实际发生了什么。有报错请贴完整输出（含错误码与 traceId）。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 最好是能直接跑的最小步骤，例如基于 seed 数据的 curl 序列。
+      placeholder: |
+        1. pnpm dev:infra && pnpm -F @taizan/api seed
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: 运行环境
+      description: Node 版本、pnpm 版本、操作系统、MySQL / Redis 版本等
+      placeholder: |
+        Node 22.x / pnpm 11.x / Ubuntu 24.04 / MySQL 8.0 / Redis 7
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+    validations:
+      required: false

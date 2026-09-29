@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "四端（admin/platform/site/client/app-*）design token 单一真源：色板/间距/字号/圆角/阴影，附三向映射（AntD ThemeConfig / SCSS 变量 / RN 友好对象）。零运行时依赖，可在裸 node 环境跑单测。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/tokens"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

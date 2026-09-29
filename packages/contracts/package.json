@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "四端（api/admin/platform/site/client）共用协议单一真源：响应包、7 位错误码、分页、ULID、金额、菜单/权限/bootstrap 下发 DTO、createEnvelopeClient。零运行时依赖，可在裸 node 环境跑单测。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/contracts"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

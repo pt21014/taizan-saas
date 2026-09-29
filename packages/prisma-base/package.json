@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "框架基础表 schema（8 个 Prisma 片段）+ 基础 TENANT_MODELS + 加密列注册表 + schema-sync / verify-schema CLI + 幂等 seed。表结构是全仓的对外契约，改动按破坏性变更对待。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/prisma-base"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

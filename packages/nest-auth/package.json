@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "三套身份认证：独立密钥的 JWT（platform / staff / member）+ kind 校验、全局 APP_GUARD 默认拒绝 + @Public()/@Auth(kind)、Redis 多会话按 jti 吊销与 refresh 轮换、staff 每请求现查成员关系（30s 缓存、库里角色覆盖 token）、租户解析链、图形验证码。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/nest-auth"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

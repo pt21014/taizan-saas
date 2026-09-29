@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "type": "module",
   "description": "两个 Expo App（apps/app-client、apps/app-merchant）共用的移动端基座层（蓝图 §5.4/T3-7）：design token（来自 @taizan/tokens 的 toRNTokens）、基础组件、最小图表、createApiClient（基于 @taizan/contracts 的 createEnvelopeClient）、SecureStore 会话、更新检查。以源码形式被 Metro 消费，没有 build 步骤，因此 exports/main/types 都直接指向 src。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/app-ui"
+  },
   "main": "src/index.ts",
   "types": "src/index.ts",
   "exports": {

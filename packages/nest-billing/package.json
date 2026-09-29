@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "计费闸门的执行层：PlatformGateway（租户权益视图 + 30s 缓存 + invalidate）、BillingGateGuard（后台写请求，续费白名单永远放行）、TenantGateMiddleware（C 端打烊）、QuotaCounter 物化计数与乐观锁扣减、BILLING_ENFORCE 总开关。所有判定委托 @taizan/billing-rules，本包只做 Nest 接线、缓存与计数。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/nest-billing"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

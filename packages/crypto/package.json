@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "租户级密钥加密与轮换：AES-256-GCM + keyId 多密钥 CredentialVault、脱敏 mask、幂等轮换算法 planRotation/executeRotation、加密列三处对账 verifyEncryptedColumns、taizan-rotate-key CLI。零框架依赖，只用 node:crypto。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/crypto"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

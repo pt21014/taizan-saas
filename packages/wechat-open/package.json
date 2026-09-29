@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "微信开放平台第三方平台三级 token 链路、消息加解密、公众号四级来源优先级、网页授权 state 签发核销、钛赞中转站扫码登录。零框架依赖，只用 node:crypto + 注入的 HttpClient（错误码真源用零运行时依赖的 @taizan/contracts）。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/wechat-open"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

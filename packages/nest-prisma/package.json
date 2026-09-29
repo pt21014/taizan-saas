@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "租户隔离的 Prisma 执行层：$extends 三件套（tenant / soft-delete / ulid）、prisma.tenant 与 prisma.raw 双句柄、updateWithVersion 乐观锁、db 健康探针。隔离规则本身在 @taizan/tenant-scope，本包只负责照计划执行。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/nest-prisma"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

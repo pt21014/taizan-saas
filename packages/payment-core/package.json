@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "支付 Provider 统一接口（下单/回调解析/查单/退款/退款回调）、outTradeNo 前缀规范与领域路由、分账金额拆分、支付错误类型、供 e2e 用的 FakeProvider。零框架依赖，只依赖 @taizan/contracts。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/payment-core"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

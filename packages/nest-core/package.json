@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "NestJS 基座：env zod 校验 + assertNoDevCodeInProd、AsyncLocalStorage 请求上下文与 traceId、统一响应信封与全局异常 filter、@RawResponse() 逃生口、pino 日志与脱敏、/health、helmet + CORS 白名单、Swagger 装配。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/nest-core"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

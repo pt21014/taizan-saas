@@ -1,5 +1,6 @@
 ---
 "@taizan/admin-ui": none
+"@taizan/app-ui": none
 "@taizan/billing-rules": none
 "@taizan/client-core": none
 "@taizan/contracts": none
@@ -44,7 +45,7 @@ CHANGELOG、被 `changeset version` 处理），但不改变版本号。因此�
 2. `.github/workflows/release.yml` 触发，`changesets/action` 打开 "Version Packages" PR
    （因为都是 `none`，这个 PR 只会给每个包追加一段 CHANGELOG，不改 `package.json` 里的版本号）。
 3. 合并该 PR 后，CI 用当前 `package.json` 里已经写死的 `0.1.0` 跑 `pnpm release`
-   （即 `changeset publish`），把 25 个可发布包首次推上 npm。
+   （即 `changeset publish`），把 26 个可发布的 `@taizan/*` 包首次推上 npm。
 
 **变更影响面**：
 

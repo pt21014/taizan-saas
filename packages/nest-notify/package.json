@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "通知抽象：短信 / 站内信 / 公众号模板消息 / App 推送四通道，模板化、失败进队列重试（3 次指数退避）、仍失败进死信，多渠道降级（fallback:true 时按 channels 顺序切）。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/nest-notify"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",

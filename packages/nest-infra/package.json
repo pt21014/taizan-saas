@@ -6,6 +6,12 @@
   },
   "type": "module",
   "description": "集群安全的基础设施层：Redis 薄封装、分布式锁（Lua 释放 + watchdog 续期）、@LeaderCron（多实例只跑一个）、BullMQ 队列与死信重放、幂等、租户前缀缓存、事务发件箱。根治「4 实例并发跑 cron」。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pt21014/taizan-saas.git",
+    "directory": "packages/nest-infra"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
