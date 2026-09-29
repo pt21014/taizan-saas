@@ -246,4 +246,4 @@ Changesets。Node ≥ 22。
 
 ## 许可证
 
-[MIT](LICENSE)
+[MIT](LICENSE) © 2026 钛赞
